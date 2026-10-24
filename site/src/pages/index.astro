@@ -1,0 +1,698 @@
+---
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import '@fontsource-variable/martian-mono/wdth.css';
+import Screen from '../components/Screen.astro';
+
+// The ASCII art and the author come from the app itself, so the site never drifts from it.
+const branding = readFileSync(resolve(process.cwd(), '../src/branding.rs'), 'utf8');
+const logo = [...branding.matchAll(/^\s*r"(.*)",$/gm)].map((match) => match[1]).join('\n');
+const author = branding.match(/AUTHOR: &str = "(.*)";/)?.[1];
+if (!logo || !author) throw new Error('Could not read the branding from src/branding.rs');
+
+const repo = 'https://github.com/vritik246800/SozoIDE';
+const latest = `${repo}/releases/latest`;
+const base = import.meta.env.BASE_URL;
+const asset = (path: string) => `${base.replace(/\/$/, '')}/${path}`;
+
+// Real terminal themes: background, foreground and ANSI 0-15 (Docs/development/DESIGN.md §2.2).
+const themes = [
+  { id: 'campbell', name: 'Campbell', from: 'Windows Terminal', bg: '#0C0C0C', fg: '#CCCCCC',
+    ansi: ['#0C0C0C', '#C50F1F', '#13A10E', '#C19C00', '#0037DA', '#881798', '#3A96DD', '#CCCCCC',
+      '#767676', '#E74856', '#16C60C', '#F9F1A5', '#3B78FF', '#B4009E', '#61D6D6', '#F2F2F2'] },
+  { id: 'iterm2', name: 'iTerm2', from: 'macOS', bg: '#000000', fg: '#C7C7C7',
+    ansi: ['#000000', '#C91B00', '#00C200', '#C7C400', '#0225C7', '#CA30C7', '#00C5C7', '#C7C7C7',
+      '#686868', '#FF6E67', '#5FFA68', '#FFFC67', '#6871FF', '#FF77FF', '#60FDFF', '#FFFFFF'] },
+  { id: 'ubuntu', name: 'Ubuntu', from: 'GNOME Terminal', bg: '#300A24', fg: '#FFFFFF',
+    ansi: ['#2E3436', '#CC0000', '#4E9A06', '#C4A000', '#3465A4', '#75507B', '#06989A', '#D3D7CF',
+      '#555753', '#EF2929', '#8AE234', '#FCE94F', '#729FCF', '#AD7FA8', '#34E2E2', '#EEEEEC'] },
+  { id: 'gruvbox', name: 'Gruvbox', from: 'Dark', bg: '#282828', fg: '#EBDBB2',
+    ansi: ['#282828', '#CC241D', '#98971A', '#D79921', '#458588', '#B16286', '#689D6A', '#A89984',
+      '#928374', '#FB4934', '#B8BB26', '#FABD2F', '#83A598', '#D3869B', '#8EC07C', '#EBDBB2'] },
+  { id: 'dracula', name: 'Dracula', from: 'Dark', bg: '#282A36', fg: '#F8F8F2',
+    ansi: ['#21222C', '#FF5555', '#50FA7B', '#F1FA8C', '#BD93F9', '#FF79C6', '#8BE9FD', '#F8F8F2',
+      '#6272A4', '#FF6E6E', '#69FF94', '#FFFFA5', '#D6ACFF', '#FF92DF', '#A4FFFF', '#FFFFFF'] },
+];
+const themeCss = [
+  ...themes.map(({ id, bg, fg, ansi }, index) => {
+    const selector = index === 0 ? `:root, :root[data-theme="${id}"]` : `:root[data-theme="${id}"]`;
+    return `${selector} { --bg: ${bg}; --fg: ${fg}; ${ansi.map((color, slot) => `--c${slot}: ${color};`).join(' ')} }`;
+  }),
+  ...themes[0].ansi.map((_, slot) => `.f${slot} { --cell: var(--c${slot}); color: var(--cell); }`),
+].join('\n');
+
+const features = [
+  { keys: [['Ctrl', 'B']], title: 'Explorer and editor',
+    text: 'Browse the project tree and open files in tabs. Edits save themselves after two idle seconds and before you switch tabs or quit. Syntax highlighting covers more than 30 languages, from Rust and Go to SQL, Astro and Mermaid, Markdown tables are shown aligned, and images render inline on Sixel, Kitty and iTerm2 terminals.' },
+  { keys: [['Ctrl', 'J'], ['Ctrl', 'Shift', 'B']], title: 'Two terminals',
+    text: 'A bottom and a right terminal, each with its own shell. Scroll back with the mouse wheel or Page Up and Page Down, and drag the dividers to resize every panel.' },
+  { keys: [['Ctrl', 'G']], title: 'Source Control',
+    text: 'Stage and commit, follow the commit graph and branches, read diffs and the history of a line or a file, and check the health of the repository. Pull is fast-forward only, and rebase or checkout ask before they run.' },
+  { keys: [['Ctrl', 'D']], title: 'Database',
+    text: 'Connect to SQLite, PostgreSQL and MySQL, write a query and run it with Ctrl+Enter or F5. Results show the rows, the affected count and the duration, and keep a history. Saved connections never write passwords to disk.' },
+  { keys: [['Ctrl', 'P'], ['Ctrl', 'Shift', 'P']], title: 'Search',
+    text: 'Find text in the open file or across the whole folder. Files listed in .gitignore stay out of the results.' },
+  { keys: [['F1'], ['F2']], title: 'Help and About',
+    text: 'Every command in one list, and the version you are running.' },
+];
+---
+
+<html lang="en" data-theme="campbell">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SozoIDE: an IDE in your terminal</title>
+    <meta name="description" content="SozoIDE puts an editor, two terminals, Git and a SQL client in one terminal window. Free and open source for Windows, macOS and Linux." />
+    <meta property="og:title" content="SozoIDE: an IDE in your terminal" />
+    <meta property="og:description" content="An editor, two terminals, Git and a SQL client in one terminal window." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={new URL(base, Astro.site)} />
+    <link rel="icon" type="image/png" href={asset('favicon.png')} />
+    <link rel="apple-touch-icon" href={asset('apple-touch-icon.png')} />
+    <style is:inline set:html={themeCss}></style>
+    <script is:inline>
+      // Pick the theme before the first paint: the saved one, else the default terminal of this OS.
+      (() => {
+        const platform = navigator.userAgentData?.platform || navigator.platform || '';
+        const os = /win/i.test(platform) ? 'windows'
+          : /mac/i.test(platform) && navigator.maxTouchPoints < 2 ? 'macos'
+          : /linux/i.test(platform) && !/android/i.test(navigator.userAgent) ? 'linux'
+          : '';
+        let saved = null;
+        try { saved = localStorage.getItem('sozo-theme'); } catch {}
+        const root = document.documentElement;
+        root.dataset.os = os;
+        root.dataset.theme = saved || { windows: 'campbell', macos: 'iterm2', linux: 'ubuntu' }[os] || 'campbell';
+      })();
+    </script>
+  </head>
+  <body>
+    <header class="top">
+      <a class="brand" href={base}>SozoIDE</a>
+      <nav aria-label="Main">
+        <a href="#features">Features</a>
+        <a href="#download">Download</a>
+        <a href={repo}>GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="title">
+        <h1 id="title">Code, shells, Git and SQL in <span>one terminal window.</span></h1>
+        <p class="lede">
+          SozoIDE is a terminal-native IDE written in Rust. Run <code>sozo .</code> in any folder to
+          get an editor, two terminals, a Git browser and a SQL client side by side.
+        </p>
+        <div class="actions">
+          <a class="button" href={latest}>
+            Download<span class="for" data-for="macos"> for macOS</span><span class="for" data-for="windows"> for Windows</span><span class="for" data-for="linux"> for Linux</span>
+          </a>
+          <a class="quiet" href={repo}>Source on GitHub</a>
+        </div>
+        <p class="note">Free and open source under Apache-2.0, for Windows, macOS and Linux.</p>
+
+        <figure class="window" role="img" aria-label="SozoIDE with the Explorer, a Rust file open in the editor, cargo test in the bottom terminal and cargo run in the right terminal.">
+          <Screen />
+        </figure>
+
+        <fieldset class="themes">
+          <legend>SozoIDE has no colors of its own: it draws with the 16 colors of your terminal theme. Try another theme on this page.</legend>
+          <div class="theme-list">
+            {themes.map((theme) => (
+              <button type="button" data-theme-option={theme.id} aria-pressed="false">
+                <span class="swatch" aria-hidden="true">
+                  {theme.ansi.map((color) => <i style={`background:${color}`}></i>)}
+                </span>
+                <span class="theme-name">{theme.name}</span>
+                <span class="theme-from">{theme.from}</span>
+              </button>
+            ))}
+          </div>
+        </fieldset>
+      </section>
+
+      <section id="features" aria-labelledby="features-title">
+        <h2 id="features-title">One key for each tool</h2>
+        <dl class="keymap">
+          {features.map((feature) => (
+            <div class="key-row">
+              <dt>
+                {feature.keys.map((combo, index) => (
+                  <span class="combo">
+                    {index > 0 && <span class="or">or</span>}
+                    {combo.map((key) => <kbd>{key}</kbd>)}
+                  </span>
+                ))}
+              </dt>
+              <dd>
+                <h3>{feature.title}</h3>
+                <p>{feature.text}</p>
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      <section id="download" aria-labelledby="download-title">
+        <h2 id="download-title">Download</h2>
+        <p class="section-lede">
+          Installers for the latest release. Each one puts the <code>sozo</code> command on your PATH;
+          then open a terminal in any project and run <code>sozo .</code>
+        </p>
+        <div class="platforms">
+          <article class="platform" data-platform="macos">
+            <h3>macOS <span class="yours">This device</span></h3>
+            <p class="file">SozoIDE-<var>version</var>-universal.pkg</p>
+            <p>Apple silicon and Intel. Installs SozoIDE.app and <code>/usr/local/bin/sozo</code>.</p>
+            <pre><code>sudo installer -pkg SozoIDE-*.pkg -target /</code></pre>
+            <p class="caveat">The package is not notarized yet. If macOS blocks it, open System Settings, Privacy &amp; Security, and choose Open Anyway.</p>
+            <a class="button" href={latest}>Get the .pkg</a>
+          </article>
+          <article class="platform" data-platform="windows">
+            <h3>Windows <span class="yours">This device</span></h3>
+            <p class="file">SozoIDE-<var>version</var>-x86_64.msi</p>
+            <p>Installs for your user only, without administrator rights, and adds <code>sozo</code> to your PATH.</p>
+            <p class="caveat">The installer is not signed yet. If SmartScreen appears, choose More info, then Run anyway.</p>
+            <a class="button" href={latest}>Get the .msi</a>
+          </article>
+          <article class="platform" data-platform="linux">
+            <h3>Linux <span class="yours">This device</span></h3>
+            <p class="file">.deb, .rpm and .tar.gz for x86_64</p>
+            <pre><code>sudo apt install ./sozoide_*.deb
+sudo dnf install ./sozoide-*.rpm</code></pre>
+            <p>On any other distribution, copy <code>sozo</code> from the .tar.gz into a folder on your PATH.</p>
+            <a class="button" href={latest}>Get a Linux package</a>
+          </article>
+        </div>
+        <p class="checksums">Every release lists the SHA-256 of each file in <code>SHA256SUMS.txt</code>.</p>
+      </section>
+
+      <section id="source" aria-labelledby="source-title">
+        <h2 id="source-title">Build from source</h2>
+        <p class="section-lede">You need Rust stable and Git.</p>
+        <pre><code>git clone https://github.com/vritik246800/SozoIDE.git
+cd SozoIDE
+cargo build --release
+./target/release/sozo .</code></pre>
+      </section>
+    </main>
+
+    <footer class="bottom">
+      <pre class="logo" aria-hidden="true">{logo}</pre>
+      <p>SozoIDE by {author}. Licensed under Apache-2.0. <a href={repo}>Source on GitHub</a></p>
+    </footer>
+
+    <script>
+      const root = document.documentElement;
+      const options = [...document.querySelectorAll<HTMLButtonElement>('[data-theme-option]')];
+      const mark = () => {
+        for (const option of options) {
+          option.setAttribute('aria-pressed', String(option.dataset.themeOption === root.dataset.theme));
+        }
+      };
+      for (const option of options) {
+        option.addEventListener('click', () => {
+          root.dataset.theme = option.dataset.themeOption;
+          try {
+            localStorage.setItem('sozo-theme', root.dataset.theme ?? '');
+          } catch {
+            // Without storage the theme still changes for this visit.
+          }
+          mark();
+        });
+      }
+      mark();
+    </script>
+
+    <style is:global>
+      :root {
+        color-scheme: dark;
+        --accent: var(--c6);
+        --muted: var(--c7);
+        --line: var(--c8);
+        --display: 'Martian Mono Variable', ui-monospace, monospace;
+        --mono: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+        --ease: cubic-bezier(0.33, 1, 0.68, 1);
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html {
+        background: var(--bg);
+        color: var(--fg);
+      }
+
+      body {
+        margin: 0;
+        font: 1.0625rem / 1.6 system-ui, sans-serif;
+      }
+
+      @media (prefers-reduced-motion: no-preference) {
+        html,
+        html * {
+          transition:
+            color 160ms var(--ease),
+            background-color 160ms var(--ease),
+            border-color 160ms var(--ease);
+        }
+      }
+
+      a {
+        color: var(--accent);
+        text-underline-offset: 0.2em;
+      }
+
+      a:focus-visible,
+      button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 3px;
+      }
+
+      code,
+      pre,
+      kbd,
+      var {
+        font-family: var(--mono);
+        font-style: normal;
+      }
+
+      code {
+        font-size: 0.92em;
+      }
+
+      pre {
+        margin: 0;
+        overflow-x: auto;
+        padding: 14px 16px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        font-size: 0.9rem;
+        line-height: 1.5;
+      }
+
+      h1,
+      h2,
+      h3 {
+        font-family: var(--display);
+        font-stretch: 112.5%;
+        font-weight: 700;
+        line-height: 1.1;
+        letter-spacing: -0.02em;
+        margin: 0;
+      }
+
+      .top,
+      main > section,
+      .bottom {
+        width: min(100% - 32px, 76rem);
+        margin-inline: auto;
+      }
+
+      .top {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px 24px;
+        padding-block: 20px;
+      }
+
+      .brand {
+        color: var(--accent);
+        font-family: var(--display);
+        font-stretch: 112.5%;
+        font-weight: 800;
+        text-decoration: none;
+      }
+
+      .top nav {
+        display: flex;
+        gap: 20px;
+      }
+
+      .top nav a {
+        color: var(--fg);
+        text-decoration: none;
+      }
+
+      .top nav a:hover {
+        color: var(--accent);
+      }
+
+      .hero {
+        padding-block: clamp(32px, 6vw, 72px) 24px;
+      }
+
+      .hero h1 {
+        font-size: clamp(2.25rem, 1.2rem + 3.2vw, 3.4rem);
+        line-height: 1.04;
+        text-wrap: pretty;
+      }
+
+      .hero h1 span {
+        color: var(--accent);
+      }
+
+      .lede {
+        max-width: 44rem;
+        margin: 24px 0 0;
+        font-size: 1.2rem;
+        color: var(--muted);
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 16px 28px;
+        margin-top: 32px;
+      }
+
+      .button {
+        display: inline-block;
+        padding: 12px 20px;
+        border-radius: 6px;
+        background: var(--accent);
+        color: var(--bg);
+        font-weight: 700;
+        text-decoration: none;
+      }
+
+      .button:hover {
+        text-decoration: underline;
+      }
+
+      .for {
+        display: none;
+      }
+
+      [data-os='macos'] [data-for='macos'],
+      [data-os='windows'] [data-for='windows'],
+      [data-os='linux'] [data-for='linux'] {
+        display: inline;
+      }
+
+      .quiet {
+        color: var(--fg);
+      }
+
+      .note {
+        margin: 16px 0 0;
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+
+      .window {
+        container-type: inline-size;
+        margin: 48px 0 0;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+      }
+
+      .screen {
+        --cell: var(--fg);
+        margin: 0;
+        padding: 0;
+        border: 0;
+        overflow: hidden;
+        font-size: calc((100cqi - 1px) / 80);
+        line-height: 1.18;
+        white-space: pre;
+      }
+
+      .screen .b {
+        font-weight: 700;
+      }
+
+      .screen .r {
+        background: var(--cell);
+        color: var(--bg);
+      }
+
+      @media (prefers-reduced-motion: no-preference) {
+        .screen .cursor {
+          animation: blink 1.06s steps(1) infinite;
+        }
+      }
+
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+
+      .themes {
+        display: none;
+        margin: 20px 0 0;
+        padding: 0;
+        border: 0;
+      }
+
+      /* data-os is set by the head script, so the picker only shows when it can work. */
+      [data-os] .themes {
+        display: block;
+      }
+
+      .themes legend {
+        padding: 0;
+        margin-bottom: 12px;
+        color: var(--muted);
+      }
+
+      .theme-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+        gap: 10px;
+      }
+
+      .theme-list button {
+        display: grid;
+        gap: 4px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: transparent;
+        color: var(--fg);
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .theme-list button[aria-pressed='true'] {
+        border: 2px solid var(--accent);
+        padding: 9px 11px;
+      }
+
+      .theme-list button[aria-pressed='true'] .theme-name {
+        color: var(--accent);
+      }
+
+      .swatch {
+        display: grid;
+        grid-template-columns: repeat(8, 1fr);
+        height: 16px;
+        margin-bottom: 4px;
+        border-radius: 3px;
+        overflow: hidden;
+      }
+
+      .theme-name {
+        font-weight: 700;
+      }
+
+      .theme-from {
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      main > section + section {
+        padding-block: clamp(48px, 8vw, 96px) 0;
+      }
+
+      h2 {
+        font-size: clamp(1.5rem, 1.2rem + 1.4vw, 2.1rem);
+      }
+
+      .section-lede {
+        max-width: 44rem;
+        margin: 16px 0 0;
+        color: var(--muted);
+      }
+
+      .keymap {
+        margin: 32px 0 0;
+      }
+
+      .key-row {
+        display: grid;
+        grid-template-columns: minmax(12rem, 16rem) 1fr;
+        gap: 8px 32px;
+        padding-block: 22px;
+        border-top: 1px solid var(--line);
+      }
+
+      .key-row dt {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 8px;
+      }
+
+      .combo {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 4px;
+      }
+
+      .or {
+        margin-right: 4px;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      kbd {
+        display: inline-block;
+        min-width: 1.9em;
+        padding: 1px 7px;
+        border: 1px solid var(--line);
+        border-bottom-width: 3px;
+        border-radius: 5px;
+        font-size: 0.85rem;
+        text-align: center;
+      }
+
+      .key-row dd {
+        margin: 0;
+      }
+
+      .key-row h3 {
+        font-size: 1.05rem;
+      }
+
+      .key-row p {
+        max-width: 46rem;
+        margin: 8px 0 0;
+        color: var(--muted);
+      }
+
+      .platforms {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+        margin-top: 32px;
+      }
+
+      .platform {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        min-width: 0;
+        padding: 20px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+      }
+
+      .platform p {
+        margin: 0;
+      }
+
+      .platform .button {
+        align-self: flex-start;
+        margin-top: auto;
+      }
+
+      .platform h3 {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        font-size: 1.3rem;
+      }
+
+      .yours {
+        display: none;
+        font-family: system-ui, sans-serif;
+        font-size: 0.8rem;
+        font-weight: 600;
+        letter-spacing: 0;
+        color: var(--accent);
+      }
+
+      [data-os='macos'] [data-platform='macos'],
+      [data-os='windows'] [data-platform='windows'],
+      [data-os='linux'] [data-platform='linux'] {
+        border: 2px solid var(--accent);
+        padding: 19px;
+      }
+
+      [data-os='macos'] [data-platform='macos'] .yours,
+      [data-os='windows'] [data-platform='windows'] .yours,
+      [data-os='linux'] [data-platform='linux'] .yours {
+        display: inline;
+      }
+
+      .file {
+        font-family: var(--mono);
+        font-size: 0.9rem;
+        color: var(--accent);
+        overflow-wrap: anywhere;
+      }
+
+      .caveat {
+        font-size: 0.92rem;
+        color: var(--muted);
+      }
+
+      .checksums {
+        margin: 20px 0 0;
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+
+      #source pre {
+        margin-top: 24px;
+      }
+
+      .bottom {
+        display: grid;
+        justify-items: center;
+        gap: 16px;
+        padding-block: clamp(64px, 10vw, 120px) 40px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+
+      .bottom .logo {
+        padding: 0;
+        border: 0;
+        overflow: visible;
+        color: var(--accent);
+        font-size: 9px;
+        font-weight: 700;
+        line-height: 1.2;
+      }
+
+      .bottom p {
+        margin: 0;
+      }
+
+      @media (max-width: 52rem) {
+        .platforms {
+          grid-template-columns: 1fr;
+        }
+
+        .key-row {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </body>
+</html>

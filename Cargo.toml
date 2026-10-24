@@ -1,0 +1,66 @@
+[package]
+name = "SozoIDE"
+version = "0.1.0"
+edition = "2024"
+authors = ["Vritik Valabdas"]
+description = "A terminal-native integrated development environment"
+license = "Apache-2.0"
+repository = "https://github.com/vritik246800/SozoIDE"
+homepage = "https://vritik246800.github.io/SozoIDE/"
+
+[[bin]]
+name = "sozo"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+crossterm = "0.29"
+directories = "6.0"
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+ignore = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "ico", "webp"] }
+keyring = "3.6"
+nerd_fonts = "0.1.9"
+portable-pty = "0.9"
+ratatui = "0.30.2"
+ratatui-image = { version = "10.0", default-features = false, features = ["crossterm"] }
+serde = { version = "1.0", features = ["derive"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "mysql", "any"] }
+syntect = { version = "5.3", default-features = false, features = ["parsing", "dump-load", "default-syntaxes", "regex-fancy"] }
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "sync"] }
+toml = "0.9"
+tui-term = "0.3.4"
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+vt100 = "0.16.2"
+wait-timeout = "0.2"
+
+[dev-dependencies]
+tempfile = "3.23"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[package.metadata.deb]
+name = "sozoide"
+maintainer = "Vritik Valabdas"
+section = "devel"
+priority = "optional"
+assets = [
+    ["target/release/sozo", "usr/bin/sozo", "755"],
+    ["packaging/linux/sozoide.desktop", "usr/share/applications/sozoide.desktop", "644"],
+    ["assets/Sozo.png", "usr/share/icons/hicolor/256x256/apps/sozoide.png", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "sozoide"
+assets = [
+    { source = "target/release/sozo", dest = "/usr/bin/sozo", mode = "755" },
+    { source = "packaging/linux/sozoide.desktop", dest = "/usr/share/applications/sozoide.desktop", mode = "644" },
+    { source = "assets/Sozo.png", dest = "/usr/share/icons/hicolor/256x256/apps/sozoide.png", mode = "644" },
+]
+
+[package.metadata.wix]
+include = ["packaging/windows/main.wxs"]
+

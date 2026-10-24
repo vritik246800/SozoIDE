@@ -1,0 +1,14 @@
+{
+  "name": "sozoide-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@fontsource-variable/martian-mono": "5.3.0",
+    "astro": "7.4.0"
+  }
+}

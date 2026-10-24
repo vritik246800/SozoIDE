@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>SozoIDE</string>
+    <key>CFBundleDisplayName</key><string>SozoIDE</string>
+    <key>CFBundleIdentifier</key><string>com.vritikvalabdas.sozoide</string>
+    <key>CFBundleVersion</key><string>SOZO_VERSION</string>
+    <key>CFBundleShortVersionString</key><string>SOZO_VERSION</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleExecutable</key><string>SozoIDE</string>
+    <key>CFBundleIconFile</key><string>SozoIDE</string>
+    <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
