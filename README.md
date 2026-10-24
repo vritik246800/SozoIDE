@@ -31,7 +31,7 @@ Download the file for your system from the [latest release](https://github.com/v
 
 | System | File | Install |
 | --- | --- | --- |
-| macOS (Apple silicon and Intel) | `SozoIDE-<version>-universal.pkg` | Open it, or run `sudo installer -pkg SozoIDE-*.pkg -target /`. Installs `SozoIDE.app` and `/usr/local/bin/sozo`. |
+| macOS (Apple silicon) | `SozoIDE-<version>-arm64.pkg` | Open it, or run `sudo installer -pkg SozoIDE-*.pkg -target /`. Installs `SozoIDE.app` and `/usr/local/bin/sozo`. |
 | Windows (x86_64) | `SozoIDE-<version>-x86_64.msi` | Open it. Installs for your user only, without administrator rights. |
 | Debian, Ubuntu | `sozoide_<version>-1_amd64.deb` | `sudo apt install ./sozoide_*.deb` |
 | Fedora, openSUSE | `sozoide-<version>-1.x86_64.rpm` | `sudo dnf install ./sozoide-*.rpm` |
@@ -99,7 +99,7 @@ cargo test
 
 | System | Command | Output |
 | --- | --- | --- |
-| macOS | `bash packaging/build-macos.sh` (needs `rustup`) | universal `.pkg` in `target/package/macos` |
+| macOS | `bash packaging/build-macos.sh` | Apple silicon `.pkg` in `target/package/macos` |
 | Linux | `bash packaging/build-linux.sh` | `.deb`, `.rpm` and `.tar.gz` in `target/package/linux` |
 | Windows | `powershell -ExecutionPolicy Bypass -File packaging/build-windows.ps1` | `.msi` in `target/wix` |
 
