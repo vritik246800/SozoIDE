@@ -4,6 +4,9 @@ on:
   workflow_dispatch:
   push:
     tags: ['v*']
+  pull_request:
+    branches: [main]
+    paths: ['packaging/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/packages.yml']
 
 permissions:
   contents: read
