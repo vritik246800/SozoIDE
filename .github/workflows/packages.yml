@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags: ['v*']
+  # On pull requests the builds wait until the repository is public, where Actions minutes are free.
   pull_request:
     branches: [main]
     paths: ['packaging/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/packages.yml']
@@ -13,6 +14,7 @@ permissions:
 
 jobs:
   windows:
+    if: github.event_name != 'pull_request' || !github.event.repository.private
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -26,6 +28,7 @@ jobs:
           if-no-files-found: error
 
   macos:
+    if: github.event_name != 'pull_request' || !github.event.repository.private
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -38,6 +41,7 @@ jobs:
           if-no-files-found: error
 
   linux:
+    if: github.event_name != 'pull_request' || !github.event.repository.private
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
