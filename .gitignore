@@ -1,0 +1,39 @@
+# Rust build output, packages and isolated packaging tools
+/target
+
+# Local documentation and agent rules - never on GitHub
+Docs/
+CLAUDE.md
+AGENTS.md
+.claude/
+
+# Landing page (Astro)
+site/node_modules/
+site/dist/
+site/.astro/
+
+# Environment files and local secrets
+.env
+.env.*
+!.env.example
+
+# Local databases created while testing the Database panel
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+npm-debug.log*
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors and vaults
+.idea/
+.vscode/
+*.swp
+*~
+.obsidian/

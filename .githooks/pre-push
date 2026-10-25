@@ -1,0 +1,8 @@
+#!/bin/sh
+# Local ruleset: main only changes through pull requests on GitHub.
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    if [ "$remote_ref" = refs/heads/main ]; then
+        echo "Pushing to main is blocked: push preview and open a pull request." >&2
+        exit 1
+    fi
+done

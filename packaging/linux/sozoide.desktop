@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=SozoIDE
+Comment=Terminal-native integrated development environment
+Exec=sozo .
+Icon=sozoide
+Terminal=true
+Categories=Development;IDE;
+Keywords=editor;git;sql;terminal;
