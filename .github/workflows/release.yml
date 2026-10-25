@@ -37,7 +37,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: sozoide-macos
-          path: target/package/macos/*.pkg
+          path: target/package/macos/*.dmg
           if-no-files-found: error
 
   linux:
@@ -82,13 +82,21 @@ jobs:
 
             | System | File | Install |
             | --- | --- | --- |
-            | macOS (Apple silicon) | `.pkg` | Open it |
+            | macOS (Apple silicon) | `.dmg` | Open it and drag SozoIDE to Applications. For the `sozo` command, see below |
             | Windows (x86_64) | `.msi` | Open it. Installs for your user only, without administrator rights |
             | Debian, Ubuntu | `.deb` | `sudo apt install ./sozoide_*.deb` |
             | Fedora, openSUSE | `.rpm` | `sudo dnf install ./sozoide-*.rpm` |
             | Other Linux (x86_64) | `.tar.gz` | Extract `sozo` into a folder on your PATH |
 
-            The installers are not signed yet. On macOS, if the package is blocked, open System Settings, Privacy & Security, and choose Open Anyway. On Windows, if SmartScreen appears, choose More info, then Run anyway. `SHA256SUMS.txt` has the checksum of every file.
+            On macOS, the app is not signed yet. To open it and to run `sozo` from any terminal, run once:
+
+            ```sh
+            xattr -dr com.apple.quarantine /Applications/SozoIDE.app
+            sudo mkdir -p /usr/local/bin
+            sudo ln -sf /Applications/SozoIDE.app/Contents/MacOS/sozo /usr/local/bin/sozo
+            ```
+
+            The Windows installer is not signed yet either: if SmartScreen appears, choose More info, then Run anyway. `SHA256SUMS.txt` has the checksum of every file.
         run: |
           sha256sum -- * > SHA256SUMS.txt
           gh release create "$GITHUB_REF_NAME" ./* --verify-tag --generate-notes --notes "$NOTES" --title "SozoIDE $GITHUB_REF_NAME"
