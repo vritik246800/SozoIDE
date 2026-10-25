@@ -17,7 +17,7 @@ pub(crate) use components::{
     ACTIVE, BORDER, MUTED, TEXT, centered, panel_block, reveal, scale_centered, scale_length,
 };
 use editor::{render_editor, render_explorer, render_tabs, render_terminal};
-use overlays::{render_about, render_help, render_search, render_splash};
+use overlays::{render_about, render_help, render_search, render_splash, render_update};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -114,6 +114,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.overlay {
         Overlay::Help => render_help(frame, area, app.motion.overlay()),
         Overlay::About => render_about(frame, area, app.motion.overlay()),
+        Overlay::Update => {
+            let progress = app.motion.overlay();
+            render_update(frame, app, area, progress);
+        }
         Overlay::None => {}
     }
     if app.splash_visible {
@@ -432,6 +436,35 @@ mod tests {
         }
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(buffer_text(&terminal).contains("│ Name │ Age │"));
+    }
+
+    #[test]
+    fn renders_the_update_notice_progress_and_errors() {
+        use crate::update::{UpdateState, Updater};
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        app.updater = Updater::offering("99.0.0", directory.path().join("update.toml"));
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        settle(&mut app);
+        assert_eq!(app.overlay, Overlay::Update);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("SozoIDE 99.0.0 is available"));
+        assert!(text.contains("Skip this version [S]"));
+        assert!(app.regions.update_install.width > 0 && app.regions.update_skip.width > 0);
+
+        app.updater.state = UpdateState::Downloading {
+            received: 5_000_000,
+            total: Some(10_000_000),
+        };
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("5.0 / 10.0 MB"));
+        assert_eq!(app.regions.update_install.width, 0);
+
+        app.updater.state = UpdateState::Failed("Download cancelled".to_string());
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("The update failed: Download cancelled"));
     }
 
     fn settle(app: &mut App) {

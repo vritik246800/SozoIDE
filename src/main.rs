@@ -6,6 +6,7 @@ mod editor;
 mod git;
 mod terminal;
 mod ui;
+mod update;
 
 use std::{
     env, io,
@@ -57,7 +58,14 @@ fn main() -> Result<()> {
         DisableMouseCapture
     )?;
     terminal.show_cursor()?;
-    result
+    result?;
+    if let Some(file) = app.updater.ready_file().map(PathBuf::from) {
+        let root = app.root.clone();
+        // Closes the shells of both terminals before the new version takes over.
+        drop(app);
+        update::install_and_restart(&file, &root)?;
+    }
+    Ok(())
 }
 
 /// Asks the terminal which image protocol it speaks. Inside tmux the question travels through

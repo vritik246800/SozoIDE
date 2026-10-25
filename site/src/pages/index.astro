@@ -12,6 +12,9 @@ if (!logo || !author) throw new Error('Could not read the branding from src/bran
 
 const repo = 'https://github.com/vritik246800/SozoIDE';
 const latest = `${repo}/releases/latest`;
+// Package names carry no version, so these always download the file of the latest release
+// (CLAUDE.md §10). The same names are what the app's updater downloads.
+const download = (file: string) => `${repo}/releases/latest/download/SozoIDE-${file}`;
 const base = import.meta.env.BASE_URL;
 const asset = (path: string) => `${base.replace(/\/$/, '')}/${path}`;
 
@@ -113,7 +116,7 @@ const title = 'Code, shells, Git and SQL in one terminal window.'
           get an editor, two terminals, a Git browser and a SQL client side by side.
         </p>
         <div class="actions">
-          <a class="button" href={latest}>
+          <a class="button" href={latest} data-download={download('')}>
             Download<span class="for" data-for="macos"> for macOS</span><span class="for" data-for="windows"> for Windows</span><span class="for" data-for="linux"> for Linux</span>
           </a>
           <a class="quiet" href={repo}>Source on GitHub</a>
@@ -172,28 +175,30 @@ const title = 'Code, shells, Git and SQL in one terminal window.'
         <div class="platforms">
           <article class="platform reveal" data-platform="macos">
             <h3>macOS <span class="yours">This device</span></h3>
-            <p class="file">SozoIDE-<var>version</var>-arm64.dmg</p>
-            <p>For Apple silicon Macs. Drag SozoIDE to Applications, then run this once to open it and put <code>sozo</code> on your PATH.</p>
-            <pre><code>xattr -dr com.apple.quarantine /Applications/SozoIDE.app
-sudo mkdir -p /usr/local/bin
-sudo ln -sf /Applications/SozoIDE.app/Contents/MacOS/sozo /usr/local/bin/sozo</code></pre>
-            <p class="caveat">The app is not notarized yet, so macOS quarantines it until you run the first line.</p>
-            <a class="button" href={latest}>Get the .dmg</a>
+            <p class="file">SozoIDE-macos-arm64.dmg</p>
+            <p>For Apple silicon Macs. Open it, drag SozoIDE to Applications and open the app: it offers to install the <code>sozo</code> command.</p>
+            <p class="caveat">The app is not notarized yet. If macOS does not open it, go to System Settings, Privacy &amp; Security, and choose Open Anyway.</p>
+            <a class="button" href={download('macos-arm64.dmg')}>Download the .dmg</a>
           </article>
           <article class="platform reveal" data-platform="windows">
             <h3>Windows <span class="yours">This device</span></h3>
-            <p class="file">SozoIDE-<var>version</var>-x86_64.msi or -aarch64.msi</p>
-            <p>For x86_64 and ARM64 PCs. Installs for your user only, without administrator rights, and adds <code>sozo</code> to your PATH.</p>
+            <p class="file">SozoIDE-windows-x86_64.msi or -arm64.msi</p>
+            <p>A setup wizard that installs for your user only, without administrator rights, and adds <code>sozo</code> to your PATH.</p>
             <p class="caveat">The installer is not signed yet. If SmartScreen appears, choose More info, then Run anyway.</p>
-            <a class="button" href={latest}>Get the .msi</a>
+            <p class="links">Also for ARM64 PCs: <a href={download('windows-arm64.msi')}>SozoIDE-windows-arm64.msi</a></p>
+            <a class="button" href={download('windows-x86_64.msi')}>Download the .msi</a>
           </article>
           <article class="platform reveal" data-platform="linux">
             <h3>Linux <span class="yours">This device</span></h3>
             <p class="file">.deb, .rpm and .tar.gz for x86_64 and ARM64</p>
-            <pre><code>sudo apt install ./sozoide_*.deb
-sudo dnf install ./sozoide-*.rpm</code></pre>
-            <p>On any other distribution, copy <code>sozo</code> from the .tar.gz into a folder on your PATH.</p>
-            <a class="button" href={latest}>Get a Linux package</a>
+            <p>Open the .deb or .rpm in your software installer, or install it from a terminal. Either way you get <code>sozo</code> in <code>/usr/bin</code>.</p>
+            <pre><code>sudo apt install ./SozoIDE-linux-*.deb
+sudo dnf install ./SozoIDE-linux-*.rpm</code></pre>
+            <p class="links">
+              x86_64: <a href={download('linux-x86_64.deb')}>.deb</a> <a href={download('linux-x86_64.rpm')}>.rpm</a> <a href={download('linux-x86_64.tar.gz')}>.tar.gz</a><br />
+              ARM64: <a href={download('linux-arm64.deb')}>.deb</a> <a href={download('linux-arm64.rpm')}>.rpm</a> <a href={download('linux-arm64.tar.gz')}>.tar.gz</a>
+            </p>
+            <a class="button" href={download('linux-x86_64.deb')}>Download the .deb</a>
           </article>
         </div>
         <p class="checksums reveal">Every release lists the SHA-256 of each file in <code>SHA256SUMS.txt</code>.</p>
@@ -216,6 +221,28 @@ cargo build --release
 
     <script>
       const root = document.documentElement;
+
+      // The main button downloads the package of this system; ARM is only visible to Chromium
+      // (userAgentData) and to Linux browsers (navigator.platform). Unknown systems keep the
+      // release page.
+      const packages: Record<string, string> = {
+        macos: 'macos-arm64.dmg',
+        windows: 'windows-x86_64.msi',
+        linux: 'linux-x86_64.deb',
+      };
+      const downloadButton = document.querySelector<HTMLAnchorElement>('[data-download]');
+      const setPackage = (file: string) => {
+        if (downloadButton) downloadButton.href = downloadButton.dataset.download + file;
+      };
+      const detected = packages[root.dataset.os ?? ''];
+      if (detected) {
+        const arm = (file: string) => file.replace('x86_64', 'arm64');
+        setPackage(/aarch64|arm/i.test(navigator.platform) ? arm(detected) : detected);
+        (navigator as Navigator & { userAgentData?: { getHighEntropyValues(hints: string[]): Promise<{ architecture?: string }> } })
+          .userAgentData?.getHighEntropyValues(['architecture'])
+          .then(({ architecture }) => { if (architecture === 'arm') setPackage(arm(detected)); })
+          .catch(() => {});
+      }
 
       // First, so a failure below never leaves blocks hidden: each block rises once when it
       // scrolls into view, and blocks that enter together follow one another.
@@ -732,6 +759,10 @@ cargo build --release
         font-size: 0.9rem;
         color: var(--accent);
         overflow-wrap: anywhere;
+      }
+
+      .links a {
+        margin-right: 0.6em;
       }
 
       .caveat {

@@ -12,6 +12,7 @@ use crate::{
     editor::{OpenFile, SearchState},
     git::controller::GitController,
     terminal::Terminal,
+    update::{UpdateState, Updater},
 };
 
 mod explorer;
@@ -52,6 +53,7 @@ pub struct App {
     pub search: Option<SearchState>,
     pub splash_visible: bool,
     pub motion: AppMotion,
+    pub updater: Updater,
     splash_until: Instant,
     picker: Picker,
     drag: Option<DragTarget>,
@@ -98,6 +100,7 @@ impl App {
             search: None,
             splash_visible: splash,
             motion: AppMotion::new(now, splash),
+            updater: Updater::new(crate::update::enabled()),
             splash_until: now + Duration::from_millis(1400),
             picker,
             drag: None,
@@ -143,6 +146,27 @@ impl App {
         }
         self.database.tick_at(now);
         self.git.tick_at(now);
+        self.tick_update();
+    }
+
+    /// Shows the update notice once nothing else is on screen; quits to install when the
+    /// download is done (`main` installs and restarts).
+    fn tick_update(&mut self) {
+        self.updater.tick();
+        match self.updater.state {
+            UpdateState::Available
+                if self.overlay == Overlay::None
+                    && !self.splash_visible
+                    && self.search.is_none() =>
+            {
+                self.open_overlay(Overlay::Update);
+            }
+            UpdateState::Ready(_) => {
+                self.flush_all_files();
+                self.should_quit = true;
+            }
+            _ => {}
+        }
     }
 
     pub fn icon(&self, name: &str) -> char {

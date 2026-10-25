@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/vritik246800/SozoIDE/actions/workflows/ci.yml"><img src="https://github.com/vritik246800/SozoIDE/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status"></a>
-  <a href="https://github.com/vritik246800/SozoIDE/releases/latest">Download</a> ·
+  <a href="#install">Download</a> ·
   <a href="https://vritik246800.github.io/SozoIDE/">Website</a> ·
   <a href="LICENSE">Apache-2.0</a>
 </p>
@@ -27,26 +27,20 @@
 
 ## Install
 
-Download the file for your system from the [latest release](https://github.com/vritik246800/SozoIDE/releases/latest). Every installer gives you the `sozo` command.
+Download the installer for your system and open it. Then open a new terminal in any folder and run `sozo .`
 
-| System | File | Install |
+| System | Download | Install |
 | --- | --- | --- |
-| macOS (Apple silicon) | `SozoIDE-<version>-arm64.dmg` | Open it and drag SozoIDE to Applications, then link the `sozo` command (below). |
-| Windows (x86_64, ARM64) | `SozoIDE-<version>-x86_64.msi`, `SozoIDE-<version>-aarch64.msi` | Open it. Installs for your user only, without administrator rights. |
-| Debian, Ubuntu | `sozoide_<version>-1_amd64.deb`, `sozoide_<version>-1_arm64.deb` | `sudo apt install ./sozoide_*.deb` |
-| Fedora, openSUSE | `sozoide-<version>-1.x86_64.rpm`, `sozoide-<version>-1.aarch64.rpm` | `sudo dnf install ./sozoide-*.rpm` |
-| Other Linux | `SozoIDE-<version>-x86_64-linux.tar.gz`, `SozoIDE-<version>-aarch64-linux.tar.gz` | Extract `sozo` into a folder on your PATH. |
+| macOS (Apple silicon) | [SozoIDE-macos-arm64.dmg](https://github.com/vritik246800/SozoIDE/releases/latest/download/SozoIDE-macos-arm64.dmg) | Drag SozoIDE to Applications and open the app once: it offers to install the `sozo` command in `/usr/local/bin`. |
+| Windows x86_64 | [SozoIDE-windows-x86_64.msi](https://github.com/vritik246800/SozoIDE/releases/latest/download/SozoIDE-windows-x86_64.msi) | Follow the setup wizard. Installs for your user only, without administrator rights, and adds `sozo` to your PATH. |
+| Windows ARM64 | [SozoIDE-windows-arm64.msi](https://github.com/vritik246800/SozoIDE/releases/latest/download/SozoIDE-windows-arm64.msi) | Same as x86_64. |
+| Debian, Ubuntu | [x86_64](https://github.com/vritik246800/SozoIDE/releases/latest/download/SozoIDE-linux-x86_64.deb), [ARM64](https://github.com/vritik246800/SozoIDE/releases/latest/download/SozoIDE-linux-arm64.deb) `.deb` | Open it in your software installer, or `sudo apt install ./SozoIDE-linux-*.deb` |
+| Fedora, openSUSE | [x86_64](https://github.com/vritik246800/SozoIDE/releases/latest/download/SozoIDE-linux-x86_64.rpm), [ARM64](https://github.com/vritik246800/SozoIDE/releases/latest/download/SozoIDE-linux-arm64.rpm) `.rpm` | Open it in your software installer, or `sudo dnf install ./SozoIDE-linux-*.rpm` |
+| Other Linux | [x86_64](https://github.com/vritik246800/SozoIDE/releases/latest/download/SozoIDE-linux-x86_64.tar.gz), [ARM64](https://github.com/vritik246800/SozoIDE/releases/latest/download/SozoIDE-linux-arm64.tar.gz) `.tar.gz` | Extract `sozo` into a folder on your PATH. |
 
 The installers are not signed yet:
 
-- **macOS:** remove the download quarantine and put `sozo` on your PATH, once:
-
-  ```sh
-  xattr -dr com.apple.quarantine /Applications/SozoIDE.app
-  sudo mkdir -p /usr/local/bin
-  sudo ln -sf /Applications/SozoIDE.app/Contents/MacOS/sozo /usr/local/bin/sozo
-  ```
-
+- **macOS:** if the app does not open, go to System Settings, Privacy & Security, and choose Open Anyway.
 - **Windows:** if SmartScreen appears, choose More info, then Run anyway.
 
 Each release includes `SHA256SUMS.txt`. Check a download with `shasum -a 256 -c SHA256SUMS.txt --ignore-missing` on macOS, `sha256sum -c SHA256SUMS.txt --ignore-missing` on Linux, or `Get-FileHash` on Windows.
@@ -83,6 +77,10 @@ sozo --version
 | Mouse wheel | Scroll panels and terminal history |
 | Drag a divider | Resize the Explorer and the terminals |
 
+### Updates
+
+When a newer release is out, SozoIDE tells you at startup. Press `Enter` (or `U`) to update: SozoIDE downloads the installer for your system, installs it and restarts in the same folder. Press `S` to skip that version, or `Esc` to decide later. On Debian, Ubuntu and Fedora the update runs `sudo`, so it asks for your password. Set `SOZO_NO_UPDATE_CHECK=1` to turn the check off.
+
 ## Build from source
 
 You need Rust stable and Git.
@@ -110,7 +108,7 @@ cargo test
 | Linux | `bash packaging/build-linux.sh` | `.deb`, `.rpm` and `.tar.gz` in `target/package/linux` |
 | Windows | `powershell -ExecutionPolicy Bypass -File packaging/build-windows.ps1` | `.msi` in `target/wix` |
 
-Packaging tools are installed into `target/tools`, never globally.
+Packaging tools are installed into `target/tools`, never globally. `bash packaging/test-install.sh` (macOS, Linux) and `packaging/test-install.ps1` (Windows) install the package the way a user would and check `sozo --version`.
 
 ### Website
 
@@ -123,7 +121,7 @@ npm run dev
 ## Project layout
 
 ```text
-src/          the application: app, editor, terminal, git, database, ui, animation
+src/          the application: app, editor, terminal, git, database, update, ui, animation
 tests/        CLI, end-to-end and interaction tests in a real PTY
 packaging/    native installers for Linux, macOS and Windows
 site/         landing page (Astro), published to GitHub Pages
@@ -143,7 +141,7 @@ assets/       logo
 
 1. Raise `version` in `Cargo.toml` on `preview` and merge it into `main` through a pull request.
 2. Tag `main` with the same version and push the tag: `git tag v0.1.0 && git push origin v0.1.0`
-3. The Release workflow builds every installer and publishes the release with install notes and `SHA256SUMS.txt`.
+3. The Release workflow builds every installer, installs it on its own system, and publishes the release with install notes and `SHA256SUMS.txt`. Package names carry no version, so `releases/latest/download/<name>` always points at the newest one.
 
 ## Security
 

@@ -26,7 +26,10 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 cargo deb --no-build
 cargo generate-rpm
-cp target/debian/*.deb "$OUT/"
-cp target/generate-rpm/*.rpm "$OUT/"
-tar -czf "$OUT/SozoIDE-$VERSION-$(uname -m)-linux.tar.gz" -C target/release sozo
+# No version in the names: the site and the updater download releases/latest/download/<name>.
+ARCH=$(uname -m)
+[[ $ARCH == aarch64 ]] && ARCH=arm64
+cp target/debian/sozoide_"$VERSION"-1_*.deb "$OUT/SozoIDE-linux-$ARCH.deb"
+cp target/generate-rpm/sozoide-"$VERSION"-1.*.rpm "$OUT/SozoIDE-linux-$ARCH.rpm"
+tar -czf "$OUT/SozoIDE-linux-$ARCH.tar.gz" -C target/release sozo
 echo "Created DEB, RPM and tar.gz packages in $OUT"

@@ -24,5 +24,8 @@ if (-not (Test-Path (Join-Path $WixBin "candle.exe"))) {
 $env:PATH = "$(Join-Path $Tools 'bin');$WixBin;$env:PATH"
 $env:WIX = "$Wix\"
 Set-Location $Root
-cargo wix
-Write-Host "Installer created under $Root\target\wix"
+# No version in the name: the site and the updater download releases/latest/download/<name>.
+$Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x86_64" }
+$Msi = Join-Path $Root "target/wix/SozoIDE-windows-$Arch.msi"
+cargo wix --nocapture --output $Msi
+Write-Host "Installer created: $Msi"
