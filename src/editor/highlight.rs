@@ -326,8 +326,10 @@ fn ansi_color(color: syntect::highlighting::Color) -> Color {
     let minimum = red.min(green).min(blue);
     let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
     if maximum - minimum < 24.0 {
+        // Near-white grays are the theme's plain text: the terminal foreground keeps them
+        // readable on light themes, where ANSI 15 is white on white.
         return if luminance > 205.0 {
-            Color::White
+            Color::Reset
         } else if luminance > 115.0 {
             Color::Gray
         } else {
@@ -485,6 +487,21 @@ mod tests {
                 "non-ANSI color for {path}"
             );
         }
+    }
+
+    #[test]
+    fn plain_text_uses_the_terminal_foreground() {
+        let highlighted = highlight_lines(Path::new("main.rs"), &["let total = count;".into()]);
+        let total = highlighted[0]
+            .iter()
+            .find(|span| span.content.contains("total"))
+            .expect("the identifier should be highlighted");
+        assert_eq!(total.style.fg, Some(Color::Reset));
+        assert!(
+            highlighted[0]
+                .iter()
+                .all(|span| span.style.fg != Some(Color::White))
+        );
     }
 
     #[test]
