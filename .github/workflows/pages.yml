@@ -3,7 +3,7 @@ name: Landing page
 on:
   push:
     branches: [main]
-    paths: ['site/**', 'src/branding.rs', '.github/workflows/pages.yml']
+    paths: ['site/**', 'src/branding.rs', 'Cargo.toml', '.github/workflows/pages.yml']
   workflow_dispatch:
 
 permissions:

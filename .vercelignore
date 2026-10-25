@@ -1,6 +1,8 @@
-# Upload only what the landing page build needs: never target/, Docs/ or CLAUDE.md.
+# Upload only what the landing page build needs (the branding and the version of the app): never
+# target/, Docs/ or CLAUDE.md.
 /*
 !/vercel.json
+!/Cargo.toml
 !/site
 /site/node_modules
 /site/dist
