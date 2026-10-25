@@ -7,10 +7,11 @@ CLAUDE.md
 AGENTS.md
 .claude/
 
-# Landing page (Astro)
+# Landing page (Astro) and the local Vercel link (project and team ids)
 site/node_modules/
 site/dist/
 site/.astro/
+.vercel/
 
 # Environment files and local secrets
 .env

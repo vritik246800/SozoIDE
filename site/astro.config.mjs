@@ -1,7 +1,10 @@
 import { defineConfig } from 'astro/config';
 
-// GitHub Pages project site: https://vritik246800.github.io/SozoIDE/
+// GitHub Pages serves the site under /SozoIDE; Vercel (VERCEL=1 at build time) serves it at the root.
+const vercel = process.env.VERCEL === '1';
+const domain = process.env.VERCEL_PROJECT_PRODUCTION_URL;
+
 export default defineConfig({
-  site: 'https://vritik246800.github.io',
-  base: '/SozoIDE',
+  site: vercel && domain ? `https://${domain}` : 'https://vritik246800.github.io',
+  base: vercel ? '/' : '/SozoIDE',
 });

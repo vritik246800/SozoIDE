@@ -1,0 +1,10 @@
+# Upload only what the landing page build needs: never target/, Docs/ or CLAUDE.md.
+/*
+!/vercel.json
+!/site
+/site/node_modules
+/site/dist
+/site/.astro
+!/src
+/src/*
+!/src/branding.rs
