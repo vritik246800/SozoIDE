@@ -27,19 +27,26 @@
 
 ## Install
 
-Download the file for your system from the [latest release](https://github.com/vritik246800/SozoIDE/releases/latest). Every installer puts the `sozo` command on your PATH.
+Download the file for your system from the [latest release](https://github.com/vritik246800/SozoIDE/releases/latest). Every installer gives you the `sozo` command.
 
 | System | File | Install |
 | --- | --- | --- |
-| macOS (Apple silicon) | `SozoIDE-<version>-arm64.pkg` | Open it, or run `sudo installer -pkg SozoIDE-*.pkg -target /`. Installs `SozoIDE.app` and `/usr/local/bin/sozo`. |
-| Windows (x86_64) | `SozoIDE-<version>-x86_64.msi` | Open it. Installs for your user only, without administrator rights. |
-| Debian, Ubuntu | `sozoide_<version>-1_amd64.deb` | `sudo apt install ./sozoide_*.deb` |
-| Fedora, openSUSE | `sozoide-<version>-1.x86_64.rpm` | `sudo dnf install ./sozoide-*.rpm` |
-| Other Linux (x86_64) | `SozoIDE-<version>-x86_64-linux.tar.gz` | Extract `sozo` into a folder on your PATH. |
+| macOS (Apple silicon) | `SozoIDE-<version>-arm64.dmg` | Open it and drag SozoIDE to Applications, then link the `sozo` command (below). |
+| Windows (x86_64, ARM64) | `SozoIDE-<version>-x86_64.msi`, `SozoIDE-<version>-aarch64.msi` | Open it. Installs for your user only, without administrator rights. |
+| Debian, Ubuntu | `sozoide_<version>-1_amd64.deb`, `sozoide_<version>-1_arm64.deb` | `sudo apt install ./sozoide_*.deb` |
+| Fedora, openSUSE | `sozoide-<version>-1.x86_64.rpm`, `sozoide-<version>-1.aarch64.rpm` | `sudo dnf install ./sozoide-*.rpm` |
+| Other Linux | `SozoIDE-<version>-x86_64-linux.tar.gz`, `SozoIDE-<version>-aarch64-linux.tar.gz` | Extract `sozo` into a folder on your PATH. |
 
 The installers are not signed yet:
 
-- **macOS:** if the package is blocked, open System Settings, Privacy & Security, and choose Open Anyway.
+- **macOS:** remove the download quarantine and put `sozo` on your PATH, once:
+
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/SozoIDE.app
+  sudo mkdir -p /usr/local/bin
+  sudo ln -sf /Applications/SozoIDE.app/Contents/MacOS/sozo /usr/local/bin/sozo
+  ```
+
 - **Windows:** if SmartScreen appears, choose More info, then Run anyway.
 
 Each release includes `SHA256SUMS.txt`. Check a download with `shasum -a 256 -c SHA256SUMS.txt --ignore-missing` on macOS, `sha256sum -c SHA256SUMS.txt --ignore-missing` on Linux, or `Get-FileHash` on Windows.
@@ -99,7 +106,7 @@ cargo test
 
 | System | Command | Output |
 | --- | --- | --- |
-| macOS | `bash packaging/build-macos.sh` | Apple silicon `.pkg` in `target/package/macos` |
+| macOS | `bash packaging/build-macos.sh` | Apple silicon `.dmg` in `target/package/macos` |
 | Linux | `bash packaging/build-linux.sh` | `.deb`, `.rpm` and `.tar.gz` in `target/package/linux` |
 | Windows | `powershell -ExecutionPolicy Bypass -File packaging/build-windows.ps1` | `.msi` in `target/wix` |
 

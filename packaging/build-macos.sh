@@ -6,7 +6,7 @@ if [[ $(uname -s) != Darwin ]]; then
     echo "The macOS package must be built on macOS." >&2
     exit 1
 fi
-for tool in cargo sips iconutil pkgbuild; do
+for tool in cargo sips iconutil hdiutil; do
     command -v "$tool" >/dev/null || { echo "Missing required tool: $tool" >&2; exit 1; }
 done
 
@@ -16,10 +16,9 @@ VERSION=$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)
 ARCH=$(uname -m)
 OUT="$ROOT/target/package/macos"
 APP="$OUT/SozoIDE.app"
-STAGING="$OUT/pkg-root"
+STAGING="$OUT/dmg-root"
 rm -rf "$OUT"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" \
-    "$STAGING/Applications" "$STAGING/usr/local/bin"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$STAGING"
 
 cargo build --release
 cp target/release/sozo "$APP/Contents/MacOS/sozo"
@@ -36,12 +35,9 @@ for size in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/SozoIDE.icns"
 
-cp -R "$APP" "$STAGING/Applications/"
-cp target/release/sozo "$STAGING/usr/local/bin/sozo"
-chmod +x "$STAGING/usr/local/bin/sozo"
-pkgbuild --root "$STAGING" \
-    --identifier com.vritikvalabdas.sozoide \
-    --version "$VERSION" \
-    --install-location / \
-    "$OUT/SozoIDE-$VERSION-$ARCH.pkg"
-echo "Created $OUT/SozoIDE-$VERSION-$ARCH.pkg"
+# Drag-and-drop disk image: the app next to a link to /Applications.
+cp -R "$APP" "$STAGING/"
+ln -s /Applications "$STAGING/Applications"
+hdiutil create -volname SozoIDE -srcfolder "$STAGING" -ov -format UDZO \
+    "$OUT/SozoIDE-$VERSION-$ARCH.dmg"
+echo "Created $OUT/SozoIDE-$VERSION-$ARCH.dmg"

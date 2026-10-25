@@ -166,28 +166,30 @@ const title = 'Code, shells, Git and SQL in one terminal window.'
       <section id="download" aria-labelledby="download-title">
         <h2 id="download-title" class="reveal">Download</h2>
         <p class="section-lede reveal">
-          Installers for the latest release. Each one puts the <code>sozo</code> command on your PATH;
+          Installers for the latest release. Each one gives you the <code>sozo</code> command;
           then open a terminal in any project and run <code>sozo .</code>
         </p>
         <div class="platforms">
           <article class="platform reveal" data-platform="macos">
             <h3>macOS <span class="yours">This device</span></h3>
-            <p class="file">SozoIDE-<var>version</var>-arm64.pkg</p>
-            <p>For Apple silicon Macs. Installs SozoIDE.app and <code>/usr/local/bin/sozo</code>.</p>
-            <pre><code>sudo installer -pkg SozoIDE-*.pkg -target /</code></pre>
-            <p class="caveat">The package is not notarized yet. If macOS blocks it, open System Settings, Privacy &amp; Security, and choose Open Anyway.</p>
-            <a class="button" href={latest}>Get the .pkg</a>
+            <p class="file">SozoIDE-<var>version</var>-arm64.dmg</p>
+            <p>For Apple silicon Macs. Drag SozoIDE to Applications, then run this once to open it and put <code>sozo</code> on your PATH.</p>
+            <pre><code>xattr -dr com.apple.quarantine /Applications/SozoIDE.app
+sudo mkdir -p /usr/local/bin
+sudo ln -sf /Applications/SozoIDE.app/Contents/MacOS/sozo /usr/local/bin/sozo</code></pre>
+            <p class="caveat">The app is not notarized yet, so macOS quarantines it until you run the first line.</p>
+            <a class="button" href={latest}>Get the .dmg</a>
           </article>
           <article class="platform reveal" data-platform="windows">
             <h3>Windows <span class="yours">This device</span></h3>
-            <p class="file">SozoIDE-<var>version</var>-x86_64.msi</p>
-            <p>Installs for your user only, without administrator rights, and adds <code>sozo</code> to your PATH.</p>
+            <p class="file">SozoIDE-<var>version</var>-x86_64.msi or -aarch64.msi</p>
+            <p>For x86_64 and ARM64 PCs. Installs for your user only, without administrator rights, and adds <code>sozo</code> to your PATH.</p>
             <p class="caveat">The installer is not signed yet. If SmartScreen appears, choose More info, then Run anyway.</p>
             <a class="button" href={latest}>Get the .msi</a>
           </article>
           <article class="platform reveal" data-platform="linux">
             <h3>Linux <span class="yours">This device</span></h3>
-            <p class="file">.deb, .rpm and .tar.gz for x86_64</p>
+            <p class="file">.deb, .rpm and .tar.gz for x86_64 and ARM64</p>
             <pre><code>sudo apt install ./sozoide_*.deb
 sudo dnf install ./sozoide-*.rpm</code></pre>
             <p>On any other distribution, copy <code>sozo</code> from the .tar.gz into a folder on your PATH.</p>
