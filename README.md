@@ -32,10 +32,10 @@ Download the file for your system from the [latest release](https://github.com/v
 | System | File | Install |
 | --- | --- | --- |
 | macOS (Apple silicon) | `SozoIDE-<version>-arm64.dmg` | Open it and drag SozoIDE to Applications, then link the `sozo` command (below). |
-| Windows (x86_64) | `SozoIDE-<version>-x86_64.msi` | Open it. Installs for your user only, without administrator rights. |
-| Debian, Ubuntu | `sozoide_<version>-1_amd64.deb` | `sudo apt install ./sozoide_*.deb` |
-| Fedora, openSUSE | `sozoide-<version>-1.x86_64.rpm` | `sudo dnf install ./sozoide-*.rpm` |
-| Other Linux (x86_64) | `SozoIDE-<version>-x86_64-linux.tar.gz` | Extract `sozo` into a folder on your PATH. |
+| Windows (x86_64, ARM64) | `SozoIDE-<version>-x86_64.msi`, `SozoIDE-<version>-aarch64.msi` | Open it. Installs for your user only, without administrator rights. |
+| Debian, Ubuntu | `sozoide_<version>-1_amd64.deb`, `sozoide_<version>-1_arm64.deb` | `sudo apt install ./sozoide_*.deb` |
+| Fedora, openSUSE | `sozoide-<version>-1.x86_64.rpm`, `sozoide-<version>-1.aarch64.rpm` | `sudo dnf install ./sozoide-*.rpm` |
+| Other Linux | `SozoIDE-<version>-x86_64-linux.tar.gz`, `SozoIDE-<version>-aarch64-linux.tar.gz` | Extract `sozo` into a folder on your PATH. |
 
 The installers are not signed yet:
 

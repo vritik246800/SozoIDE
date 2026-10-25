@@ -13,9 +13,16 @@ permissions:
   contents: read
 
 jobs:
+  # Each architecture builds natively on its own runner (CLAUDE.md §8).
   windows:
+    name: windows (${{ matrix.arch }})
     if: github.event_name != 'pull_request' || !github.event.repository.private
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - { arch: x86_64, runner: windows-latest }
+          - { arch: arm64, runner: windows-11-arm }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -23,7 +30,7 @@ jobs:
         run: packaging/build-windows.ps1
       - uses: actions/upload-artifact@v7
         with:
-          name: sozoide-windows
+          name: sozoide-windows-${{ matrix.arch }}
           path: target/wix/*.msi
           if-no-files-found: error
 
@@ -41,15 +48,21 @@ jobs:
           if-no-files-found: error
 
   linux:
+    name: linux (${{ matrix.arch }})
     if: github.event_name != 'pull_request' || !github.event.repository.private
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: bash packaging/build-linux.sh
       - uses: actions/upload-artifact@v7
         with:
-          name: sozoide-linux
+          name: sozoide-linux-${{ matrix.arch }}
           path: target/package/linux/*.*
           if-no-files-found: error
 
@@ -83,10 +96,10 @@ jobs:
             | System | File | Install |
             | --- | --- | --- |
             | macOS (Apple silicon) | `.dmg` | Open it and drag SozoIDE to Applications. For the `sozo` command, see below |
-            | Windows (x86_64) | `.msi` | Open it. Installs for your user only, without administrator rights |
-            | Debian, Ubuntu | `.deb` | `sudo apt install ./sozoide_*.deb` |
-            | Fedora, openSUSE | `.rpm` | `sudo dnf install ./sozoide-*.rpm` |
-            | Other Linux (x86_64) | `.tar.gz` | Extract `sozo` into a folder on your PATH |
+            | Windows (x86_64 or ARM64) | `x86_64.msi` or `aarch64.msi` | Open it. Installs for your user only, without administrator rights |
+            | Debian, Ubuntu | `amd64.deb` or `arm64.deb` | `sudo apt install ./sozoide_*.deb` |
+            | Fedora, openSUSE | `x86_64.rpm` or `aarch64.rpm` | `sudo dnf install ./sozoide-*.rpm` |
+            | Other Linux | `x86_64-linux.tar.gz` or `aarch64-linux.tar.gz` | Extract `sozo` into a folder on your PATH |
 
             On macOS, the app is not signed yet. To open it and to run `sozo` from any terminal, run once:
 
