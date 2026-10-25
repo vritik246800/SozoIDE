@@ -3,24 +3,26 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, Gauge, Paragraph, Wrap},
+    widgets::{Clear, Paragraph, Wrap},
 };
 
 use crate::{
-    app::App,
+    app::{App, AppMotion},
     branding::{self, ASCII_LOGO},
     editor::SearchScope,
     update::UpdateState,
 };
 
-use super::{ACTIVE, MUTED, TEXT, centered, panel_block, scale_centered};
+use super::{ACTIVE, MUTED, TEXT, bar, centered, render_dialog, scale_length, sweep_bar};
 
-pub(super) fn render_splash(frame: &mut Frame, area: Rect, progress: f32) {
-    let area = scale_centered(area, progress);
-    if area.width == 0 || area.height == 0 {
+/// The splash prints line by line, its bar sweeps while SozoIDE starts, and then the IDE is
+/// drawn over it line by line from the top (`DESIGN.md` §1.3).
+pub(super) fn render_splash(frame: &mut Frame, area: Rect, motion: &AppMotion) {
+    let cut = scale_length(area.height, motion.splash_exit());
+    let visible = Rect::new(area.x, area.y + cut, area.width, area.height - cut);
+    if visible.is_empty() {
         return;
     }
-    frame.render_widget(Clear, area);
     let mut lines = ASCII_LOGO
         .iter()
         .map(|line| Line::from(Span::styled(*line, Style::default().fg(ACTIVE))))
@@ -33,32 +35,52 @@ pub(super) fn render_splash(frame: &mut Frame, area: Rect, progress: f32) {
         )),
         Line::from(format!("Version {}", branding::VERSION)),
         Line::from(""),
+        sweep_bar(30, motion.elapsed()),
         Line::from(Span::styled("Starting...", Style::default().fg(MUTED))),
         Line::from(Span::styled(
             "Press any key to continue",
             Style::default().fg(MUTED),
         )),
     ]);
-    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
+    let top = area.height.saturating_sub(lines.len() as u16) / 2;
+    let printed = (motion.splash_draw() * lines.len() as f32).ceil() as usize;
+    lines.truncate(printed);
+    frame.render_widget(Clear, visible);
+    let first = top.max(cut);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .scroll((first - top, 0)),
+        Rect::new(area.x, area.y + first, area.width, area.height - first),
+    );
 }
 
 pub(super) fn render_search(frame: &mut Frame, app: &mut App, area: Rect) {
-    let area = scale_centered(centered(area, 84, 70), app.motion.search());
-    if area.width < 2 || area.height < 4 {
-        return;
-    }
-    frame.render_widget(Clear, area);
-    let root = app.root.clone();
-    let Some(search) = &mut app.search else {
+    let Some(search) = &app.search else {
         return;
     };
     let scope = match search.scope {
         SearchScope::CurrentFile => "Find in current file [Ctrl+P]",
         SearchScope::Workspace => "Find in workspace [Ctrl+Shift+P]",
     };
-    let block = panel_block(format!(" {scope} "), true);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let progress = app.motion.search();
+    render_dialog(
+        frame,
+        centered(area, 84, 70),
+        progress,
+        format!(" {scope} "),
+        |frame, inner| render_search_results(frame, app, inner),
+    );
+}
+
+fn render_search_results(frame: &mut Frame, app: &mut App, inner: Rect) {
+    if inner.height < 2 {
+        return;
+    }
+    let root = app.root.clone();
+    let Some(search) = &mut app.search else {
+        return;
+    };
     let sections = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(3),
@@ -124,21 +146,57 @@ pub(super) fn render_search(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 pub(super) fn render_help(frame: &mut Frame, area: Rect, progress: f32) {
-    let area = scale_centered(centered(area, 76, 84), progress);
-    if area.width < 2 || area.height < 2 {
-        return;
+    let os = std::env::consts::OS;
+    render_dialog(
+        frame,
+        centered(area, 76, 84),
+        progress,
+        format!(" Help - all commands ({}) ", os_name(os)),
+        |frame, inner| {
+            frame.render_widget(
+                Paragraph::new(help_lines(os).join("\n")).wrap(Wrap { trim: false }),
+                inner,
+            );
+        },
+    );
+}
+
+fn os_name(os: &str) -> &'static str {
+    match os {
+        "macos" => "macOS",
+        "windows" => "Windows",
+        _ => "Linux",
     }
-    frame.render_widget(Clear, area);
-    let lines = [
+}
+
+/// The Help text for `os` (`std::env::consts::OS`): the keys that reach SozoIDE differ per system.
+fn help_lines(os: &str) -> Vec<&'static str> {
+    let mac = os == "macos";
+    let mut lines = vec![
         "Navigation and panels",
         "  Ctrl+B             Toggle Explorer",
         "  Ctrl+J             Toggle bottom terminal",
-        "  Ctrl+Shift+B       Toggle right terminal",
+    ];
+    lines.extend(if mac {
+        [
+            "  Ctrl+Option+B      Toggle right terminal",
+            "                     (Option as Meta: Terminal > Settings > Profiles > Keyboard,",
+            "                     or iTerm2 > Profiles > Keys > Left Option key: Esc+)",
+        ]
+        .as_slice()
+    } else {
+        ["  Ctrl+Shift+B       Toggle right terminal"].as_slice()
+    });
+    lines.extend([
         "  Ctrl+G             Open Source Control",
         "  Ctrl+D             Open Database",
         "  Mouse drag         Resize panel dividers",
         "  Mouse wheel        Scroll panel or terminal history",
-        "  PageUp/PageDown    Scroll focused editor or terminal",
+        if mac {
+            "  fn+Up/fn+Down      Scroll focused editor or terminal (PageUp/PageDown)"
+        } else {
+            "  PageUp/PageDown    Scroll focused editor or terminal"
+        },
         "",
         "Files and search",
         "  Enter              Open file or expand directory",
@@ -149,9 +207,17 @@ pub(super) fn render_help(frame: &mut Frame, area: Rect, progress: f32) {
         "",
         "Editing",
         "  Type/paste         Edit the active text file",
-        "  Arrows/Home/End    Move the cursor",
+        if mac {
+            "  Arrows/fn+Arrows   Move the cursor (fn+Left/Right: Home/End)"
+        } else {
+            "  Arrows/Home/End    Move the cursor"
+        },
         "  Enter/Tab          Insert a new line or tab",
-        "  Backspace/Delete   Remove text",
+        if mac {
+            "  Delete/fn+Delete   Remove text before or after the cursor"
+        } else {
+            "  Backspace/Delete   Remove text"
+        },
         "  Autosave           Save after 2 idle seconds or focus change",
         "",
         "Source Control",
@@ -160,32 +226,33 @@ pub(super) fn render_help(frame: &mut Frame, area: Rect, progress: f32) {
         "",
         "Database",
         "  Ctrl+D             Connections, query editor and results",
-        "  Ctrl+Enter         Run query",
+        if mac {
+            "  Ctrl+Enter/fn+F5   Run query"
+        } else {
+            "  Ctrl+Enter/F5      Run query"
+        },
         "",
         "Updates",
-        "  Enter / U          Install the version offered",
+        match os {
+            "macos" => "  Enter / U          Install the version offered (replaces SozoIDE.app)",
+            "windows" => "  Enter / U          Install the version offered (runs the MSI installer)",
+            _ => "  Enter / U          Install the version offered (DEB/RPM ask for your sudo password)",
+        },
         "  S                  Skip that version",
         "  Esc                Later, or cancel the download",
         "",
         "Application",
-        "  F1                 Help",
-        "  F2                 About",
-        "  Ctrl+Q             Quit",
-    ];
-    frame.render_widget(
-        Paragraph::new(lines.join("\n"))
-            .wrap(Wrap { trim: false })
-            .block(panel_block(" Help - all commands ".to_string(), true)),
-        area,
-    );
+    ]);
+    lines.extend(if mac {
+        ["  fn+F1              Help", "  fn+F2              About"]
+    } else {
+        ["  F1                 Help", "  F2                 About"]
+    });
+    lines.push("  Ctrl+Q             Quit");
+    lines
 }
 
 pub(super) fn render_about(frame: &mut Frame, area: Rect, progress: f32) {
-    let area = scale_centered(centered(area, 66, 84), progress);
-    if area.width < 2 || area.height < 2 {
-        return;
-    }
-    frame.render_widget(Clear, area);
     let mut lines = ASCII_LOGO
         .iter()
         .map(|line| Line::from(Span::styled(*line, Style::default().fg(ACTIVE))))
@@ -205,36 +272,43 @@ pub(super) fn render_about(frame: &mut Frame, area: Rect, progress: f32) {
             Style::default().fg(MUTED),
         )),
     ]);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: false })
-            .block(panel_block(" About SozoIDE ".to_string(), true)),
-        area,
+    render_dialog(
+        frame,
+        centered(area, 66, 84),
+        progress,
+        " About SozoIDE ".to_string(),
+        |frame, inner| {
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: false }),
+                inner,
+            );
+        },
     );
 }
 
 pub(super) fn render_update(frame: &mut Frame, app: &mut App, area: Rect, progress: f32) {
     let width = area.width.saturating_sub(4).min(64);
     let height = area.height.min(9);
-    let area = scale_centered(
-        Rect::new(
-            area.x + area.width.saturating_sub(width) / 2,
-            area.y + area.height.saturating_sub(height) / 2,
-            width,
-            height,
-        ),
-        progress,
+    let area = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
     );
     app.regions.update_install = Rect::default();
     app.regions.update_skip = Rect::default();
-    if area.width < 2 || area.height < 2 {
-        return;
-    }
-    frame.render_widget(Clear, area);
-    let block = panel_block(" Update SozoIDE ".to_string(), true);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    render_dialog(
+        frame,
+        area,
+        progress,
+        " Update SozoIDE ".to_string(),
+        |frame, inner| render_update_state(frame, app, inner),
+    );
+}
+
+fn render_update_state(frame: &mut Frame, app: &mut App, inner: Rect) {
     let rows = Layout::vertical([Constraint::Length(1); 7]).split(inner);
     let version = app.updater.version.clone();
     let muted = |text: &str| Paragraph::new(text.to_string()).style(Style::default().fg(MUTED));
@@ -245,20 +319,24 @@ pub(super) fn render_update(frame: &mut Frame, app: &mut App, area: Rect, progre
                 rows[0],
             );
             let megabytes = |bytes: u64| bytes as f64 / 1_000_000.0;
-            let (ratio, label) = match total {
-                Some(total) => (
-                    (*received as f64 / *total as f64).min(1.0),
-                    format!("{:.1} / {:.1} MB", megabytes(*received), megabytes(*total)),
-                ),
-                None => (0.0, format!("{:.1} MB", megabytes(*received))),
+            let label = match total {
+                Some(total) => {
+                    format!("{:.1} / {:.1} MB", megabytes(*received), megabytes(*total))
+                }
+                None => format!("{:.1} MB", megabytes(*received)),
             };
-            frame.render_widget(
-                Gauge::default()
-                    .gauge_style(Style::default().fg(ACTIVE))
-                    .ratio(ratio)
-                    .label(label),
-                rows[2],
-            );
+            let parts = Layout::horizontal([
+                Constraint::Min(1),
+                Constraint::Length(label.len() as u16 + 2),
+            ])
+            .split(rows[2]);
+            let width = parts[0].width;
+            let line = match total {
+                Some(_) => bar(width, 0.0, app.motion.download() * f32::from(width)),
+                None => sweep_bar(width, app.motion.elapsed()),
+            };
+            frame.render_widget(Paragraph::new(line), parts[0]);
+            frame.render_widget(Paragraph::new(label).alignment(Alignment::Right), parts[1]);
             frame.render_widget(
                 muted("SozoIDE installs it and restarts by itself."),
                 rows[4],
@@ -325,5 +403,32 @@ pub(super) fn render_update(frame: &mut Frame, app: &mut App, area: Rect, progre
             );
             frame.render_widget(muted("Esc: later"), rows[6]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_adapts_to_each_os() {
+        let mac = help_lines("macos").join("\n");
+        assert!(mac.contains("Ctrl+Option+B      Toggle right terminal"));
+        assert!(mac.contains("Option as Meta"));
+        assert!(mac.contains("fn+F1"));
+        assert!(mac.contains("fn+F5"));
+        assert!(mac.contains("replaces SozoIDE.app"));
+        assert!(!mac.contains("Ctrl+Shift+B"));
+
+        for (os, installer) in [("windows", "MSI installer"), ("linux", "sudo password")] {
+            let text = help_lines(os).join("\n");
+            assert!(text.contains("Ctrl+Shift+B       Toggle right terminal"));
+            assert!(text.contains("  F1                 Help"));
+            assert!(text.contains("Ctrl+Enter/F5"));
+            assert!(text.contains(installer));
+            assert!(!text.contains("Option"));
+            assert!(!text.contains("fn+"));
+        }
+        assert_eq!(os_name("windows"), "Windows");
     }
 }

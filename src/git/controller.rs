@@ -347,7 +347,7 @@ fn contains(area: Rect, point: (u16, u16)) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::animation::{CONTENT_DURATION, DIALOG_DURATION};
+    use crate::animation::{DIALOG, Edge, TAB};
 
     #[test]
     fn tab_and_mode_transitions_are_synchronized() {
@@ -361,9 +361,10 @@ mod tests {
         let start = Instant::now();
         controller.tick_at(start);
         assert_eq!(controller.motion.content(), 0.0);
-        controller.tick_at(start + CONTENT_DURATION / 2);
+        assert_eq!(controller.motion.edge(), Edge::Right);
+        controller.tick_at(start + TAB.open / 2);
         assert!(controller.motion.content() > 0.0 && controller.motion.content() < 1.0);
-        controller.tick_at(start + CONTENT_DURATION);
+        controller.tick_at(start + TAB.open);
         assert_eq!(controller.motion.content(), 1.0);
 
         controller.action(GitUiAction::OpenCommit);
@@ -371,7 +372,7 @@ mod tests {
         let closed = Instant::now();
         controller.tick_at(closed);
         assert!(matches!(controller.mode, GitMode::Commit(_)));
-        controller.tick_at(closed + DIALOG_DURATION);
+        controller.tick_at(closed + DIALOG.close);
         assert_eq!(controller.mode, GitMode::None);
     }
 }

@@ -1,39 +1,22 @@
 ---
-// Generated from a real 132x34 SozoIDE capture (tmux capture-pane -e).
-// Classes fN are the 16 ANSI colors, b is bold and r is reverse video. Text without a class is
-// the terminal foreground, as the editor draws plain code.
+// One SozoIDE screen as colored text. The runs come from real captures (site/src/data/screens.json,
+// made by site/scripts/screens.py): fN is one of the 16 ANSI colors, b bold, d dim and r reverse
+// video; text without a class is the terminal foreground. `html` takes rows already built.
+interface Props {
+  runs?: [string, string][][];
+  html?: string;
+  name?: string;
+  class?: string;
+  hidden?: boolean;
+  [data: `data-${string}`]: string | number;
+}
+
+const { runs = [], html, name, class: className, hidden = false, ...data } = Astro.props;
+const escape = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const content =
+  html ??
+  runs
+    .map((row) => row.map(([text, classes]) => (classes ? `<span class="${classes}">${escape(text)}</span>` : escape(text))).join(''))
+    .join('\n');
 ---
-<pre class="screen" aria-hidden="true"><span class="f6 b"> SozoIDE </span><span class="f8"> ~/code/orbit</span>                                                                                           Help F1   About F2
-<span class="f8">╭   Explorer ────────────────╮│</span><span class="f6 b r">   lib.rs  x </span>                                             <span class="f8">│</span><span class="f6">╭    Right terminal [Ctrl+Shift+B] ──────╮</span>
-<span class="f8">│</span>+   migrations              <span class="f8">││──────────────────────────────────────────────────────────│</span><span class="f6">│</span>orbit $ cargo run -q                    <span class="f6">│</span>
-<span class="f8">│</span>-   src                     <span class="f8">││╭ ~/code/orbit/src/lib.rs ───────────────────────────────╮│</span><span class="f6">│</span>day  7  crew Sozo                       <span class="f6">│</span>
-<span class="f8">│</span><span class="f6 r">      lib.rs</span>                <span class="f8">│││ 1 | </span><span class="f4">//! Launch planning for the Orbit demo.</span>            <span class="f8">││</span><span class="f6">│</span>day 14  crew Sozo                       <span class="f6">│</span>
-<span class="f8">│</span>      main.rs               <span class="f8">│││ 2 | </span>                                                   <span class="f8">││</span><span class="f6">│</span>day 21  crew Sozo                       <span class="f6">│</span>
-<span class="f8">│</span>    .gitignore              <span class="f8">│││ 3 | </span><span class="f12">pub</span> <span class="f12">struct</span> <span class="f14">Launch</span> &#123;                                <span class="f8">││</span><span class="f6">│</span>orbit $ <span class="f7"><span class="cursor">█</span></span>                               <span class="f6">│</span>
-<span class="f8">│</span>    Cargo.lock              <span class="f8">│││ 4 | </span>    <span class="f12">pub</span> day: <span class="f12">u32</span>,                                  <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>    Cargo.toml              <span class="f8">│││ 5 | </span>    <span class="f12">pub</span> crew: <span class="f12">&amp;'static</span> <span class="f12">str</span>,                        <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>    README.md               <span class="f8">│││ 6 | </span>&#125;                                                  <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││ 7 | </span>                                                   <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││ 8 | </span><span class="f4">/// Plans one launch every seven days.</span>             <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││ 9 | </span><span class="f12">pub</span> <span class="f12">fn</span> <span class="f14">schedule</span>(count: <span class="f12">u32</span>) -&gt; <span class="f14">Vec</span>&lt;Launch&gt; &#123;       <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││10 | </span>    (<span class="f13">1</span><span class="f12">..=</span>count)                                    <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││11 | </span>        <span class="f12">.</span><span class="f14">map</span>(|week| Launch &#123; day: week <span class="f12">*</span> <span class="f13">7</span>, crew: <span class="f10">"</span><span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││12 | </span>        <span class="f12">.</span><span class="f14">collect</span>()                                 <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││13 | </span>&#125;                                                  <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││14 | </span>                                                   <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││15 | </span>#[cfg(test)]                                       <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">││╰────────────────────────────────────────────────────────╯│</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">││─                                                         │</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">││╭    Bottom terminal [Ctrl+J] ───────────────────────────╮│</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││</span>orbit $ cargo test -q --lib                             <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││</span>                                                        <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││</span>running 1 test                                          <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││</span><span class="f2">.</span>                                                       <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││</span>test result: <span class="f2">ok</span>. 1 passed; 0 failed; 0 ignored; 0 measur<span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││</span>                                                        <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││</span>orbit $                                                 <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││</span>                                                        <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││</span>                                                        <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">│</span>                            <span class="f8">│││</span>                                                        <span class="f8">││</span><span class="f6">│</span>                                        <span class="f6">│</span>
-<span class="f8">╰────────────────────────────╯│╰────────────────────────────────────────────────────────╯│</span><span class="f6">╰────────────────────────────────────────╯</span>
-<span class="f6"> Ctrl+B </span><span class="f8">Explorer  </span><span class="f6">Ctrl+J </span><span class="f8">Terminal  </span><span class="f6">Ctrl+G </span><span class="f8">Git  </span><span class="f6">Ctrl+D </span><span class="f8">Database  </span><span class="f6">Ctrl+Q </span><span class="f8">Quit</span></pre>
+<pre class:list={['screen', className]} data-screen={name} hidden={hidden} aria-hidden="true" {...data} set:html={content}></pre>

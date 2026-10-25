@@ -3,12 +3,48 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import '@fontsource-variable/martian-mono/wdth.css';
 import Screen from '../components/Screen.astro';
+import screens from '../data/screens.json';
 
-// The ASCII art and the author come from the app itself, so the site never drifts from it.
+// The ASCII art, the author and the version come from the app itself, so the site never drifts
+// from it: a new release shows its version on the splash of the hero.
 const branding = readFileSync(resolve(process.cwd(), '../src/branding.rs'), 'utf8');
 const logo = [...branding.matchAll(/^\s*r"(.*)",$/gm)].map((match) => match[1]).join('\n');
 const author = branding.match(/AUTHOR: &str = "(.*)";/)?.[1];
-if (!logo || !author) throw new Error('Could not read the branding from src/branding.rs');
+const version = readFileSync(resolve(process.cwd(), '../Cargo.toml'), 'utf8').match(/^version = "(.*)"$/m)?.[1];
+if (!logo || !author || !version) throw new Error('Could not read the branding from src/branding.rs and Cargo.toml');
+
+// The splash of the TUI (src/ui/overlays.rs): every line centered in the 132x34 screen of the
+// captures, the loading bar in the middle (the script draws its sweep).
+const escape = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const center = (text: string) => ' '.repeat(Math.floor((screens.cols - [...text].length) / 2)) + escape(text);
+const barWidth = 30;
+const splashLines = [
+  ...logo.split('\n').map((line) => `<span class="f6">${center(line)}</span>`),
+  '',
+  `<span class="b">${center('SozoIDE')}</span>`,
+  center(`Version ${version}`),
+  '',
+  `${' '.repeat(Math.floor((screens.cols - barWidth) / 2))}<span data-bar="${barWidth}">${'<span class="f8">─</span>'.repeat(barWidth)}</span>`,
+  `<span class="f8">${center('Starting...')}</span>`,
+  `<span class="f8">${center('Press any key to continue')}</span>`,
+];
+const splashTop = Math.floor((screens.rows - splashLines.length) / 2);
+// The splash clears the whole screen; its lines are printed one by one (src/scripts/motion.ts).
+const splash = Array.from({ length: screens.rows }, (_, row) => {
+  const line = splashLines[row - splashTop];
+  return line === undefined ? '' : `<span class="line">${line}</span>`;
+}).join('\n');
+
+// The keys of the demo in the hero (src/scripts/demo.ts).
+const demoKeys = [
+  { key: 'git', keys: ['Ctrl', 'G'], label: 'Source Control', toggle: true },
+  { key: 'database', keys: ['Ctrl', 'D'], label: 'Database', toggle: true },
+  { key: 'search', keys: ['Ctrl', 'P'], label: 'Search', toggle: true },
+  { key: 'help', keys: ['F1'], label: 'Help', toggle: true },
+  { key: 'tab', keys: ['Tab'], label: 'Next tab', toggle: false },
+  { key: 'escape', keys: ['Esc'], label: 'Back', toggle: false },
+];
+const panels = ['git-changes', 'git-graph', 'db-query', 'db-results'] as const;
 
 const repo = 'https://github.com/vritik246800/SozoIDE';
 const latest = `${repo}/releases/latest`;
@@ -48,7 +84,7 @@ const features = [
   { keys: [['Ctrl', 'B']], title: 'Explorer and editor',
     text: 'Browse the project tree and open files in tabs. Edits save themselves after two idle seconds and before you switch tabs or quit. Syntax highlighting covers more than 30 languages, from Rust and Go to SQL, Astro and Mermaid, Markdown tables are shown aligned, and images render inline on Sixel, Kitty and iTerm2 terminals.' },
   { keys: [['Ctrl', 'J'], ['Ctrl', 'Shift', 'B']], title: 'Two terminals',
-    text: 'A bottom and a right terminal, each with its own shell. Scroll back with the mouse wheel or Page Up and Page Down, and drag the dividers to resize every panel.' },
+    text: 'A bottom and a right terminal, each with its own shell. On macOS the right terminal opens with Ctrl+Option+B. Scroll back with the mouse wheel or Page Up and Page Down, and drag the dividers to resize every panel.' },
   { keys: [['Ctrl', 'G']], title: 'Source Control',
     text: 'Stage and commit, follow the commit graph and branches, read diffs and the history of a line or a file, and check the health of the repository. Pull is fast-forward only, and rebase or checkout ask before they run.' },
   { keys: [['Ctrl', 'D']], title: 'Database',
@@ -91,6 +127,13 @@ const title = 'Code, shells, Git and SQL in one terminal window.'
         const root = document.documentElement;
         root.dataset.os = os;
         root.dataset.theme = saved || { windows: 'campbell', macos: 'iterm2', linux: 'ubuntu' }[os] || 'campbell';
+        // The moving parts wait hidden for the motion script; if it never runs, they show anyway.
+        if (matchMedia('(prefers-reduced-motion: no-preference)').matches) {
+          root.dataset.motion = 'wait';
+          setTimeout(() => {
+            if (root.dataset.motion === 'wait') root.dataset.motion = 'off';
+          }, 3000);
+        }
       })();
     </script>
   </head>
@@ -106,9 +149,9 @@ const title = 'Code, shells, Git and SQL in one terminal window.'
 
     <main>
       <section class="hero" aria-labelledby="title">
-        <h1 id="title">
+        <h1 id="title" aria-label={title.map(({ text }) => text).join(' ')}>
           {title.map(({ text, accent }, index) => (
-            <Fragment>{index > 0 && ' '}<span class:list={['word', { accent }]} style={`--i:${index}`}>{text}</span></Fragment>
+            <Fragment>{index > 0 && ' '}<span class:list={['word', { accent }]} aria-hidden="true">{text}</span></Fragment>
           ))}
         </h1>
         <p class="lede">
@@ -123,10 +166,32 @@ const title = 'Code, shells, Git and SQL in one terminal window.'
         </div>
         <p class="note">Free and open source under Apache-2.0, for Windows, macOS and Linux.</p>
 
-        <figure class="window" role="img" aria-label="SozoIDE with the Explorer, a Rust file open in the editor, cargo test in the bottom terminal and cargo run in the right terminal.">
-          <p class="boot" aria-hidden="true">orbit $ <span class="typed">sozo .</span><span class="cursor">█</span></p>
-          <Screen />
-        </figure>
+        <div class="demo" data-demo>
+          <figure class="window" tabindex="0" aria-label="SozoIDE in a terminal, from real captures. Focus it and press Ctrl+G, Ctrl+D, Ctrl+P, F1 or Esc, or use the keys below it.">
+            <p class="boot" aria-hidden="true">orbit $ <span class="typed">sozo .</span><span class="cursor">█</span></p>
+            <div class="stage">
+              <Screen name="editor" runs={screens.screens.editor} />
+              {panels.map((name) => <Screen name={name} runs={screens.screens[name]} hidden />)}
+              <Screen name="splash" class="splash" html={splash} hidden />
+              {Object.entries(screens.dialogs).map(([name, dialog]) => (
+                <div class="dialog" data-screen={name} data-height={dialog.height} hidden aria-hidden="true" style={`--top:${dialog.top};--left:${dialog.left};--width:${dialog.width};--height:${dialog.height}`}>
+                  <Screen class="edge-top" runs={dialog.rows.slice(0, 1)} />
+                  <Screen class="body" runs={dialog.rows.slice(1, -1)} />
+                  <Screen class="edge-bottom" runs={dialog.rows.slice(-1)} />
+                </div>
+              ))}
+            </div>
+            <figcaption class="visually-hidden" aria-live="polite" data-demo-status>SozoIDE showing the editor with src/lib.rs and cargo test in the bottom terminal.</figcaption>
+          </figure>
+          <div class="try" role="group" aria-label="Try the keys of SozoIDE">
+            <span class="try-label">Try it</span>
+            {demoKeys.map(({ key, keys, label, toggle }) => (
+              <button type="button" data-demo-key={key} aria-pressed={toggle ? 'false' : undefined}>
+                {keys.map((name) => <kbd>{name}</kbd>)}<span>{label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
 
         <fieldset class="themes">
           <legend>SozoIDE has no colors of its own: it draws with the 16 colors of your terminal theme. Try another theme on this page.</legend>
@@ -145,13 +210,13 @@ const title = 'Code, shells, Git and SQL in one terminal window.'
       </section>
 
       <section id="features" aria-labelledby="features-title">
-        <h2 id="features-title" class="reveal">One key for each tool</h2>
+        <h2 id="features-title" class="reveal" aria-label="One key for each tool">One key for each tool</h2>
         <dl class="keymap">
           {features.map((feature) => (
             <div class="key-row reveal">
               <dt>
                 {feature.keys.map((combo, index) => (
-                  <span class="combo" style={`--k:${index}`}>
+                  <span class="combo">
                     {index > 0 && <span class="or">or</span>}
                     {combo.map((key) => <kbd>{key}</kbd>)}
                   </span>
@@ -167,7 +232,7 @@ const title = 'Code, shells, Git and SQL in one terminal window.'
       </section>
 
       <section id="download" aria-labelledby="download-title">
-        <h2 id="download-title" class="reveal">Download</h2>
+        <h2 id="download-title" class="reveal" aria-label="Download">Download</h2>
         <p class="section-lede reveal">
           Installers for the latest release. Each one gives you the <code>sozo</code> command;
           then open a terminal in any project and run <code>sozo .</code>
@@ -205,7 +270,7 @@ sudo dnf install ./SozoIDE-linux-*.rpm</code></pre>
       </section>
 
       <section id="source" aria-labelledby="source-title">
-        <h2 id="source-title" class="reveal">Build from source</h2>
+        <h2 id="source-title" class="reveal" aria-label="Build from source">Build from source</h2>
         <p class="section-lede reveal">You need Rust stable and Git.</p>
         <pre class="reveal"><code>git clone https://github.com/vritik246800/SozoIDE.git
 cd SozoIDE
@@ -215,11 +280,19 @@ cargo build --release
     </main>
 
     <footer class="bottom">
+      <canvas class="stars" aria-hidden="true"></canvas>
       <pre class="logo draw" aria-hidden="true">{logo}</pre>
       <p>SozoIDE by {author}. Licensed under Apache-2.0. <a href={repo}>Source on GitHub</a></p>
     </footer>
 
+    <canvas class="wave" aria-hidden="true" hidden></canvas>
+
     <script>
+      import { starField } from '../scripts/ascii';
+      import '../scripts/demo';
+      import '../scripts/motion';
+      import '../scripts/theme';
+
       const root = document.documentElement;
 
       // The main button downloads the package of this system; ARM is only visible to Chromium
@@ -244,77 +317,8 @@ cargo build --release
           .catch(() => {});
       }
 
-      // First, so a failure below never leaves blocks hidden: each block rises once when it
-      // scrolls into view, and blocks that enter together follow one another.
-      const observer = new IntersectionObserver(
-        (entries) => {
-          let order = 0;
-          for (const entry of entries) {
-            if (!entry.isIntersecting) continue;
-            const block = entry.target as HTMLElement;
-            block.style.setProperty('--delay', `${order++ * 90}ms`);
-            block.classList.add('in');
-            observer.unobserve(block);
-          }
-        },
-        { rootMargin: '0px 0px -10% 0px' },
-      );
-      for (const block of document.querySelectorAll('.reveal, .draw')) observer.observe(block);
-
-      const options = [...document.querySelectorAll<HTMLButtonElement>('[data-theme-option]')];
-      const motion = matchMedia('(prefers-reduced-motion: no-preference)');
-      const mark = () => {
-        for (const option of options) {
-          option.setAttribute('aria-pressed', String(option.dataset.themeOption === root.dataset.theme));
-        }
-      };
-      // A wave skipped by a newer click still runs its update afterwards, so every update applies
-      // the latest choice, not the one of its own click (Docs/development/ERRORS.md E7).
-      let wanted = root.dataset.theme;
-      const apply = () => {
-        root.dataset.theme = wanted;
-        try {
-          localStorage.setItem('sozo-theme', wanted ?? '');
-        } catch {
-          // Without storage the theme still changes for this visit.
-        }
-        mark();
-      };
-      // The new theme grows in a circle from (x, y).
-      const choose = (option: HTMLButtonElement, x: number, y: number) => {
-        if (option.dataset.themeOption === wanted) return;
-        wanted = option.dataset.themeOption;
-        if (!('startViewTransition' in document) || !motion.matches) return apply();
-        const radius = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y));
-        document.startViewTransition(apply).ready.then(
-          () => {
-            root.animate(
-              { clipPath: [`circle(0 at ${x}px ${y}px)`, `circle(${radius}px at ${x}px ${y}px)`] },
-              { duration: 640, easing: 'cubic-bezier(0.33, 1, 0.68, 1)', pseudoElement: '::view-transition-new(root)' },
-            );
-          },
-          () => {
-            // A newer click skipped this wave; that click runs its own.
-          },
-        );
-      };
-      for (const option of options) {
-        option.addEventListener('click', (event) => {
-          // A keyboard click (detail 0) has no pointer position: start from the middle of the button.
-          const box = option.getBoundingClientRect();
-          choose(option, event.detail ? event.clientX : box.left + box.width / 2, event.detail ? event.clientY : box.top + box.height / 2);
-        });
-      }
-      // During a wave every click lands on <html> (E7), so find the theme button under the pointer.
-      root.addEventListener('click', (event) => {
-        if (event.target !== root) return;
-        const option = options.find((candidate) => {
-          const box = candidate.getBoundingClientRect();
-          return event.clientX >= box.left && event.clientX < box.right && event.clientY >= box.top && event.clientY < box.bottom;
-        });
-        if (option) choose(option, event.clientX, event.clientY);
-      });
-      mark();
+      const stars = document.querySelector<HTMLCanvasElement>('canvas.stars');
+      if (stars) starField(stars);
     </script>
 
     <style is:global>
@@ -525,10 +529,145 @@ cargo build --release
         margin: 0;
         padding: 0;
         border: 0;
+        border-radius: 0;
         overflow: hidden;
+        background: var(--bg);
         font-size: calc((100cqi - 1px) / 80);
         line-height: 1.18;
         white-space: pre;
+      }
+
+      .screen .d {
+        opacity: 0.5;
+      }
+
+      .window:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 3px;
+      }
+
+      /* Every screen of the demo sits in the same cell; the one arriving is drawn over the one
+         leaving (src/scripts/demo.ts), the splash over both. */
+      .stage {
+        position: relative;
+        display: grid;
+      }
+
+      .stage > .screen {
+        grid-area: 1 / 1;
+      }
+
+      .stage > .arriving {
+        z-index: 1;
+      }
+
+      .stage > .splash {
+        z-index: 2;
+      }
+
+      /* The terminal dims everything behind a dialog (Modifier::DIM). */
+      .stage.dimmed > .screen {
+        opacity: 0.5;
+      }
+
+      .dialog {
+        position: absolute;
+        z-index: 3;
+        top: calc(var(--top) * 1.18em);
+        left: calc(var(--left) * 1ch);
+        width: calc(var(--width) * 1ch);
+        height: calc(var(--height) * 1.18em);
+        font-family: var(--mono);
+        font-size: calc((100cqi - 1px) / 80);
+        line-height: 1.18;
+      }
+
+      .dialog > .screen {
+        position: absolute;
+        left: 0;
+        width: 100%;
+      }
+
+      .dialog > .edge-top {
+        top: 0;
+      }
+
+      .dialog > .body {
+        top: 1.18em;
+      }
+
+      .dialog > .edge-bottom {
+        top: calc((var(--height) - 1) * 1.18em);
+      }
+
+      .try {
+        display: none;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        margin: 14px 0 0;
+      }
+
+      [data-os] .try {
+        display: flex;
+      }
+
+      .try-label {
+        margin-right: 6px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 0.9rem;
+      }
+
+      .try button {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 6px 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: transparent;
+        color: var(--fg);
+        font: inherit;
+        font-size: 0.9rem;
+        cursor: pointer;
+      }
+
+      .try button span {
+        margin-left: 4px;
+      }
+
+      .try button:hover {
+        border-color: var(--accent);
+      }
+
+      .try button[aria-pressed='true'] {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      .try button[aria-disabled='true'] {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      .visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+      }
+
+      /* The front of the theme wave, drawn with characters (src/scripts/ascii.ts). */
+      .wave {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 20;
+        pointer-events: none;
       }
 
       .screen .b {
@@ -543,6 +682,7 @@ cargo build --release
       /* The shell prompt before the first frame of the screen; shown only while motion is allowed. */
       .boot {
         display: none;
+        z-index: 4;
         position: absolute;
         inset: 12px auto auto 12px;
         margin: 0;
@@ -781,6 +921,8 @@ cargo build --release
       }
 
       .bottom {
+        position: relative;
+        isolation: isolate;
         display: grid;
         justify-items: center;
         gap: 16px;
@@ -804,61 +946,43 @@ cargo build --release
         margin: 0;
       }
 
-      /* Motion (Docs/development/DESIGN.md §2.5): the hero boots like `sozo .` in a terminal, then
-         blocks rise once as they scroll into view. With reduced motion nothing moves or hides. */
+      /* Stars made of characters behind the logo, fading out above the credits. */
+      .stars {
+        position: absolute;
+        inset: 0;
+        z-index: -1;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        mask-image: linear-gradient(#000 55%, transparent 80%);
+      }
+
+      /* Motion (Docs/development/DESIGN.md §2.5): GSAP boots the hero and reveals the page, anime.js
+         moves the demo and the theme wave, canvas draws characters. CSS only keeps what waits for
+         those scripts (data-motion="wait", set in the head) and the small responses. With reduced
+         motion nothing moves or hides. */
+      [data-motion='wait'] :is(.hero .word, .lede, .actions, .note, .window, .try, .theme-list button, .reveal, .draw) {
+        visibility: hidden;
+      }
+
       @media (prefers-reduced-motion: no-preference) {
         html {
           scroll-behavior: smooth;
         }
 
         .hero .word {
-          --rise: 0.4em;
           display: inline-block;
-          animation: rise 700ms var(--ease-out) calc(var(--i) * 50ms) both;
-        }
-
-        .lede {
-          animation: rise 700ms var(--ease-out) 250ms both;
-        }
-
-        .actions {
-          animation: rise 700ms var(--ease-out) 350ms both;
-        }
-
-        .note {
-          animation: rise 700ms var(--ease-out) 450ms both;
-        }
-
-        .window {
-          animation: rise 800ms var(--ease-out) 450ms both;
-        }
-
-        .boot {
-          display: block;
-          animation: off 1ms 1550ms both;
-        }
-
-        .boot .typed {
-          animation: type 420ms steps(6) 950ms both;
-        }
-
-        .screen {
-          animation: rows 480ms steps(34) 1550ms both;
         }
 
         .cursor {
           animation: blink 1.06s steps(1) infinite;
         }
 
-        .theme-list button {
+        .theme-list button,
+        .try button {
           transition:
             color 160ms var(--ease),
             border-color 160ms var(--ease);
-          animation: rise 600ms var(--ease-out) calc(2s + var(--i) * 60ms) both;
-        }
-
-        .theme-list button:focus-visible {
-          animation: none;
         }
 
         .button {
@@ -872,72 +996,26 @@ cargo build --release
           transform: translateY(1px);
         }
 
-        /* data-os means the head script ran, so the observer in the script reveals these. */
-        [data-os] .reveal:not(.in) {
-          opacity: 0;
+        kbd {
+          transition:
+            transform 160ms var(--ease),
+            box-shadow 160ms var(--ease),
+            border-color 160ms var(--ease),
+            color 160ms var(--ease);
         }
 
-        .reveal.in {
-          --rise: 24px;
-          animation: rise 700ms var(--ease-out) var(--delay, 0ms) both;
-        }
-
-        .key-row.in kbd {
-          animation: press 560ms var(--ease) calc(var(--delay, 0ms) + 250ms + var(--k) * 400ms);
-        }
-
-        [data-os] .draw:not(.in) {
-          clip-path: inset(0 0 100% 0);
-        }
-
-        .draw.in {
-          animation: rows 700ms steps(22) var(--delay, 0ms) both;
-        }
-      }
-
-      @keyframes rise {
-        from {
-          opacity: 0;
-          transform: translateY(var(--rise, 16px));
-        }
-      }
-
-      /* Top to bottom, one row of text per step. Both ends are inset(): from inset() to none
-         would not interpolate and the block would appear at once (Docs/development/ERRORS.md E6). */
-      @keyframes rows {
-        from {
-          clip-path: inset(0 0 100% 0);
-        }
-        to {
-          clip-path: inset(0);
-        }
-      }
-
-      @keyframes type {
-        from {
-          width: 0;
-        }
-      }
-
-      @keyframes off {
-        to {
-          opacity: 0;
+        /* A key of a tool pressed as its row arrives (motion.ts). */
+        .combo.down kbd {
+          transform: translateY(2px);
+          box-shadow: 0 0 0 var(--line);
+          border-color: var(--accent);
+          color: var(--accent);
         }
       }
 
       @keyframes blink {
         50% {
           opacity: 0;
-        }
-      }
-
-      @keyframes press {
-        30%,
-        60% {
-          transform: translateY(2px);
-          box-shadow: 0 0 0 var(--line);
-          border-color: var(--accent);
-          color: var(--accent);
         }
       }
 

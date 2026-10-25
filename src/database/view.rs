@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Clear, Paragraph, Wrap},
+    widgets::{Block, Paragraph, Wrap},
 };
 
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
         ConnectionField, DatabasePanel, DatabaseTab,
         controller::{DatabaseAction, DatabaseController},
     },
-    ui::{ACTIVE, MUTED, TEXT, centered, panel_block, reveal, scale_centered},
+    ui::{ACTIVE, MUTED, TEXT, busy, centered, panel_block, render_dialog},
 };
 
 pub fn render(frame: &mut Frame, controller: &mut DatabaseController, area: Rect) {
@@ -50,22 +50,19 @@ pub fn render(frame: &mut Frame, controller: &mut DatabaseController, area: Rect
             selected,
         );
     }
-    let content_area = reveal(sections[2], controller.motion.content());
+    let content_area = sections[2];
     controller.regions.content = content_area;
     let panel_handle = std::sync::Arc::clone(&controller.panel);
     let Ok(panel) = panel_handle.try_lock() else {
         frame.render_widget(
-            Paragraph::new(format!(
-                "{} Database operation in progress...",
-                controller.motion.spinner()
+            Paragraph::new(busy(
+                controller.motion.spinner(),
+                "Database operation in progress...",
             ))
             .alignment(Alignment::Center),
             content_area,
         );
         render_status(frame, controller, sections[3], None);
-        if controller.form.is_some() {
-            render_form(frame, controller, area);
-        }
         return;
     };
     let mut content_sections = sections.to_vec();
@@ -78,10 +75,6 @@ pub fn render(frame: &mut Frame, controller: &mut DatabaseController, area: Rect
         DatabaseTab::Results => render_results(frame, controller, &panel, &content_sections),
     }
     render_status(frame, controller, sections[3], Some(&panel));
-    drop(panel);
-    if controller.form.is_some() {
-        render_form(frame, controller, area);
-    }
 }
 
 fn render_connections(
@@ -376,15 +369,15 @@ fn render_status(
     panel: Option<&DatabasePanel>,
 ) {
     let (message, error) = if controller.operation {
-        (format!("{} Working...", controller.motion.spinner()), false)
+        (busy(controller.motion.spinner(), "Working..."), false)
     } else if let Some(panel) = panel {
         if let Some(error) = &panel.error {
-            (error.clone(), true)
+            (Line::from(error.clone()), true)
         } else {
-            (panel.status.clone().unwrap_or_default(), false)
+            (Line::from(panel.status.clone().unwrap_or_default()), false)
         }
     } else {
-        (String::new(), false)
+        (Line::default(), false)
     };
     frame.render_widget(
         Paragraph::new(message).style(Style::default().fg(if error { Color::Red } else { MUTED })),
@@ -392,12 +385,8 @@ fn render_status(
     );
 }
 
-fn render_form(frame: &mut Frame, controller: &mut DatabaseController, area: Rect) {
-    let area = scale_centered(centered(area, 66, 82), controller.motion.dialog());
-    if area.width < 2 || area.height < 4 {
-        return;
-    }
-    frame.render_widget(Clear, area);
+/// The Connection dialog, drawn by `ui::draw` over everything else.
+pub fn render_form(frame: &mut Frame, controller: &mut DatabaseController, area: Rect) {
     let Some(form) = &controller.form else {
         return;
     };
@@ -406,9 +395,20 @@ fn render_form(frame: &mut Frame, controller: &mut DatabaseController, area: Rec
     } else {
         " Add Connection "
     };
-    let block = panel_block(title.into(), true);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let progress = controller.motion.dialog();
+    render_dialog(
+        frame,
+        centered(area, 66, 82),
+        progress,
+        title.into(),
+        |frame, inner| render_form_fields(frame, controller, inner),
+    );
+}
+
+fn render_form_fields(frame: &mut Frame, controller: &mut DatabaseController, inner: Rect) {
+    let Some(form) = &controller.form else {
+        return;
+    };
     let rows = Layout::vertical(
         std::iter::repeat_n(Constraint::Length(1), ConnectionField::ALL.len())
             .chain([

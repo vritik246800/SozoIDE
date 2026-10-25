@@ -495,16 +495,17 @@ mod tests {
         let closed = Instant::now();
         controller.tick_at(closed);
         assert!(controller.form.is_some());
-        controller.tick_at(closed + crate::animation::DIALOG_DURATION);
+        controller.tick_at(closed + crate::animation::DIALOG.close);
         assert!(controller.form.is_none());
 
         controller.panel.blocking_lock().tab = DatabaseTab::Results;
         let start = Instant::now();
         controller.tick_at(start);
         assert_eq!(controller.motion.content(), 0.0);
-        controller.tick_at(start + crate::animation::CONTENT_DURATION / 2);
+        assert_eq!(controller.motion.edge(), crate::animation::Edge::Right);
+        controller.tick_at(start + crate::animation::TAB.open / 2);
         assert!(controller.motion.content() > 0.0 && controller.motion.content() < 1.0);
-        controller.tick_at(start + crate::animation::CONTENT_DURATION);
+        controller.tick_at(start + crate::animation::TAB.open);
         assert_eq!(controller.motion.content(), 1.0);
     }
 

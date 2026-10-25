@@ -12,10 +12,11 @@ use ratatui::{
 
 use crate::app::{App, Overlay, Regions};
 
-use components::render_handle;
 pub(crate) use components::{
-    ACTIVE, BORDER, MUTED, TEXT, centered, panel_block, reveal, scale_centered, scale_length,
+    ACTIVE, BORDER, MUTED, TEXT, bar, busy, centered, panel_block, render_dialog, scale_length,
+    sweep_bar,
 };
+use components::{render_handle, sweep};
 use editor::{render_editor, render_explorer, render_tabs, render_terminal};
 use overlays::{render_about, render_help, render_search, render_splash, render_update};
 
@@ -81,7 +82,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let editor_parts =
         Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(editor_area);
     regions.tabs = editor_parts[0];
-    regions.editor = reveal(editor_parts[1], app.motion.content());
+    regions.editor = editor_parts[1];
+    let content_area = editor_parts[1];
 
     if explorer_width > 0 {
         render_explorer(frame, app, regions.explorer);
@@ -108,6 +110,33 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.regions = regions;
     app.resize_terminals();
 
+    // New content is drawn over the previous frame from its edge, never over a blank area.
+    let previous = app.motion.previous();
+    let buffer = frame.buffer_mut();
+    if app.show_database {
+        let motion = &app.database.motion;
+        let area = app.database.regions.content;
+        sweep(buffer, previous, area, motion.content(), motion.edge());
+    } else if app.show_git {
+        let motion = &app.git.motion;
+        sweep(
+            buffer,
+            previous,
+            app.git.regions.content,
+            motion.content(),
+            motion.edge(),
+        );
+    }
+    let (progress, edge) = (app.motion.content(), app.motion.content_edge());
+    sweep(buffer, previous, content_area, progress, edge);
+    app.motion.remember(frame.buffer_mut());
+
+    // Dialogs come last so that they dim everything else and stay out of the next transition.
+    if app.show_database {
+        crate::database::view::render_form(frame, &mut app.database, content_area);
+    } else if app.show_git {
+        crate::git::view::render_mode(frame, &mut app.git, content_area);
+    }
     if app.search.is_some() {
         render_search(frame, app, area);
     }
@@ -121,7 +150,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Overlay::None => {}
     }
     if app.splash_visible {
-        render_splash(frame, area, app.motion.splash());
+        render_splash(frame, area, &app.motion);
     }
 }
 
@@ -169,7 +198,7 @@ fn render_footer(frame: &mut Frame, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, time::Instant};
 
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -287,7 +316,7 @@ mod tests {
         assert!(app.regions.bottom_terminal.height < app.bottom_terminal_height);
         assert_eq!(app.bottom_terminal.size(), initial_size);
 
-        app.tick_at(start + crate::animation::PANEL_DURATION);
+        app.tick_at(start + crate::animation::PANEL.open);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let area = app.regions.bottom_terminal;
         assert_eq!(area.height, app.bottom_terminal_height);
@@ -370,28 +399,132 @@ mod tests {
     }
 
     #[test]
-    fn splash_waits_for_its_exit_transition_before_disappearing() {
+    fn splash_prints_line_by_line_and_the_ide_is_drawn_over_it() {
+        use crate::animation::{SPLASH_DRAW, SPLASH_EXIT};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+        let start = Instant::now();
         let mut app = App::with_picker(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")),
             ratatui_image::picker::Picker::halfblocks(),
             true,
         )
         .unwrap();
-        settle(&mut app);
-        let backend = TestBackend::new(120, 40);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        assert!(buffer_text(&terminal).contains("Starting..."));
+        let created = Instant::now();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
 
-        app.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char(' '),
-            crossterm::event::KeyModifiers::NONE,
-        ));
-        let now = std::time::Instant::now();
-        app.tick_at(now);
+        // The logo prints first; the bar and the hints come last.
+        app.tick_at(start + SPLASH_DRAW.open / 4);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(!text.contains("Starting...") && !text.contains("Help F1"));
+
+        app.tick_at(created + SPLASH_DRAW.open);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Starting...") && text.contains("Press any key to continue"));
+        assert!(text.contains('─'), "the loading bar");
+
+        // Moving the mouse does not close it; the first key does.
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 3,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(!app.motion.splash_closing());
+        // Keys arrive in real time, after the splash has printed.
+        std::thread::sleep(SPLASH_DRAW.open);
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let closing = Instant::now();
+
+        // Halfway out, the top of the IDE is drawn over the splash and keys reach the IDE.
+        app.tick_at(closing + SPLASH_EXIT.open / 2);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(row(buffer, 0).contains("Help F1"));
+        assert!(row(buffer, 33).contains("Press any key to continue"));
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert!(!app.show_explorer);
         assert!(app.splash_visible);
-        app.tick_at(now + crate::animation::DIALOG_DURATION);
+        app.tick_at(closing + SPLASH_EXIT.open);
         assert!(!app.splash_visible);
+    }
+
+    #[test]
+    fn help_unfolds_without_reflowing_and_dims_what_is_behind() {
+        use crate::animation::DIALOG;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::style::Modifier;
+        let mut app = App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        settle(&mut app);
+        app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        let opened = Instant::now();
+        app.tick_at(opened + DIALOG.open / 3);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let unfolding = terminal.backend().buffer().clone();
+        app.tick_at(opened + DIALOG.open);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let open = terminal.backend().buffer().clone();
+
+        let top = (0..40)
+            .find(|&y| row(&open, y).contains("Help - all commands"))
+            .unwrap();
+        let bottom = (top + 1..40)
+            .find(|&y| row(&open, y).contains('╰'))
+            .unwrap();
+        let middle = (top + bottom) / 2;
+        // The text is already where it will stay; only the rows near the edges are missing.
+        assert_eq!(row(&unfolding, middle), row(&open, middle));
+        assert_ne!(row(&unfolding, top + 1), row(&open, top + 1));
+        assert!(unfolding[(60, top + 1)].modifier.contains(Modifier::DIM));
+        assert!(open[(0, 0)].modifier.contains(Modifier::DIM));
+        assert!(!open[(60, middle)].modifier.contains(Modifier::DIM));
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(
+            !terminal.backend().buffer()[(0, 0)]
+                .modifier
+                .contains(Modifier::DIM)
+        );
+    }
+
+    #[test]
+    fn another_tab_comes_in_from_its_side_over_the_previous_one() {
+        use crate::animation::TAB;
+        let directory = tempfile::tempdir().unwrap();
+        for (name, letter) in [("first.txt", "a"), ("second.txt", "b")] {
+            std::fs::write(directory.path().join(name), letter.repeat(300)).unwrap();
+        }
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(directory.path().join("first.txt")).unwrap();
+        app.open_file(directory.path().join("second.txt")).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        // The first tab is on the left, so it comes in from the left over the second one.
+        app.active_tab = Some(0);
+        let start = Instant::now();
+        app.tick_at(start);
+        app.tick_at(start + TAB.open / 2);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let area = app.regions.editor;
+        let text_row = |terminal: &Terminal<TestBackend>| {
+            let buffer = terminal.backend().buffer();
+            (area.x..area.right())
+                .map(|x| buffer[(x, area.y + 1)].symbol())
+                .collect::<String>()
+        };
+        let line = text_row(&terminal);
+        assert!(line.find('a').unwrap() < line.find('b').unwrap(), "{line}");
+
+        app.tick_at(start + TAB.open);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(!text_row(&terminal).contains('b'));
     }
 
     #[test]
@@ -459,18 +592,34 @@ mod tests {
             total: Some(10_000_000),
         };
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        assert!(buffer_text(&terminal).contains("5.0 / 10.0 MB"));
+        let text = buffer_text(&terminal);
+        assert!(text.contains("5.0 / 10.0 MB") && text.contains("──"));
         assert_eq!(app.regions.update_install.width, 0);
+
+        // Without a size the same bar sweeps.
+        app.updater.state = UpdateState::Downloading {
+            received: 5_000_000,
+            total: None,
+        };
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("5.0 MB"));
 
         app.updater.state = UpdateState::Failed("Download cancelled".to_string());
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(buffer_text(&terminal).contains("The update failed: Download cancelled"));
     }
 
+    /// Lets every transition finish; the splash stays for 1.4 s.
     fn settle(app: &mut App) {
         let now = std::time::Instant::now();
         app.tick_at(now);
-        app.tick_at(now + std::time::Duration::from_millis(200));
+        app.tick_at(now + std::time::Duration::from_secs(1));
+    }
+
+    fn row(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
     }
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {

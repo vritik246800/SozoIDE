@@ -12,12 +12,20 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        // macOS terminals send Ctrl+Shift+B as Ctrl+B, so the Mac uses Ctrl+Option+B.
+        let right_terminal_modifier = if cfg!(target_os = "macos") {
+            key.modifiers.contains(KeyModifiers::ALT)
+        } else {
+            shift
+        };
         if ctrl && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
             self.flush_all_files();
             self.should_quit = true;
             return;
         }
-        if self.splash_visible {
+        // The first key closes the splash; while the IDE is drawn over it, keys already reach
+        // the IDE.
+        if self.splash_visible && !self.motion.splash_closing() {
             self.dismiss_splash();
             return;
         }
@@ -98,7 +106,7 @@ impl App {
                 self.open_search(scope);
                 return;
             }
-            KeyCode::Char('b') | KeyCode::Char('B') if ctrl && shift => {
+            KeyCode::Char('b') | KeyCode::Char('B') if ctrl && right_terminal_modifier => {
                 self.flush_active_file();
                 self.show_right_terminal = !self.show_right_terminal;
                 self.focus = if self.show_right_terminal {
@@ -267,9 +275,7 @@ impl App {
     }
 
     fn dismiss_splash(&mut self) {
-        if !self.motion.splash_closing() {
-            self.motion.close_splash(std::time::Instant::now());
-        }
+        self.motion.close_splash(std::time::Instant::now());
     }
 
     fn handle_explorer_key(&mut self, key: KeyEvent) {
@@ -335,8 +341,10 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.splash_visible {
-            self.dismiss_splash();
+        if self.splash_visible && !self.motion.splash_closing() {
+            if mouse.kind != MouseEventKind::Moved {
+                self.dismiss_splash();
+            }
             return;
         }
         let point = (mouse.column, mouse.row);
@@ -531,10 +539,19 @@ mod tests {
         assert!(!app.show_explorer);
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
         assert!(app.show_bottom_terminal);
-        app.handle_key(KeyEvent::new(
-            KeyCode::Char('B'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        ));
+        let right_terminal_key = if cfg!(target_os = "macos") {
+            KeyEvent::new(
+                KeyCode::Char('b'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )
+        } else {
+            KeyEvent::new(
+                KeyCode::Char('B'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )
+        };
+        app.handle_key(right_terminal_key);
+        assert!(!app.show_explorer);
         assert!(app.show_right_terminal);
         app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
         assert!(app.show_git);
