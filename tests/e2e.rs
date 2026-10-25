@@ -84,6 +84,66 @@ fn application_starts_and_restores_host_terminal_on_quit() {
     }
 }
 
+// Inside tmux the image query goes through passthrough; with no tmux on the PATH it cannot be
+// switched on and nobody answers, so the fake terminal answers only the cursor position.
+#[cfg(unix)]
+#[test]
+fn starts_inside_tmux_when_nobody_answers_the_image_query() {
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 35,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_sozo"));
+    command.cwd(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    command.env("TERM", "tmux-256color");
+    command.env("PATH", concat!(env!("CARGO_MANIFEST_DIR"), "/tests"));
+    command.env_remove("TMUX");
+    let mut child = pair.slave.spawn_command(command).unwrap();
+    drop(pair.slave);
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let reader_output = Arc::clone(&output);
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let writer = Arc::new(Mutex::new(pair.master.take_writer().unwrap()));
+    let reader_writer = Arc::clone(&writer);
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        while let Ok(count) = reader.read(&mut buffer) {
+            if count == 0 {
+                break;
+            }
+            let data = &buffer[..count];
+            reader_output.lock().unwrap().extend_from_slice(data);
+            if data.windows(4).any(|window| window == b"\x1b[6n") {
+                let mut writer = reader_writer.lock().unwrap();
+                writer.write_all(b"\x1b[1;1R").unwrap();
+                writer.flush().unwrap();
+            }
+        }
+    });
+
+    wait_for_output(&output, "SozoIDE");
+    writer.lock().unwrap().write_all(b"\x11").unwrap();
+    writer.lock().unwrap().flush().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            panic!("a aplicacao nao terminou depois de Ctrl+Q");
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success());
+}
+
 fn wait_for_output(output: &Arc<Mutex<Vec<u8>>>, expected: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
