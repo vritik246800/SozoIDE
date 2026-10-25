@@ -4,7 +4,6 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use nerd_fonts::NerdFonts;
 use ratatui_image::picker::Picker;
 
 use crate::{
@@ -25,9 +24,17 @@ use layout::{DragTarget, inner_size};
 pub use layout::{Focus, Overlay, Regions};
 pub(crate) use motion::AppMotion;
 
+/// Nerd Fonts glyphs by their `nerd_fonts` name. Copied instead of `NerdFonts::load()`, which
+/// reads its table at runtime from the build machine's cargo registry and panics on every other
+/// machine (ERRORS.md E10); a test keeps them equal to the crate's table.
+const ICONS: [(&str, char); 3] = [
+    ("custom-folder", '\u{e5ff}'),
+    ("custom-folder_open", '\u{e5fe}'),
+    ("dev-terminal", '\u{e795}'),
+];
+
 pub struct App {
     pub root: PathBuf,
-    pub icons: NerdFonts,
     pub entries: Vec<FileEntry>,
     pub selected_entry: usize,
     pub explorer_scroll: usize,
@@ -72,9 +79,6 @@ impl App {
         let now = Instant::now();
         let mut app = Self {
             root,
-            icons: NerdFonts {
-                nf: NerdFonts::load(),
-            },
             entries: Vec::new(),
             selected_entry: 0,
             explorer_scroll: 0,
@@ -170,7 +174,10 @@ impl App {
     }
 
     pub fn icon(&self, name: &str) -> char {
-        self.icons.get(name).unwrap_or(' ')
+        ICONS
+            .iter()
+            .find(|(icon, _)| *icon == name)
+            .map_or(' ', |(_, glyph)| *glyph)
     }
 
     pub fn open_file(&mut self, path: PathBuf) -> Result<()> {
@@ -279,6 +286,19 @@ mod tests {
 
     fn test_app() -> App {
         App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
+    #[test]
+    fn icons_match_the_nerd_fonts_table() {
+        let fonts = nerd_fonts::NerdFonts {
+            nf: nerd_fonts::NerdFonts::load(),
+        };
+        for (name, glyph) in ICONS {
+            assert_eq!(fonts.get(name), Some(glyph), "{name}");
+        }
+        let app = test_app();
+        assert_eq!(app.icon("dev-terminal"), '\u{e795}');
+        assert_eq!(app.icon("custom-file"), ' ');
     }
 
     #[test]

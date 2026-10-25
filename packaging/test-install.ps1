@@ -21,4 +21,8 @@ if (($UserPath -split ";" | ForEach-Object { $_.TrimEnd("\") }) -notcontains $Bi
 $env:PATH = "$UserPath;$env:PATH"
 $Output = & sozo --version
 if ($Output -ne "sozo $Version") { throw "sozo --version printed '$Output'" }
+# A data file read from the build machine's cargo registry exists only on the runner (ERRORS.md E10).
+$Text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Get-Command sozo).Source))
+$Found = [regex]::Match($Text, '\.cargo[\\/]registry[\\/]src[\\/][^\x00 ]*\.(yaml|yml|toml|json|txt|dat|bin)')
+if ($Found.Success) { throw "sozo reads data files from the build machine: $($Found.Value)" }
 Write-Host "OK: $Output ($((Get-Command sozo).Source))"

@@ -7,10 +7,16 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 VERSION=$(awk -F'"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")
 WORK=$(mktemp -d)
 
+# A data file read from the build machine's cargo registry exists only on the runner: the binary
+# would start here and crash everywhere else (ERRORS.md E10).
 check() {
     local output
     output=$("$1" --version)
     [[ $output == "sozo $VERSION" ]] || { echo "$1 --version printed '$output'" >&2; exit 1; }
+    if strings "$1" | grep -E '\.cargo/registry/src/[^ ]*\.(yaml|yml|toml|json|txt|dat|bin)'; then
+        echo "$1 reads data files from the build machine" >&2
+        exit 1
+    fi
     echo "OK: $output ($1)"
 }
 
