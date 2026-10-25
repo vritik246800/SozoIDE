@@ -460,7 +460,7 @@ impl ConnectionForm {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd)]
 pub enum DatabaseTab {
     #[default]
     Connections,

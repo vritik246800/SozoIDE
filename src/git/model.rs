@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, FixedOffset};
 use git2::{Delta, Status};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd)]
 pub enum GitTab {
     #[default]
     Changes,

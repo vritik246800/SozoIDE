@@ -5,12 +5,12 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
 };
 
 use crate::{
     git::{ChangeArea, CommitInfo, GitPanel, GitTab},
-    ui::{ACTIVE, MUTED, TEXT, centered, panel_block, reveal, scale_centered},
+    ui::{ACTIVE, MUTED, TEXT, busy, centered, panel_block, render_dialog},
 };
 
 use super::controller::{GitController, GitMode, GitUiAction};
@@ -53,19 +53,13 @@ pub fn render(frame: &mut Frame, controller: &mut GitController, area: Rect) {
             selected,
         );
     }
-    let content_area = reveal(sections[2], controller.motion.content());
+    let content_area = sections[2];
     controller.regions.content = content_area;
     let panel_handle = std::sync::Arc::clone(&controller.panel);
     let Ok(panel) = panel_handle.try_lock() else {
-        let message = format!(
-            "{} Git operation in progress...",
-            controller.motion.spinner()
-        );
+        let message = busy(controller.motion.spinner(), "Git operation in progress...");
         frame.render_widget(Paragraph::new(message.clone()), content_area);
         frame.render_widget(Paragraph::new(message), sections[3]);
-        if controller.mode != GitMode::None {
-            render_mode(frame, controller, area);
-        }
         return;
     };
     render_toolbar(frame, controller, &panel, sections[1]);
@@ -92,25 +86,21 @@ pub fn render(frame: &mut Frame, controller: &mut GitController, area: Rect) {
         }
     }
     let message = if controller.operation {
-        format!("{} Working...", controller.motion.spinner())
+        busy(controller.motion.spinner(), "Working...")
     } else {
-        panel.last_error.clone().unwrap_or_else(|| {
+        Line::from(panel.last_error.clone().unwrap_or_else(|| {
             panel
                 .last_output
                 .as_ref()
                 .map(|output| format!("{} — {}", output.command, panel.status_message))
                 .unwrap_or_else(|| panel.status_message.clone())
-        })
+        }))
     };
     let error = !controller.operation && panel.last_error.is_some();
     frame.render_widget(
         Paragraph::new(message).style(Style::default().fg(if error { Color::Red } else { MUTED })),
         sections[3],
     );
-    drop(panel);
-    if controller.mode != GitMode::None {
-        render_mode(frame, controller, area);
-    }
 }
 
 fn render_toolbar(frame: &mut Frame, controller: &mut GitController, panel: &GitPanel, area: Rect) {
@@ -615,12 +605,8 @@ fn selectable_row(
     ))
 }
 
-fn render_mode(frame: &mut Frame, controller: &mut GitController, area: Rect) {
-    let area = scale_centered(centered(area, 60, 34), controller.motion.dialog());
-    if area.width < 2 || area.height < 4 {
-        return;
-    }
-    frame.render_widget(Clear, area);
+/// The Commit, Rebase and confirmation dialogs, drawn by `ui::draw` over everything else.
+pub fn render_mode(frame: &mut Frame, controller: &mut GitController, area: Rect) {
     let (title, prompt, confirmation) = match &controller.mode {
         GitMode::Commit(message) => ("Commit changes", format!("Message: {message}"), false),
         GitMode::Rebase(target) => ("Rebase", format!("Target branch/commit: {target}"), false),
@@ -636,38 +622,47 @@ fn render_mode(frame: &mut Frame, controller: &mut GitController, area: Rect) {
         ),
         GitMode::None => return,
     };
-    let block = panel_block(format!(" {title} "), true);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let sections = Layout::vertical([
-        Constraint::Min(2),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .split(inner);
-    frame.render_widget(
-        Paragraph::new(prompt).wrap(Wrap { trim: false }),
-        sections[0],
-    );
-    action_button(
+    let progress = controller.motion.dialog();
+    render_dialog(
         frame,
-        controller,
-        Rect::new(sections[1].x, sections[1].y, 18, 1),
-        if confirmation { "Confirm" } else { "Continue" },
-        GitUiAction::Submit,
-        true,
-    );
-    action_button(
-        frame,
-        controller,
-        Rect::new(sections[1].x + 20, sections[1].y, 12, 1),
-        "Cancel",
-        GitUiAction::Cancel,
-        false,
-    );
-    frame.render_widget(
-        Paragraph::new("Enter: confirm  Esc: cancel").style(Style::default().fg(MUTED)),
-        sections[2],
+        centered(area, 60, 34),
+        progress,
+        format!(" {title} "),
+        |frame, inner| {
+            if inner.height < 2 {
+                return;
+            }
+            let sections = Layout::vertical([
+                Constraint::Min(2),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+            frame.render_widget(
+                Paragraph::new(prompt).wrap(Wrap { trim: false }),
+                sections[0],
+            );
+            action_button(
+                frame,
+                controller,
+                Rect::new(sections[1].x, sections[1].y, 18, 1),
+                if confirmation { "Confirm" } else { "Continue" },
+                GitUiAction::Submit,
+                true,
+            );
+            action_button(
+                frame,
+                controller,
+                Rect::new(sections[1].x + 20, sections[1].y, 12, 1),
+                "Cancel",
+                GitUiAction::Cancel,
+                false,
+            );
+            frame.render_widget(
+                Paragraph::new("Enter: confirm  Esc: cancel").style(Style::default().fg(MUTED)),
+                sections[2],
+            );
+        },
     );
 }
 

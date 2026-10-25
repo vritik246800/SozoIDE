@@ -124,8 +124,13 @@ impl App {
             self.show_bottom_terminal,
             self.show_right_terminal,
         );
+        let tab = self.active_tab.and_then(|index| {
+            self.open_files
+                .get(index)
+                .map(|file| (index, file.path.as_path()))
+        });
         self.motion
-            .sync_content(self.show_git, self.show_database, self.active_tab);
+            .sync_content(self.show_git, self.show_database, tab);
         if self.splash_visible && now >= self.splash_until && !self.motion.splash_closing() {
             self.motion.close_splash(now);
         }
@@ -157,6 +162,14 @@ impl App {
     /// download is done (`main` installs and restarts).
     fn tick_update(&mut self) {
         self.updater.tick();
+        if let UpdateState::Downloading {
+            received,
+            total: Some(total),
+        } = self.updater.state
+        {
+            self.motion
+                .sync_download((received as f64 / total.max(1) as f64) as f32);
+        }
         match self.updater.state {
             UpdateState::Available
                 if self.overlay == Overlay::None

@@ -196,7 +196,11 @@ pub(super) fn render_terminal(frame: &mut Frame, app: &App, area: Rect, bottom: 
         (
             &app.right_terminal,
             app.focus == Focus::RightTerminal,
-            " Right terminal [Ctrl+Shift+B] ",
+            if cfg!(target_os = "macos") {
+                " Right terminal [Ctrl+Option+B] "
+            } else {
+                " Right terminal [Ctrl+Shift+B] "
+            },
         )
     };
     if let Ok(parser) = terminal.parser.read() {

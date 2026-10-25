@@ -1,10 +1,15 @@
+use std::time::Duration;
+
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Style},
-    text::Line,
-    widgets::{Block, Borders, Paragraph},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
+
+use crate::animation::{self, Edge, SWEEP_CYCLE};
 
 pub(crate) const ACTIVE: Color = Color::Cyan;
 pub(crate) const TEXT: Color = Color::Reset;
@@ -50,42 +55,230 @@ pub(crate) fn scale_length(length: u16, progress: f32) -> u16 {
     ((length as f32 * progress.clamp(0.0, 1.0)).round() as u16).min(length)
 }
 
-pub(crate) fn reveal(area: Rect, progress: f32) -> Rect {
+/// The rows of a dialog that have unfolded from its middle row: the top and bottom border
+/// first, then the rest.
+pub(crate) fn unfold(area: Rect, progress: f32) -> Rect {
+    if progress <= 0.0 {
+        return Rect::new(area.x, area.y + area.height / 2, area.width, 0);
+    }
+    let height = scale_length(area.height, progress).max(area.height.min(2));
     Rect::new(
         area.x,
-        area.y,
-        scale_length(area.width, progress),
-        area.height,
-    )
-}
-
-pub(crate) fn scale_centered(area: Rect, progress: f32) -> Rect {
-    let width = scale_length(area.width, progress);
-    let height = scale_length(area.height, progress);
-    Rect::new(
-        area.x.saturating_add(area.width.saturating_sub(width) / 2),
-        area.y
-            .saturating_add(area.height.saturating_sub(height) / 2),
-        width,
+        area.y + (area.height - height) / 2,
+        area.width,
         height,
     )
 }
 
+/// Draws a dialog at its final size and shows only the rows that have unfolded, with the
+/// border on their edges, so its text never reflows while it opens or closes. Everything
+/// behind it is dimmed while it is on screen.
+pub(crate) fn render_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    progress: f32,
+    title: String,
+    draw: impl FnOnce(&mut Frame, Rect),
+) {
+    let visible = unfold(area, progress);
+    if visible.is_empty() || area.width < 2 {
+        return;
+    }
+    let screen = frame.area();
+    frame
+        .buffer_mut()
+        .set_style(screen, Style::default().add_modifier(Modifier::DIM));
+    let behind = (visible != area).then(|| frame.buffer_mut().clone());
+    frame.render_widget(Clear, area);
+    let block = panel_block(title, true);
+    let inner = block.inner(area);
+    frame.render_widget(block.clone(), area);
+    draw(frame, inner);
+    if let Some(behind) = behind {
+        let buffer = frame.buffer_mut();
+        for position in area
+            .positions()
+            .filter(|&position| !visible.contains(position))
+        {
+            buffer[position] = behind[position].clone();
+        }
+        // No style: the content keeps its colours under the new edges.
+        frame.render_widget(block.style(Style::default()), visible);
+    }
+}
+
+/// Shows the previous frame wherever the new content of `area` has not arrived yet. It comes
+/// in from `edge` (line by line from the top, column by column from a side) and never moves,
+/// so there is no blank area between the old and the new content.
+pub(crate) fn sweep(buffer: &mut Buffer, previous: &Buffer, area: Rect, progress: f32, edge: Edge) {
+    if progress >= 1.0 || previous.area != buffer.area {
+        return;
+    }
+    let area = area.intersection(buffer.area);
+    let rows = scale_length(area.height, progress);
+    let columns = scale_length(area.width, progress);
+    for position in area.positions() {
+        let arrived = match edge {
+            Edge::Top => position.y < area.y + rows,
+            Edge::Left => position.x < area.x + columns,
+            Edge::Right => position.x >= area.right() - columns,
+        };
+        if !arrived {
+            buffer[position] = previous[position].clone();
+        }
+    }
+}
+
+/// One row of `width` cells: `━` in ACTIVE from `start` to `end` (in cells, to half a cell)
+/// over a `─` track in BORDER.
+pub(crate) fn bar(width: u16, start: f32, end: f32) -> Line<'static> {
+    let (start, end) = ((start * 2.0).round() as i32, (end * 2.0).round() as i32);
+    let filled = |half: i32| (start..end).contains(&half);
+    let cells = (0..i32::from(width))
+        .map(|cell| {
+            let symbol = match (filled(cell * 2), filled(cell * 2 + 1)) {
+                (true, true) => "━",
+                (true, false) => "╾",
+                (false, true) => "╼",
+                (false, false) => return Span::styled("─", Style::default().fg(BORDER)),
+            };
+            Span::styled(symbol, Style::default().fg(ACTIVE))
+        })
+        .collect::<Vec<_>>();
+    Line::from(cells)
+}
+
+/// A bar for work of unknown length: a segment sweeps across it once every `SWEEP_CYCLE`.
+pub(crate) fn sweep_bar(width: u16, elapsed: Duration) -> Line<'static> {
+    let length = f32::from(width);
+    let segment = length * 0.3;
+    let start = -segment + (length + segment) * animation::cycle(elapsed, SWEEP_CYCLE);
+    bar(width, start, start + segment)
+}
+
+/// The spinner of a running operation in ACTIVE, then what is running.
+pub(crate) fn busy(spinner: &'static str, text: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(spinner, Style::default().fg(ACTIVE)),
+        Span::raw(format!(" {text}")),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
+    use ratatui::{Terminal, backend::TestBackend, layout::Position};
+
     use super::*;
 
-    #[test]
-    fn animated_geometry_stays_inside_its_final_area() {
-        let area = Rect::new(10, 8, 41, 19);
-        let revealed = reveal(area, 0.5);
-        let scaled = scale_centered(area, 0.5);
+    fn text(line: &Line) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
 
-        assert_eq!(revealed, Rect::new(10, 8, 21, 19));
-        assert_eq!(scaled, Rect::new(20, 12, 21, 10));
-        assert!(scaled.x >= area.x && scaled.right() <= area.right());
-        assert!(scaled.y >= area.y && scaled.bottom() <= area.bottom());
+    fn row(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
+    #[test]
+    fn dialogs_unfold_from_their_middle_row() {
+        let area = Rect::new(10, 8, 40, 20);
+        assert!(unfold(area, 0.0).is_empty());
+        assert_eq!(unfold(area, 0.01), Rect::new(10, 17, 40, 2));
+        assert_eq!(unfold(area, 0.5), Rect::new(10, 13, 40, 10));
+        assert_eq!(unfold(area, 1.0), area);
         assert_eq!(scale_length(30, 2.0), 30);
         assert_eq!(scale_length(30, -1.0), 0);
+    }
+
+    #[test]
+    fn a_half_open_dialog_keeps_its_text_in_place_over_the_dimmed_screen() {
+        let lines = (0..10)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>();
+        let draw = |progress: f32| {
+            let mut terminal = Terminal::new(TestBackend::new(30, 14)).unwrap();
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(
+                        Paragraph::new(vec![Line::from("behind ".repeat(5)); 14]),
+                        frame.area(),
+                    );
+                    render_dialog(
+                        frame,
+                        Rect::new(2, 1, 26, 12),
+                        progress,
+                        " Dialog ".to_string(),
+                        |frame, inner| frame.render_widget(Paragraph::new(lines.join("\n")), inner),
+                    );
+                })
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let open = draw(1.0);
+        let half = draw(0.5);
+
+        // The middle rows are the same as when the dialog is open: nothing reflowed.
+        for y in 6..8 {
+            assert_eq!(row(&half, y), row(&open, y));
+        }
+        assert!(row(&half, 4).contains("╭ Dialog"));
+        assert!(row(&half, 9).contains("╰"));
+        assert!(row(&half, 2).starts_with("behind"));
+        assert!(half[(0, 2)].modifier.contains(Modifier::DIM));
+        assert!(!half[(5, 6)].modifier.contains(Modifier::DIM));
+        assert!(row(&open, 2).contains("line 0"));
+    }
+
+    #[test]
+    fn new_content_arrives_from_its_edge_over_the_previous_frame() {
+        let area = Rect::new(0, 0, 10, 4);
+        let previous = Buffer::with_lines(["oooooooooo"; 4]);
+        let fresh = Buffer::with_lines(["nnnnnnnnnn"; 4]);
+        let swept = |progress: f32, edge: Edge| {
+            let mut buffer = fresh.clone();
+            sweep(&mut buffer, &previous, area, progress, edge);
+            buffer
+        };
+
+        let top = swept(0.5, Edge::Top);
+        assert_eq!(
+            (row(&top, 1), row(&top, 2)),
+            ("nnnnnnnnnn".into(), "oooooooooo".into())
+        );
+        assert_eq!(row(&swept(0.3, Edge::Left), 0), "nnnooooooo");
+        assert_eq!(row(&swept(0.3, Edge::Right), 3), "ooooooonnn");
+        assert_eq!(swept(1.0, Edge::Left), fresh);
+        assert_eq!(swept(0.0, Edge::Right), previous);
+
+        // A frame of another size (the terminal was resized) is never mixed in.
+        let mut buffer = fresh.clone();
+        sweep(
+            &mut buffer,
+            &Buffer::empty(Rect::new(0, 0, 3, 3)),
+            area,
+            0.5,
+            Edge::Top,
+        );
+        assert_eq!(buffer, fresh);
+        assert_eq!(buffer[Position::new(9, 3)].symbol(), "n");
+    }
+
+    #[test]
+    fn bars_fill_to_half_a_cell() {
+        assert_eq!(text(&bar(6, 0.0, 6.0)), "━━━━━━");
+        assert_eq!(text(&bar(6, 0.0, 0.0)), "──────");
+        assert_eq!(text(&bar(6, 0.0, 2.5)), "━━╾───");
+        assert_eq!(text(&bar(6, 1.5, 4.0)), "─╼━━──");
+        assert_eq!(bar(6, 0.0, 3.0).spans[0].style.fg, Some(ACTIVE));
+        assert_eq!(bar(6, 0.0, 3.0).spans[5].style.fg, Some(BORDER));
+
+        // The indeterminate bar starts and ends outside the track and crosses it in between.
+        assert_eq!(text(&sweep_bar(10, Duration::ZERO)), "──────────");
+        assert!(text(&sweep_bar(10, SWEEP_CYCLE / 2)).contains("━━"));
+        assert_eq!(text(&busy("⠋", "Working...")), "⠋ Working...");
     }
 }

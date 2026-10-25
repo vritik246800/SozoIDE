@@ -60,7 +60,7 @@ sozo --version
 | --- | --- |
 | `Ctrl+B` | Show or hide the Explorer |
 | `Ctrl+J` | Show or hide the bottom terminal |
-| `Ctrl+Shift+B` | Show or hide the right terminal |
+| `Ctrl+Shift+B` (macOS: `Ctrl+Option+B`) | Show or hide the right terminal |
 | `Ctrl+G` | Open or close Source Control |
 | `Ctrl+D` | Open or close Database |
 | `Ctrl+P` | Search the open file |
@@ -76,6 +76,10 @@ sozo --version
 | `Page Up` / `Page Down` | Scroll the editor or the terminal history |
 | Mouse wheel | Scroll panels and terminal history |
 | Drag a divider | Resize the Explorer and the terminals |
+
+### Motion
+
+Panels grow from their divider, Source Control and Database draw in line by line, a tab comes in from its side, and dialogs open from their middle row with the rest of the screen dimmed. Transitions never hold up saving, commits or queries. Set `SOZO_REDUCED_MOTION=1` to turn them off.
 
 ### Updates
 
@@ -124,7 +128,7 @@ npm run dev
 src/          the application: app, editor, terminal, git, database, update, ui, animation
 tests/        CLI, end-to-end and interaction tests in a real PTY
 packaging/    native installers for Linux, macOS and Windows
-site/         landing page (Astro), published to GitHub Pages
+site/         landing page (Astro), published to GitHub Pages; site/scripts captures its SozoIDE screens
 assets/       logo
 .github/      CI, release and Pages workflows, and repository rulesets
 .githooks/    local pre-commit and pre-push hooks
