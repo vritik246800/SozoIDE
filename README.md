@@ -142,6 +142,7 @@ assets/       logo
 1. Raise `version` in `Cargo.toml` on `preview` and merge it into `main` through a pull request.
 2. Tag `main` with the same version and push the tag: `git tag v0.1.0 && git push origin v0.1.0`
 3. The Release workflow builds every installer, installs it on its own system, and publishes the release with install notes and `SHA256SUMS.txt`. Package names carry no version, so `releases/latest/download/<name>` always points at the newest one.
+4. Check that every download link on the website now delivers the new version: `bash packaging/check-downloads.sh`
 
 ## Security
 
