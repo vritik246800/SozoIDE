@@ -121,7 +121,7 @@ tests/        CLI, end-to-end and interaction tests in a real PTY
 packaging/    native installers for Linux, macOS and Windows
 site/         landing page (Astro), published to GitHub Pages
 assets/       logo
-.github/      CI, native packages and Pages workflows, and repository rulesets
+.github/      CI, release and Pages workflows, and repository rulesets
 .githooks/    local pre-commit and pre-push hooks
 ```
 
@@ -136,7 +136,7 @@ assets/       logo
 
 1. Raise `version` in `Cargo.toml` on `preview` and merge it into `main` through a pull request.
 2. Tag `main` with the same version and push the tag: `git tag v0.1.0 && git push origin v0.1.0`
-3. The Native packages workflow builds every installer and publishes the release with `SHA256SUMS.txt`.
+3. The Release workflow builds every installer and publishes the release with install notes and `SHA256SUMS.txt`.
 
 ## Security
 

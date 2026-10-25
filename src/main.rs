@@ -7,7 +7,12 @@ mod git;
 mod terminal;
 mod ui;
 
-use std::{env, io, path::PathBuf, time::Duration};
+use std::{
+    env, io,
+    path::PathBuf,
+    process::{Command, Stdio},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use app::App;
@@ -26,8 +31,7 @@ fn main() -> Result<()> {
     let Some(root) = command_line_root()? else {
         return Ok(());
     };
-    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
-    let mut app = App::with_picker(root, picker, true)?;
+    let mut app = App::with_picker(root, image_picker(), true)?;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -54,6 +58,43 @@ fn main() -> Result<()> {
     )?;
     terminal.show_cursor()?;
     result
+}
+
+/// Asks the terminal which image protocol it speaks. Inside tmux the question travels through
+/// passthrough and only an attached client answers it; when nobody does, the reader thread of
+/// ratatui-image stays alive and steals the cursor position reply that ratatui needs at startup.
+fn image_picker() -> Picker {
+    if tmux_terminal() && !tmux_passthrough_reaches_a_client() {
+        return Picker::halfblocks();
+    }
+    Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())
+}
+
+/// The same test ratatui-image uses to wrap its queries in tmux passthrough.
+fn tmux_terminal() -> bool {
+    env::var("TERM").is_ok_and(|term| term.starts_with("tmux"))
+        || env::var("TERM_PROGRAM").is_ok_and(|program| program == "tmux")
+}
+
+fn tmux_passthrough_reaches_a_client() -> bool {
+    let Ok(output) = Command::new("tmux")
+        .args(["set", "-p", "allow-passthrough", "on", ";"])
+        .args(["show", "-pv", "allow-passthrough", ";"])
+        .args(["display", "-p", "#{session_attached}"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    output.status.success()
+        && matches!(lines.next(), Some("on" | "all"))
+        && lines
+            .next()
+            .and_then(|clients| clients.parse::<u32>().ok())
+            .is_some_and(|clients| clients > 0)
 }
 
 fn command_line_root() -> Result<Option<PathBuf>> {

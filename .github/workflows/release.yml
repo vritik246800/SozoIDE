@@ -1,4 +1,4 @@
-name: Native packages
+name: Release
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
   # On pull requests the builds wait until the repository is public, where Actions minutes are free.
   pull_request:
     branches: [main]
-    paths: ['packaging/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/packages.yml']
+    paths: ['packaging/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/release.yml']
 
 permissions:
   contents: read
@@ -76,6 +76,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          # gh puts these notes before the generated ones.
+          NOTES: |
+            Download the file for your system and install it. Then open a new terminal and run `sozo .` in any folder.
+
+            | System | File | Install |
+            | --- | --- | --- |
+            | macOS (Apple silicon) | `.pkg` | Open it |
+            | Windows (x86_64) | `.msi` | Open it. Installs for your user only, without administrator rights |
+            | Debian, Ubuntu | `.deb` | `sudo apt install ./sozoide_*.deb` |
+            | Fedora, openSUSE | `.rpm` | `sudo dnf install ./sozoide-*.rpm` |
+            | Other Linux (x86_64) | `.tar.gz` | Extract `sozo` into a folder on your PATH |
+
+            The installers are not signed yet. On macOS, if the package is blocked, open System Settings, Privacy & Security, and choose Open Anyway. On Windows, if SmartScreen appears, choose More info, then Run anyway. `SHA256SUMS.txt` has the checksum of every file.
         run: |
-          sha256sum * > SHA256SUMS.txt
-          gh release create "$GITHUB_REF_NAME" * --verify-tag --generate-notes --title "SozoIDE $GITHUB_REF_NAME"
+          sha256sum -- * > SHA256SUMS.txt
+          gh release create "$GITHUB_REF_NAME" ./* --verify-tag --generate-notes --notes "$NOTES" --title "SozoIDE $GITHUB_REF_NAME"
