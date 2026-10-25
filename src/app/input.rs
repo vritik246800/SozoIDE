@@ -1,7 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use crate::editor::{SearchScope, SearchState};
+use crate::{
+    editor::{SearchScope, SearchState},
+    update::UpdateState,
+};
 
 use super::{App, DragTarget, Focus, Overlay};
 
@@ -20,6 +23,10 @@ impl App {
         }
         if self.search.is_some() && !self.motion.search_closing() {
             self.handle_search_key(key);
+            return;
+        }
+        if self.overlay == Overlay::Update && !self.motion.overlay_closing() {
+            self.handle_update_key(key.code);
             return;
         }
         if self.overlay != Overlay::None {
@@ -221,7 +228,27 @@ impl App {
         }
     }
 
-    fn open_overlay(&mut self, overlay: Overlay) {
+    /// Enter or U updates, S skips this version, Esc leaves it for later or cancels the download.
+    fn handle_update_key(&mut self, code: KeyCode) {
+        match (&self.updater.state, code) {
+            (UpdateState::Available, KeyCode::Enter | KeyCode::Char('u' | 'U')) => {
+                self.updater.start_download();
+            }
+            (UpdateState::Available, KeyCode::Char('s' | 'S')) => {
+                self.updater.skip();
+                if self.updater.state == UpdateState::Idle {
+                    self.close_overlay();
+                }
+            }
+            (_, KeyCode::Esc) => {
+                self.updater.dismiss();
+                self.close_overlay();
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn open_overlay(&mut self, overlay: Overlay) {
         self.overlay = overlay;
         self.motion.open_overlay(std::time::Instant::now());
     }
@@ -352,6 +379,14 @@ impl App {
                             search.selected = *index;
                         }
                         self.handle_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                    }
+                    return;
+                }
+                if self.overlay == Overlay::Update && !self.motion.overlay_closing() {
+                    if contains(self.regions.update_install, point) {
+                        self.handle_update_key(KeyCode::Enter);
+                    } else if contains(self.regions.update_skip, point) {
+                        self.handle_update_key(KeyCode::Char('s'));
                     }
                     return;
                 }
@@ -665,6 +700,49 @@ mod tests {
     fn quit_shortcut_stops_the_application() {
         let mut app = test_app();
         app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn update_notice_skips_waits_and_quits_to_install() {
+        use crate::update::Updater;
+        let directory = tempfile::tempdir().unwrap();
+        let settings = directory.path().join("update.toml");
+        let mut app = test_app();
+        app.updater = Updater::offering("99.0.0", settings.clone());
+        app.tick();
+        assert_eq!(app.overlay, Overlay::Update);
+        app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        assert_eq!(app.overlay, Overlay::Update);
+
+        app.regions.update_skip = Rect::new(30, 12, 23, 1);
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 35,
+            row: 12,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.updater.state, UpdateState::Idle);
+        assert!(
+            std::fs::read_to_string(&settings)
+                .unwrap()
+                .contains("99.0.0")
+        );
+        let now = std::time::Instant::now();
+        app.tick_at(now + std::time::Duration::from_millis(200));
+        assert_eq!(app.overlay, Overlay::None);
+
+        app.updater = Updater::offering("99.0.1", settings);
+        app.tick();
+        assert_eq!(app.overlay, Overlay::Update);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.updater.state, UpdateState::Idle);
+        app.tick_at(std::time::Instant::now() + std::time::Duration::from_millis(200));
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(!app.should_quit);
+
+        app.updater.state = UpdateState::Ready(directory.path().join("SozoIDE-macos-arm64.dmg"));
+        app.tick();
         assert!(app.should_quit);
     }
 }

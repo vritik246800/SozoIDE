@@ -15,6 +15,7 @@ pub enum Overlay {
     None,
     Help,
     About,
+    Update,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +38,8 @@ pub struct Regions {
     pub right_handle: Rect,
     pub header_help: Rect,
     pub header_about: Rect,
+    pub update_install: Rect,
+    pub update_skip: Rect,
     pub search_input: Rect,
     pub search_results: Rect,
     pub search_match_items: Vec<(usize, Rect)>,

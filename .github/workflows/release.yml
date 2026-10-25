@@ -28,6 +28,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - shell: pwsh
         run: packaging/build-windows.ps1
+      - shell: pwsh
+        run: packaging/test-install.ps1
       - uses: actions/upload-artifact@v7
         with:
           name: sozoide-windows-${{ matrix.arch }}
@@ -41,6 +43,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: bash packaging/build-macos.sh
+      - run: bash packaging/test-install.sh
       - uses: actions/upload-artifact@v7
         with:
           name: sozoide-macos
@@ -60,6 +63,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: bash packaging/build-linux.sh
+      - run: bash packaging/test-install.sh
       - uses: actions/upload-artifact@v7
         with:
           name: sozoide-linux-${{ matrix.arch }}
@@ -91,25 +95,17 @@ jobs:
           GH_REPO: ${{ github.repository }}
           # gh puts these notes before the generated ones.
           NOTES: |
-            Download the file for your system and install it. Then open a new terminal and run `sozo .` in any folder.
+            Download the file for your system and install it. Then open a new terminal and run `sozo .` in any folder. SozoIDE tells you when a newer version is out and can install it for you.
 
             | System | File | Install |
             | --- | --- | --- |
-            | macOS (Apple silicon) | `.dmg` | Open it and drag SozoIDE to Applications. For the `sozo` command, see below |
-            | Windows (x86_64 or ARM64) | `x86_64.msi` or `aarch64.msi` | Open it. Installs for your user only, without administrator rights |
-            | Debian, Ubuntu | `amd64.deb` or `arm64.deb` | `sudo apt install ./sozoide_*.deb` |
-            | Fedora, openSUSE | `x86_64.rpm` or `aarch64.rpm` | `sudo dnf install ./sozoide-*.rpm` |
-            | Other Linux | `x86_64-linux.tar.gz` or `aarch64-linux.tar.gz` | Extract `sozo` into a folder on your PATH |
+            | macOS (Apple silicon) | `SozoIDE-macos-arm64.dmg` | Open it, drag SozoIDE to Applications and open the app once: it offers to install the `sozo` command |
+            | Windows | `SozoIDE-windows-x86_64.msi` or `SozoIDE-windows-arm64.msi` | Open it and follow the setup. Installs for your user only, without administrator rights, and adds `sozo` to the PATH |
+            | Debian, Ubuntu | `SozoIDE-linux-x86_64.deb` or `SozoIDE-linux-arm64.deb` | Open it in your software installer, or `sudo apt install ./SozoIDE-linux-*.deb` |
+            | Fedora, openSUSE | `SozoIDE-linux-x86_64.rpm` or `SozoIDE-linux-arm64.rpm` | Open it in your software installer, or `sudo dnf install ./SozoIDE-linux-*.rpm` |
+            | Other Linux | `SozoIDE-linux-x86_64.tar.gz` or `SozoIDE-linux-arm64.tar.gz` | Extract `sozo` into a folder on your PATH |
 
-            On macOS, the app is not signed yet. To open it and to run `sozo` from any terminal, run once:
-
-            ```sh
-            xattr -dr com.apple.quarantine /Applications/SozoIDE.app
-            sudo mkdir -p /usr/local/bin
-            sudo ln -sf /Applications/SozoIDE.app/Contents/MacOS/sozo /usr/local/bin/sozo
-            ```
-
-            The Windows installer is not signed yet either: if SmartScreen appears, choose More info, then Run anyway. `SHA256SUMS.txt` has the checksum of every file.
+            The installers are not signed yet. On macOS, if the app does not open, go to System Settings, Privacy & Security, and choose Open Anyway. On Windows, if SmartScreen appears, choose More info, then Run anyway. `SHA256SUMS.txt` has the checksum of every file.
         run: |
           sha256sum -- * > SHA256SUMS.txt
           gh release create "$GITHUB_REF_NAME" ./* --verify-tag --generate-notes --notes "$NOTES" --title "SozoIDE $GITHUB_REF_NAME"
