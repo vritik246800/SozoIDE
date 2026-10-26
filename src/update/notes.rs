@@ -8,9 +8,9 @@ pub struct Notes {
 }
 
 pub const NOTES: Notes = Notes {
-    version: "0.3.1",
+    version: "0.3.2",
     new: &[
-        "Installations and updates are counted once each, anonymously (system, architecture and version only); SOZO_NO_TELEMETRY=1 turns it off",
+        "Updates are now counted once too, like new installations, anonymously (system, architecture and version only); SOZO_NO_TELEMETRY=1 turns both off",
     ],
     fixed: &[],
 };
