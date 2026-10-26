@@ -160,7 +160,7 @@ impl Updater {
             }
         };
         let name = asset_name(env::consts::OS, env::consts::ARCH, package.extension());
-        let url = format!("{REPOSITORY}/releases/download/v{}/{name}", self.version);
+        let url = package_url(&name);
         let file = env::temp_dir().join(name);
         self.cancel = Arc::new(AtomicBool::new(false));
         let cancel = self.cancel.clone();
@@ -246,6 +246,12 @@ impl Updater {
 pub fn asset_name(os: &str, arch: &str, extension: &str) -> String {
     let arch = if arch == "aarch64" { "arm64" } else { arch };
     format!("SozoIDE-{os}-{arch}.{extension}")
+}
+
+/// Always the latest release when the download starts, even if a newer one came out after the
+/// startup check: updates never stop on an older version.
+fn package_url(name: &str) -> String {
+    format!("{REPOSITORY}/releases/latest/download/{name}")
 }
 
 /// GitHub counts every download of a release file, so fetching the small
@@ -450,6 +456,14 @@ mod tests {
         assert_eq!(
             asset_name("linux", "aarch64", "tar.gz"),
             "SozoIDE-linux-arm64.tar.gz"
+        );
+    }
+
+    #[test]
+    fn updates_download_the_latest_release() {
+        assert_eq!(
+            package_url("SozoIDE-macos-arm64.dmg"),
+            format!("{REPOSITORY}/releases/latest/download/SozoIDE-macos-arm64.dmg")
         );
     }
 
