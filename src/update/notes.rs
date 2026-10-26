@@ -8,14 +8,9 @@ pub struct Notes {
 }
 
 pub const NOTES: Notes = Notes {
-    version: "0.3.0",
+    version: "0.3.2",
     new: &[
-        "Markdown headings, quotes, rules and code blocks are drawn; hover a line for its source",
-        "Mermaid diagrams in Markdown are drawn with box characters",
-        "Tables draw bold, italic and highlights inside their cells",
-        "Each side of a split editor keeps its own tabs; drag tabs back to join them",
-        "Long lines scroll sideways with Shift and the mouse wheel",
-        "The tab bar scrolls with the mouse wheel or its < and > arrows",
+        "Updates are now counted once too, like new installations, anonymously (system, architecture and version only); SOZO_NO_TELEMETRY=1 turns both off",
     ],
-    fixed: &["Linux: the right terminal now opens with Ctrl+Alt+B"],
+    fixed: &[],
 };

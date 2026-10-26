@@ -24,12 +24,28 @@ failed=0
 for file in "${FILES[@]}"; do
     url="$REPO/releases/latest/download/SozoIDE-$file"
     target=$(curl -s -o /dev/null -w '%{redirect_url}' "$url")
-    status=$(curl -sL -o /dev/null -w '%{http_code}' -r 0-0 "$url")
-    if [[ $target == "$REPO/releases/download/v$VERSION/SozoIDE-$file" && $status =~ ^20[06]$ ]]; then
+    # HEAD, not GET: GitHub counts every GET as a download, and Info_SozoIDE reads those counts.
+    status=$(curl -sIL -o /dev/null -w '%{http_code}' "$url")
+    if [[ $target == "$REPO/releases/download/v$VERSION/SozoIDE-$file" && $status == 200 ]]; then
         echo "OK  SozoIDE-$file -> v$VERSION"
     else
         echo "BAD SozoIDE-$file -> ${target:-no redirect} ($status)" >&2
         failed=1
     fi
+done
+# The files SozoIDE downloads once to count an installation or an update (F20).
+# v0.3.1 only counted installations.
+kinds=(installed updated)
+[[ $VERSION == 0.3.1 ]] && kinds=(installed)
+for target in macos-arm64 windows-x86_64 windows-arm64 linux-x86_64 linux-arm64; do
+    for kind in "${kinds[@]}"; do
+        url="$REPO/releases/download/v$VERSION/SozoIDE-$target.$kind.txt"
+        if [[ $(curl -sIL -o /dev/null -w '%{http_code}' "$url") == 200 ]]; then
+            echo "OK  SozoIDE-$target.$kind.txt"
+        else
+            echo "BAD SozoIDE-$target.$kind.txt missing from v$VERSION" >&2
+            failed=1
+        fi
+    done
 done
 exit "$failed"

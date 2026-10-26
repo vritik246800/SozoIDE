@@ -355,7 +355,9 @@ fn tutorial_steps(os: &str) -> [(&'static str, String); TUTORIAL_STEPS] {
         (
             "Welcome to SozoIDE",
             "An IDE that lives in your terminal: files, editor, two shells, Git and SQL side by \
-             side. This tour shows where everything is and takes a minute."
+             side. This tour shows where everything is and takes a minute. SozoIDE counted this \
+             installation once, anonymously (system, architecture and version only); set \
+             SOZO_NO_TELEMETRY=1 to turn that off."
                 .to_string(),
         ),
         (
@@ -743,5 +745,11 @@ mod tests {
         assert!(linux.contains("Ctrl+Alt+B") && !linux.contains("fn+"));
         let windows = tutorial_steps("windows").map(|(_, text)| text).join("\n");
         assert!(windows.contains("Ctrl+Shift+B"));
+    }
+
+    #[test]
+    fn the_tutorial_says_what_was_counted() {
+        let (_, welcome) = &tutorial_steps("linux")[0];
+        assert!(welcome.contains("anonymously") && welcome.contains("SOZO_NO_TELEMETRY=1"));
     }
 }
