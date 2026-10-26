@@ -13,12 +13,15 @@ use ratatui::{
 use crate::app::{App, Overlay, Regions};
 
 pub(crate) use components::{
-    ACTIVE, BORDER, MUTED, TEXT, bar, busy, centered, panel_block, render_dialog, scale_length,
-    sweep_bar,
+    ACTIVE, BORDER, MUTED, TEXT, bar, busy, centered, key, panel_block, render_dialog,
+    scale_length, sweep_bar,
 };
 use components::{render_handle, sweep};
 use editor::{render_editor, render_explorer, render_tabs, render_terminal};
-use overlays::{render_about, render_help, render_search, render_splash, render_update};
+use overlays::{
+    render_about, render_help, render_search, render_splash, render_tutorial, render_update,
+    render_whats_new,
+};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -28,7 +31,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(1),
     ])
     .split(area);
-    render_header(frame, app, vertical[0]);
 
     let explorer_width = scale_length(app.explorer_width, app.motion.explorer());
     let right_terminal_width = scale_length(app.right_terminal_width, app.motion.right_terminal());
@@ -48,10 +50,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let mut center_index = 0;
     let mut regions = Regions {
         body: vertical[1],
-        header_help: Rect::new(area.width.saturating_sub(20), 0, 9, 1),
-        header_about: Rect::new(area.width.saturating_sub(10), 0, 10, 1),
         ..Regions::default()
     };
+    render_header(frame, app, &mut regions, vertical[0]);
     if explorer_width > 0 {
         regions.explorer = horizontal[0];
         regions.explorer_handle = horizontal[1];
@@ -83,6 +84,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(editor_area);
     regions.tabs = editor_parts[0];
     regions.editor = editor_parts[1];
+    regions.editor_body = editor_parts[1];
     let content_area = editor_parts[1];
 
     if explorer_width > 0 {
@@ -96,7 +98,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else if app.show_git {
         crate::git::view::render(frame, &mut app.git, regions.editor);
     } else {
-        render_editor(frame, app, regions.editor);
+        let area = regions.editor;
+        render_editor(frame, app, &mut regions, area);
     }
     if bottom_terminal_height > 0 {
         render_handle(frame, regions.bottom_handle, false);
@@ -142,7 +145,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     match app.overlay {
         Overlay::Help => render_help(frame, area, app.motion.overlay()),
-        Overlay::About => render_about(frame, area, app.motion.overlay()),
+        Overlay::About => render_about(frame, app, area),
+        Overlay::Tutorial => render_tutorial(frame, app, area),
+        Overlay::WhatsNew => render_whats_new(frame, app, area),
         Overlay::Update => {
             let progress = app.motion.overlay();
             render_update(frame, app, area, progress);
@@ -154,7 +159,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn render_header(frame: &mut Frame, app: &App, area: Rect) {
+fn render_header(frame: &mut Frame, app: &App, regions: &mut Regions, area: Rect) {
+    let help_label = format!(" Help {} ", key("F1"));
+    let about_label = format!(" About {} ", key("F2"));
+    let about_width = about_label.len() as u16;
+    let help_width = help_label.len() as u16;
+    let about = Rect::new(
+        area.right().saturating_sub(about_width),
+        area.y,
+        about_width,
+        1,
+    );
+    let help = Rect::new(
+        about.x.saturating_sub(help_width + 1),
+        area.y,
+        help_width,
+        1,
+    );
     let root = app.root.display().to_string();
     let line = Line::from(vec![
         Span::styled(
@@ -163,18 +184,21 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled(format!(" {root}"), Style::default().fg(MUTED)),
     ]);
-    frame.render_widget(Paragraph::new(line), area);
-    let right = area.width;
-    let help = Rect::new(right.saturating_sub(20), area.y, 9, 1);
-    let about = Rect::new(right.saturating_sub(10), area.y, 10, 1);
+    // The path stops before the buttons instead of running under them.
     frame.render_widget(
-        Paragraph::new(" Help F1 ").alignment(Alignment::Center),
+        Paragraph::new(line),
+        Rect::new(area.x, area.y, help.x.saturating_sub(area.x + 1), 1),
+    );
+    frame.render_widget(
+        Paragraph::new(help_label).alignment(Alignment::Center),
         help,
     );
     frame.render_widget(
-        Paragraph::new(" About F2 ").alignment(Alignment::Center),
+        Paragraph::new(about_label).alignment(Alignment::Center),
         about,
     );
+    regions.header_help = help;
+    regions.header_about = about;
 }
 
 fn render_footer(frame: &mut Frame, area: Rect) {
@@ -187,6 +211,8 @@ fn render_footer(frame: &mut Frame, area: Rect) {
         Span::raw("Git  "),
         Span::styled("Ctrl+D ", Style::default().fg(ACTIVE)),
         Span::raw("Database  "),
+        Span::styled(format!("{} ", key("F1")), Style::default().fg(ACTIVE)),
+        Span::raw("Help  "),
         Span::styled("Ctrl+Q ", Style::default().fg(ACTIVE)),
         Span::raw("Quit"),
     ]);
@@ -416,7 +442,7 @@ mod tests {
         app.tick_at(start + SPLASH_DRAW.open / 4);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(!text.contains("Starting...") && !text.contains("Help F1"));
+        assert!(!text.contains("Starting...") && !text.contains(&format!("Help {}", key("F1"))));
 
         app.tick_at(created + SPLASH_DRAW.open);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -441,7 +467,7 @@ mod tests {
         app.tick_at(closing + SPLASH_EXIT.open / 2);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
-        assert!(row(buffer, 0).contains("Help F1"));
+        assert!(row(buffer, 0).contains(&format!("Help {}", key("F1"))));
         assert!(row(buffer, 33).contains("Press any key to continue"));
         app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
         assert!(!app.show_explorer);
@@ -610,6 +636,187 @@ mod tests {
     }
 
     /// Lets every transition finish; the splash stays for 1.4 s.
+    fn click(app: &mut App, kind: crossterm::event::MouseEventKind, column: u16, row: u16) {
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+    }
+
+    #[test]
+    fn the_empty_editor_stays_centred_when_panels_open_and_close() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(140, 50)).unwrap();
+        let hint_at = |terminal: &Terminal<TestBackend>| {
+            let buffer = terminal.backend().buffer();
+            (0..50)
+                .find_map(|y| {
+                    let text = row(buffer, y);
+                    let start = text.find("Select a file")?;
+                    Some((text[..start].chars().count() as u16 + 12, y))
+                })
+                .unwrap()
+        };
+        for explorer in [true, false] {
+            app.show_explorer = explorer;
+            settle(&mut app);
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            let editor = app.regions.editor;
+            let (x, y) = hint_at(&terminal);
+            let middle = editor.x + editor.width / 2;
+            assert!(x.abs_diff(middle) <= 1, "{x} vs {middle}");
+            // The logo and three hints, centred between the top and the bottom border.
+            let block_top = y - 23;
+            let below = editor.bottom() - 1 - (y + 3);
+            assert!((block_top - editor.y - 1).abs_diff(below) <= 1);
+        }
+    }
+
+    #[test]
+    fn dragging_a_tab_to_the_right_edge_splits_the_editor() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let directory = tempfile::tempdir().unwrap();
+        for (name, text) in [("left.txt", "alpha"), ("right.txt", "omega")] {
+            std::fs::write(directory.path().join(name), text).unwrap();
+        }
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(directory.path().join("right.txt")).unwrap();
+        app.open_file(directory.path().join("left.txt")).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let (_, tab, _) = app.regions.tab_items[0];
+        let body = app.regions.editor_body;
+        click(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            tab.x + 2,
+            tab.y,
+        );
+        click(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            body.right() - 3,
+            body.y + 5,
+        );
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("Split right"));
+        click(
+            &mut app,
+            MouseEventKind::Up(MouseButton::Left),
+            body.right() - 3,
+            body.y + 5,
+        );
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let (active, other) = (app.regions.editor, app.regions.split_editor);
+        assert!(
+            active.x > other.x && active.y == other.y,
+            "right.txt went to the right"
+        );
+        let line = row(terminal.backend().buffer(), active.y + 1);
+        assert!(line.contains("alpha") && line.contains("omega"), "{line}");
+        // A click in the other pane focuses it and puts the cursor there.
+        click(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            other.x + 9,
+            other.y + 1,
+        );
+        assert_eq!(app.active_file().unwrap().name, "left.txt");
+        assert_eq!(app.active_file().unwrap().cursor_column, 4);
+        assert_eq!(app.regions.editor, other);
+    }
+
+    #[test]
+    fn about_grows_the_flower_and_links_the_repository() {
+        let mut app = App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 46)).unwrap();
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::F(2),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let opened = Instant::now();
+        app.tick_at(opened + crate::animation::BLOOM.open / 4);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let growing = buffer_text(&terminal);
+        app.tick_at(opened + crate::animation::BLOOM.open);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let grown = buffer_text(&terminal);
+        assert!(!growing.contains("/'-.___.-'\\") && grown.contains("/'-.___.-'\\"));
+        assert!(grown.contains("Contribute on GitHub [G]"));
+        let button = app.regions.about_repository;
+        assert!(button.width > 20);
+        let text = row(terminal.backend().buffer(), button.y);
+        assert!(text.contains("Contribute on GitHub"), "{text}");
+    }
+
+    #[test]
+    fn the_tutorial_pages_and_skips_and_whats_new_lists_the_notes() {
+        use crate::update::{NOTES, Welcome};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+        let mut app = App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        app.welcome = Welcome::Tutorial;
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert_eq!(app.overlay, Overlay::Tutorial);
+        assert!(buffer_text(&terminal).contains("Welcome to SozoIDE"));
+
+        let next = app.regions.dialog_next;
+        click(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            next.x + 1,
+            next.y,
+        );
+        assert_eq!(app.tutorial_step, 1);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("Explorer and editor"));
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.tutorial_step, 0);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        settle(&mut app);
+        assert_eq!(app.overlay, Overlay::None);
+
+        app.welcome = Welcome::WhatsNew;
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("What's new") && text.contains(NOTES.fixed[0]));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        settle(&mut app);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn markdown_shows_its_source_under_the_mouse() {
+        use crossterm::event::MouseEventKind;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.md");
+        std::fs::write(&path, "# Notes\nSome **bold** and ==marked== words\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let area = app.regions.editor;
+        let line = |terminal: &Terminal<TestBackend>| row(terminal.backend().buffer(), area.y + 2);
+        assert!(line(&terminal).contains("Some bold and marked words"));
+
+        click(&mut app, MouseEventKind::Moved, area.x + 10, area.y + 2);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(line(&terminal).contains("Some **bold** and ==marked== words"));
+        click(&mut app, MouseEventKind::Moved, area.x + 10, area.y + 10);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(line(&terminal).contains("Some bold and"));
+    }
+
     fn settle(app: &mut App) {
         let now = std::time::Instant::now();
         app.tick_at(now);

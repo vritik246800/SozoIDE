@@ -138,6 +138,7 @@ impl MarkdownTable {
 
 pub struct MarkdownDocument {
     tables: Vec<MarkdownTable>,
+    code: Vec<bool>,
 }
 
 impl MarkdownDocument {
@@ -157,19 +158,19 @@ impl MarkdownDocument {
                 index += 1;
             }
         }
-        Self { tables }
+        Self {
+            tables,
+            code: fences.code,
+        }
     }
 
-    pub fn rendered_line(
-        &self,
-        source_row: usize,
-        cursor_row: usize,
-    ) -> Option<Vec<Span<'static>>> {
+    /// A table shows its source while one of the `raw` rows (cursor, mouse) is inside it.
+    pub fn rendered_line(&self, source_row: usize, raw: &[usize]) -> Option<Vec<Span<'static>>> {
         let table = self
             .tables
             .iter()
             .find(|table| table.contains(source_row))?;
-        if table.contains(cursor_row) {
+        if raw.iter().any(|row| table.contains(*row)) {
             return None;
         }
         Some(table.rendered_line(source_row))
@@ -178,18 +179,172 @@ impl MarkdownDocument {
     pub fn source_column(
         &self,
         source_row: usize,
-        cursor_row: usize,
+        raw: &[usize],
         visual_column: usize,
     ) -> Option<usize> {
         let table = self
             .tables
             .iter()
             .find(|table| table.contains(source_row))?;
-        if table.contains(cursor_row) {
+        if raw.iter().any(|row| table.contains(*row)) {
             return None;
         }
         Some(table.source_column(source_row, visual_column))
     }
+
+    /// Prose lines: neither code nor a table.
+    pub fn formats_inline(&self, row: usize) -> bool {
+        !self.code.get(row).copied().unwrap_or(true)
+            && !self.tables.iter().any(|table| table.contains(row))
+    }
+}
+
+/// One drawn character: the source character it stands for and how it looks.
+struct Glyph {
+    character: char,
+    source: usize,
+    style: Style,
+}
+
+/// Inline Markdown drawn over the highlighted line: straight quotes become typographic ones,
+/// `*italic*`, `**bold**` and `==highlight==` lose their markers. `None` when nothing changes.
+pub fn render_inline(line: &str, highlighted: &[Span<'static>]) -> Option<Vec<Span<'static>>> {
+    let glyphs = inline_glyphs(line, highlighted)?;
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for glyph in glyphs {
+        match spans.last_mut() {
+            Some(span) if span.style == glyph.style => span.content.to_mut().push(glyph.character),
+            _ => spans.push(Span::styled(glyph.character.to_string(), glyph.style)),
+        }
+    }
+    Some(spans)
+}
+
+/// The source column under `visual_column` of a line drawn by `render_inline`.
+pub fn inline_source_column(line: &str, visual_column: usize) -> Option<usize> {
+    let glyphs = inline_glyphs(line, &[])?;
+    let mut width = 0;
+    for glyph in &glyphs {
+        let next = width + display_width(&glyph.character.to_string());
+        if visual_column < next {
+            return Some(glyph.source);
+        }
+        width = next;
+    }
+    Some(line.chars().count())
+}
+
+fn inline_glyphs(line: &str, highlighted: &[Span<'static>]) -> Option<Vec<Glyph>> {
+    let characters = line.chars().collect::<Vec<_>>();
+    let mut styles = highlighted
+        .iter()
+        .flat_map(|span| span.content.chars().map(move |_| span.style))
+        .collect::<Vec<_>>();
+    if styles.len() != characters.len() {
+        styles = vec![Style::default(); characters.len()];
+    }
+    // Code spans keep every character as written.
+    let mut protected = vec![false; characters.len()];
+    for (start, end) in pairs(&characters, &protected, &['`'], false) {
+        protected[start..=end].fill(true);
+    }
+    let mut hidden = vec![false; characters.len()];
+    let mut replaced = characters.clone();
+    let mut changed = false;
+    for (token, modifier) in [
+        (&['*', '*'][..], Some(Modifier::BOLD)),
+        (&['=', '='][..], None),
+        (&['*'][..], Some(Modifier::ITALIC)),
+    ] {
+        for (start, end) in pairs(&characters, &protected, token, false) {
+            changed = true;
+            let length = token.len();
+            for index in [start..start + length, end..end + length]
+                .into_iter()
+                .flatten()
+            {
+                hidden[index] = true;
+                protected[index] = true;
+            }
+            for style in &mut styles[start + length..end] {
+                *style = match modifier {
+                    Some(modifier) => style.add_modifier(modifier),
+                    None => style.bg(Color::Yellow).fg(Color::Black),
+                };
+            }
+        }
+    }
+    for (quote, open, close) in [
+        ('"', '\u{201C}', '\u{201D}'),
+        ('\'', '\u{2018}', '\u{2019}'),
+    ] {
+        for (start, end) in pairs(&characters, &protected, &[quote], true) {
+            changed = true;
+            replaced[start] = open;
+            replaced[end] = close;
+        }
+    }
+    changed.then(|| {
+        (0..characters.len())
+            .filter(|index| !hidden[*index])
+            .map(|index| Glyph {
+                character: replaced[index],
+                source: index,
+                style: styles[index],
+            })
+            .collect()
+    })
+}
+
+/// Opening and closing positions of `token`: an opener is followed by text, a closer comes
+/// right after text and something sits between them. With `outside_words`, both also need a
+/// non-alphanumeric neighbour on their outer side, so apostrophes (`don't`) stay as they are.
+fn pairs(
+    characters: &[char],
+    protected: &[bool],
+    token: &[char],
+    outside_words: bool,
+) -> Vec<(usize, usize)> {
+    let length = token.len();
+    let word = |index: Option<usize>| {
+        index
+            .and_then(|index| characters.get(index))
+            .is_some_and(|character| character.is_alphanumeric())
+    };
+    let text = |index: Option<usize>| {
+        index
+            .and_then(|index| characters.get(index))
+            .is_some_and(|character| !character.is_whitespace())
+    };
+    let mut found = Vec::new();
+    let mut open: Option<usize> = None;
+    let mut index = 0;
+    while index + length <= characters.len() {
+        let here = &characters[index..index + length];
+        // A lone `*` next to another one belongs to a `**` that found no partner.
+        let doubled = length == 1
+            && token[0] == '*'
+            && (index.checked_sub(1).map(|before| characters[before]) == Some('*')
+                || characters.get(index + 1) == Some(&'*'));
+        if here != token || protected[index..index + length].iter().any(|cell| *cell) || doubled {
+            index += 1;
+            continue;
+        }
+        let before = index.checked_sub(1);
+        let after = index + length;
+        if let Some(start) = open
+            && index > start + length
+            && text(before)
+            && !(outside_words && word(Some(after)))
+        {
+            found.push((start, index));
+            open = None;
+        } else if text(Some(after)) && !(outside_words && word(before)) {
+            open = Some(index);
+        }
+        index += length;
+    }
+    found
 }
 
 pub fn is_markdown_path(path: &Path) -> bool {
@@ -442,18 +597,22 @@ mod tests {
         let document = MarkdownDocument::parse(&lines);
 
         assert_eq!(
-            text(&document.rendered_line(0, 3).unwrap()),
+            text(&document.rendered_line(0, &[3]).unwrap()),
             "│ Name │ Age │"
         );
         assert_eq!(
-            text(&document.rendered_line(1, 3).unwrap()),
+            text(&document.rendered_line(1, &[3]).unwrap()),
             "├──────┼─────┤"
         );
         assert_eq!(
-            text(&document.rendered_line(2, 3).unwrap()),
+            text(&document.rendered_line(2, &[3]).unwrap()),
             "│ José │   4 │"
         );
-        assert!(document.rendered_line(2, 2).is_none());
+        assert!(document.rendered_line(2, &[2]).is_none());
+        assert!(
+            document.rendered_line(0, &[9, 1]).is_none(),
+            "the mouse over the table"
+        );
         assert_eq!(lines[2], "| José | 4 |");
     }
 
@@ -472,8 +631,8 @@ mod tests {
 
         assert!(document.tables.is_empty() || document.tables[0].start == 4);
         assert_eq!(mermaid, vec![false, true, true, false, false, false]);
-        assert!(document.rendered_line(2, 5).is_none());
-        assert!(document.rendered_line(4, 0).is_some());
+        assert!(document.rendered_line(2, &[5]).is_none());
+        assert!(document.rendered_line(4, &[0]).is_some());
     }
 
     #[test]
@@ -490,11 +649,11 @@ mod tests {
         let document = MarkdownDocument::parse(&lines);
 
         assert_eq!(document.tables.len(), 2);
-        let escaped = text(&document.rendered_line(0, 6).unwrap());
+        let escaped = text(&document.rendered_line(0, &[6]).unwrap());
         assert!(escaped.contains("A\\|B"));
         assert!(escaped.contains("`x|y`"));
         assert_eq!(
-            text(&document.rendered_line(6, 0).unwrap()),
+            text(&document.rendered_line(6, &[0]).unwrap()),
             "│   x │  1  │"
         );
 
@@ -523,10 +682,40 @@ mod tests {
         ];
         let document = MarkdownDocument::parse(&lines);
 
-        assert_eq!(document.source_column(2, 3, 2), Some(2));
+        assert_eq!(document.source_column(2, &[3], 2), Some(2));
         assert_eq!(visual_column_to_char("a界b", 1), 1);
         assert_eq!(visual_column_to_char("a界b", 2), 2);
         assert_eq!(visual_column_to_char("a界b", 3), 2);
         assert_eq!(visual_column_to_char("a界b", 4), 3);
+    }
+
+    #[test]
+    fn draws_inline_markup_and_maps_clicks_back_to_the_source() {
+        let line = "Say \"hi\", **bold** *it* ==mark== don't `**raw**`";
+        let spans = render_inline(line, &[]).unwrap();
+        assert_eq!(
+            text(&spans),
+            "Say \u{201C}hi\u{201D}, bold it mark don't `**raw**`"
+        );
+        let style_of = |word: &str| {
+            spans
+                .iter()
+                .find(|span| span.content.contains(word))
+                .unwrap()
+                .style
+        };
+        assert!(style_of("bold").add_modifier.contains(Modifier::BOLD));
+        assert!(style_of("it").add_modifier.contains(Modifier::ITALIC));
+        assert_eq!(style_of("mark").bg, Some(Color::Yellow));
+        assert!(!style_of("don't").add_modifier.contains(Modifier::BOLD));
+
+        // "bold" starts at visual column 10 and at source column 12, after its `**`.
+        assert_eq!(inline_source_column(line, 10), Some(12));
+        assert_eq!(inline_source_column(line, 0), Some(0));
+        assert!(render_inline("* item and 2 * 3", &[]).is_none());
+        assert!(render_inline("plain text", &[]).is_none());
+
+        let document = MarkdownDocument::parse(&["```".into(), "**x**".into(), "```".into()]);
+        assert!(!document.formats_inline(1));
     }
 }

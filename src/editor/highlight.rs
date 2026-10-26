@@ -1,16 +1,198 @@
-use std::{path::Path, sync::LazyLock};
+use std::{path::Path, str::FromStr, sync::LazyLock};
 
 use ratatui::{
     style::{Color, Modifier, Style},
     text::Span,
 };
-use syntect::{easy::HighlightLines, parsing::SyntaxSet};
+use syntect::{
+    easy::HighlightLines,
+    highlighting::{
+        Color as ThemeColor, FontStyle, ScopeSelectors, StyleModifier, Theme, ThemeItem,
+        ThemeSettings,
+    },
+    parsing::SyntaxSet,
+};
 
 use super::markdown::{is_markdown_path, mermaid_lines};
 
 static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
-static THEMES: LazyLock<two_face::theme::EmbeddedLazyThemeSet> =
-    LazyLock::new(two_face::theme::extra);
+static THEME: LazyLock<Theme> = LazyLock::new(ansi_theme);
+
+/// The colours a theme item can use: the 16 ANSI colours and, last, the terminal foreground.
+const PALETTE: [Color; 17] = [
+    Color::Black,
+    Color::Red,
+    Color::Green,
+    Color::Yellow,
+    Color::Blue,
+    Color::Magenta,
+    Color::Cyan,
+    Color::Gray,
+    Color::DarkGray,
+    Color::LightRed,
+    Color::LightGreen,
+    Color::LightYellow,
+    Color::LightBlue,
+    Color::LightMagenta,
+    Color::LightCyan,
+    Color::White,
+    Color::Reset,
+];
+
+/// TextMate scopes and how they look: one ANSI colour per role, so the terminal theme decides
+/// the actual colours (`DESIGN.md` §1.1). The most specific selector wins, as in TextMate.
+const SCOPES: &[(&str, Color, FontStyle)] = &[
+    (
+        "comment, punctuation.definition.comment",
+        Color::DarkGray,
+        FontStyle::ITALIC,
+    ),
+    (
+        "string, punctuation.definition.string",
+        Color::Green,
+        FontStyle::empty(),
+    ),
+    (
+        "constant.character.escape, string.regexp",
+        Color::Cyan,
+        FontStyle::empty(),
+    ),
+    ("constant.numeric", Color::LightRed, FontStyle::empty()),
+    (
+        "constant.language, constant.character, constant.other, support.constant, \
+         variable.other.constant, entity.name.constant",
+        Color::LightRed,
+        FontStyle::empty(),
+    ),
+    (
+        "keyword, storage.type, storage.modifier, keyword.declaration",
+        Color::Magenta,
+        FontStyle::empty(),
+    ),
+    (
+        "keyword.operator, punctuation.accessor",
+        Color::Cyan,
+        FontStyle::empty(),
+    ),
+    (
+        "entity.name.function, support.function, variable.function, meta.function-call.identifier",
+        Color::Blue,
+        FontStyle::empty(),
+    ),
+    (
+        "support.macro, entity.name.function.macro, entity.name.macro",
+        Color::Cyan,
+        FontStyle::empty(),
+    ),
+    (
+        "entity.name.type, entity.name.class, entity.name.struct, entity.name.enum, \
+         entity.name.trait, entity.name.interface, entity.other.inherited-class, support.type, \
+         support.class, storage.type.primitive, storage.type.numeric",
+        Color::Yellow,
+        FontStyle::empty(),
+    ),
+    (
+        "entity.name.namespace, entity.name.module, support.module, entity.name.package",
+        Color::LightBlue,
+        FontStyle::empty(),
+    ),
+    ("variable.parameter", Color::Reset, FontStyle::ITALIC),
+    ("variable.language", Color::Red, FontStyle::ITALIC),
+    ("entity.name.tag", Color::Red, FontStyle::empty()),
+    (
+        "entity.other.attribute-name",
+        Color::Yellow,
+        FontStyle::empty(),
+    ),
+    (
+        "meta.attribute, meta.annotation, entity.name.decorator, meta.decorator",
+        Color::LightMagenta,
+        FontStyle::empty(),
+    ),
+    (
+        "support.type.property-name, entity.name.tag.yaml, meta.mapping.key, \
+         variable.other.member, variable.other.property, meta.object-literal.key",
+        Color::Blue,
+        FontStyle::empty(),
+    ),
+    (
+        "markup.heading, entity.name.section",
+        Color::Blue,
+        FontStyle::BOLD,
+    ),
+    ("markup.bold", Color::Reset, FontStyle::BOLD),
+    ("markup.italic", Color::Reset, FontStyle::ITALIC),
+    (
+        "markup.underline.link, markup.underline",
+        Color::Cyan,
+        FontStyle::UNDERLINE,
+    ),
+    (
+        "markup.raw, markup.inline.raw",
+        Color::Green,
+        FontStyle::empty(),
+    ),
+    (
+        "markup.list, punctuation.definition.list",
+        Color::Yellow,
+        FontStyle::empty(),
+    ),
+    ("markup.quote", Color::DarkGray, FontStyle::ITALIC),
+    ("markup.inserted", Color::Green, FontStyle::empty()),
+    ("markup.deleted, invalid", Color::Red, FontStyle::empty()),
+    ("markup.changed", Color::Yellow, FontStyle::empty()),
+];
+
+/// Each colour travels through syntect as its index in `PALETTE`, in the red channel.
+fn theme_color(color: Color) -> ThemeColor {
+    let index = PALETTE
+        .iter()
+        .position(|entry| *entry == color)
+        .unwrap_or(16);
+    ThemeColor {
+        r: index as u8,
+        g: 0,
+        b: 0,
+        a: 0xFF,
+    }
+}
+
+fn ansi_theme() -> Theme {
+    Theme {
+        settings: ThemeSettings {
+            foreground: Some(theme_color(Color::Reset)),
+            ..ThemeSettings::default()
+        },
+        scopes: SCOPES
+            .iter()
+            .filter_map(|(selector, color, font_style)| {
+                Some(ThemeItem {
+                    scope: ScopeSelectors::from_str(selector).ok()?,
+                    style: StyleModifier {
+                        foreground: Some(theme_color(*color)),
+                        background: None,
+                        font_style: Some(*font_style),
+                    },
+                })
+            })
+            .collect(),
+        ..Theme::default()
+    }
+}
+
+fn span_style(style: syntect::highlighting::Style) -> Style {
+    let mut result = Style::default().fg(PALETTE[usize::from(style.foreground.r).min(16)]);
+    for (font, modifier) in [
+        (FontStyle::BOLD, Modifier::BOLD),
+        (FontStyle::ITALIC, Modifier::ITALIC),
+        (FontStyle::UNDERLINE, Modifier::UNDERLINED),
+    ] {
+        if style.font_style.contains(font) {
+            result = result.add_modifier(modifier);
+        }
+    }
+    result
+}
 
 pub fn is_image_path(path: &Path) -> bool {
     path.extension()
@@ -21,6 +203,26 @@ pub fn is_image_path(path: &Path) -> bool {
                 "png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "webp"
             )
         })
+}
+
+/// The icon of a file by its name or extension (`devicons`, Nerd Fonts glyphs) in the nearest
+/// ANSI colour. Unknown types get the plain document icon instead of the crate's `*`.
+pub fn file_icon(path: &Path) -> (char, Color) {
+    let mut icon = devicons::FileIcon::from(path);
+    if icon == devicons::FileIcon::default() {
+        icon = devicons::FileIcon::from(Path::new("file.txt"));
+        return (icon.icon, Color::Reset);
+    }
+    let channel = |range: std::ops::Range<usize>| {
+        icon.color
+            .get(range)
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            .unwrap_or(0xC0)
+    };
+    (
+        icon.icon,
+        nearest_ansi(channel(1..3), channel(3..5), channel(5..7)),
+    )
 }
 
 pub fn language_name(path: &Path) -> &'static str {
@@ -109,8 +311,7 @@ pub fn highlight_lines(path: &Path, lines: &[String]) -> Vec<Vec<Span<'static>>>
     } else {
         Vec::new()
     };
-    let mut highlighter =
-        HighlightLines::new(syntax, THEMES.get(two_face::theme::EmbeddedThemeName::Nord));
+    let mut highlighter = HighlightLines::new(syntax, &THEME);
     lines
         .iter()
         .enumerate()
@@ -120,12 +321,7 @@ pub fn highlight_lines(path: &Path, lines: &[String]) -> Vec<Vec<Span<'static>>>
                 .map(|regions| {
                     regions
                         .into_iter()
-                        .map(|(style, text)| {
-                            Span::styled(
-                                text.to_owned(),
-                                Style::default().fg(ansi_color(style.foreground)),
-                            )
-                        })
+                        .map(|(style, text)| Span::styled(text.to_owned(), span_style(style)))
                         .collect()
                 })
                 .unwrap_or_else(|_| vec![Span::raw(line.clone())]);
@@ -318,10 +514,12 @@ fn mermaid_tokens(line: &str) -> Vec<(Style, &str)> {
     tokens
 }
 
-fn ansi_color(color: syntect::highlighting::Color) -> Color {
-    let red = f32::from(color.r);
-    let green = f32::from(color.g);
-    let blue = f32::from(color.b);
+/// The ANSI colour closest to an RGB one by hue and brightness, for colours that come from
+/// data (file icons); the UI itself never draws RGB.
+pub fn nearest_ansi(red: u8, green: u8, blue: u8) -> Color {
+    let red = f32::from(red);
+    let green = f32::from(green);
+    let blue = f32::from(blue);
     let maximum = red.max(green).max(blue);
     let minimum = red.min(green).min(blue);
     let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
@@ -487,6 +685,43 @@ mod tests {
                 "non-ANSI color for {path}"
             );
         }
+    }
+
+    #[test]
+    fn files_get_an_icon_for_their_type_in_ansi_colours() {
+        let (rust, rust_color) = file_icon(Path::new("main.rs"));
+        let (markdown, _) = file_icon(Path::new("README.md"));
+        let (unknown, unknown_color) = file_icon(Path::new("notes.zzz"));
+        assert_ne!(rust, markdown);
+        assert_ne!(unknown, '*');
+        assert_eq!(unknown_color, Color::Reset);
+        assert!(!matches!(rust_color, Color::Rgb(..) | Color::Indexed(_)));
+    }
+
+    #[test]
+    fn scopes_get_distinct_ansi_roles() {
+        let lines = [
+            "// note".to_owned(),
+            "struct Point; fn main() { let total = 42; println!(\"hi\"); }".to_owned(),
+        ];
+        let highlighted = highlight_lines(Path::new("main.rs"), &lines);
+        let color_of = |row: usize, text: &str| {
+            highlighted[row]
+                .iter()
+                .find(|span| span.content.contains(text))
+                .unwrap_or_else(|| panic!("{text} in {:?}", highlighted[row]))
+                .style
+        };
+        assert_eq!(color_of(0, "note").fg, Some(Color::DarkGray));
+        assert!(color_of(0, "note").add_modifier.contains(Modifier::ITALIC));
+        assert_eq!(color_of(1, "fn").fg, Some(Color::Magenta));
+        assert_eq!(color_of(1, "main").fg, Some(Color::Blue));
+        assert_eq!(color_of(1, "Point").fg, Some(Color::Yellow));
+        assert_eq!(color_of(1, "42").fg, Some(Color::LightRed));
+        assert_eq!(color_of(1, "hi").fg, Some(Color::Green));
+        assert_eq!(color_of(1, "println").fg, Some(Color::Cyan));
+        assert_eq!(nearest_ansi(0xE3, 0x4C, 0x26), Color::Red);
+        assert_eq!(nearest_ansi(0x51, 0x9A, 0xBA), Color::Cyan);
     }
 
     #[test]

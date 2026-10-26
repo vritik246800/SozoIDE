@@ -464,7 +464,7 @@ fn render_form_fields(frame: &mut Frame, controller: &mut DatabaseController, in
         controller,
         &mut x,
         y,
-        "Test [F5]",
+        &format!("Test [{}]", crate::ui::key("F5")),
         DatabaseAction::TestConnection,
         false,
     );

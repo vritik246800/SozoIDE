@@ -16,6 +16,27 @@ pub(crate) const TEXT: Color = Color::Reset;
 pub(crate) const MUTED: Color = Color::DarkGray;
 pub(crate) const BORDER: Color = Color::DarkGray;
 
+/// A shortcut as this system types it (`UX.md` §1): on macOS the function keys need `fn` and
+/// the right terminal is Ctrl+Option+B, because Ctrl+Shift+B arrives as Ctrl+B (E11).
+pub(crate) fn key(label: &'static str) -> &'static str {
+    key_for(std::env::consts::OS, label)
+}
+
+pub(crate) fn key_for(os: &str, label: &'static str) -> &'static str {
+    if os != "macos" {
+        return label;
+    }
+    match label {
+        "F1" => "fn+F1",
+        "F2" => "fn+F2",
+        "F5" => "fn+F5",
+        "Ctrl+Shift+B" => "Ctrl+Option+B",
+        "PageUp" => "fn+Up",
+        "PageDown" => "fn+Down",
+        other => other,
+    }
+}
+
 pub(crate) fn panel_block(title: String, focused: bool) -> Block<'static> {
     Block::default()
         .title(Line::from(title))
