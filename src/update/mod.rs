@@ -20,11 +20,13 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 mod install;
+mod notes;
 
 use install::Package;
 pub use install::install_and_restart;
+pub use notes::NOTES;
 
-const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+use crate::branding::REPOSITORY;
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
 /// Release builds check at startup; debug builds (tests, `cargo run`) and
@@ -52,6 +54,30 @@ enum Message {
 #[derive(Default, Deserialize, Serialize)]
 struct Settings {
     skipped: Option<String>,
+    /// The last version that started on this machine; none means a new installation.
+    seen: Option<String>,
+}
+
+impl Settings {
+    fn load(path: &Path) -> Self {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|contents| toml::from_str(&contents).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, path: &Path) -> Option<()> {
+        path.parent().map_or(Ok(()), fs::create_dir_all).ok()?;
+        fs::write(path, toml::to_string(self).ok()?).ok()
+    }
+}
+
+/// What greets the user after the splash (F17, F18).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Welcome {
+    None,
+    Tutorial,
+    WhatsNew,
 }
 
 pub struct Updater {
@@ -147,19 +173,31 @@ impl Updater {
         });
     }
 
+    /// The tutorial on a new installation, what's new on the first start of a newer version;
+    /// remembers this version either way, so each shows once.
+    pub fn welcome(&self) -> Welcome {
+        let Some(path) = &self.settings else {
+            return Welcome::None;
+        };
+        let mut settings = Settings::load(path);
+        let welcome = match settings.seen.as_deref() {
+            None => Welcome::Tutorial,
+            Some(seen) if is_newer(CURRENT, seen) => Welcome::WhatsNew,
+            Some(_) => Welcome::None,
+        };
+        if settings.seen.as_deref() != Some(CURRENT) {
+            settings.seen = Some(CURRENT.to_string());
+            settings.save(path);
+        }
+        welcome
+    }
+
     /// Never offers this version again.
     pub fn skip(&mut self) {
         if let Some(path) = &self.settings {
-            let settings = Settings {
-                skipped: Some(self.version.clone()),
-            };
-            let saved = path
-                .parent()
-                .map_or(Ok(()), fs::create_dir_all)
-                .ok()
-                .and_then(|()| toml::to_string(&settings).ok())
-                .and_then(|contents| fs::write(path, contents).ok());
-            if saved.is_none() {
+            let mut settings = Settings::load(path);
+            settings.skipped = Some(self.version.clone());
+            if settings.save(path).is_none() {
                 self.state = UpdateState::Failed("Could not save the skipped version".to_string());
                 return;
             }
@@ -182,8 +220,7 @@ impl Updater {
     }
 
     fn skipped(&self) -> Option<String> {
-        let contents = fs::read_to_string(self.settings.as_ref()?).ok()?;
-        toml::from_str::<Settings>(&contents).ok()?.skipped
+        Settings::load(self.settings.as_ref()?).skipped
     }
 
     fn channel(&mut self) -> Sender<Message> {
@@ -304,6 +341,35 @@ mod tests {
             settings: Some(directory.join("update.toml")),
             ..Updater::new(false)
         }
+    }
+
+    #[test]
+    fn greets_new_installations_and_updates_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("update.toml");
+        let updater = updater_in(directory.path());
+        assert_eq!(updater.welcome(), Welcome::Tutorial);
+        assert_eq!(updater.welcome(), Welcome::None);
+
+        fs::write(&path, "skipped = \"9.9.9\"\nseen = \"0.0.1\"\n").unwrap();
+        assert_eq!(updater.welcome(), Welcome::WhatsNew);
+        assert_eq!(updater.welcome(), Welcome::None);
+        let mut skipping = updater_in(directory.path());
+        skipping.version = "9.9.8".to_string();
+        skipping.skip();
+        let settings = Settings::load(&path);
+        assert_eq!(settings.skipped.as_deref(), Some("9.9.8"));
+        assert_eq!(
+            settings.seen.as_deref(),
+            Some(CURRENT),
+            "skipping keeps the seen version"
+        );
+    }
+
+    #[test]
+    fn release_notes_belong_to_this_version() {
+        assert_eq!(NOTES.version, CURRENT);
+        assert!(!NOTES.new.is_empty());
     }
 
     #[test]

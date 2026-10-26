@@ -5,15 +5,17 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use markdown::{MarkdownDocument, is_markdown_path, visual_column_to_char};
-use ratatui::text::Span;
+use markdown::{
+    MarkdownDocument, inline_source_column, is_markdown_path, render_inline, visual_column_to_char,
+};
+use ratatui::{style::Color, text::Span};
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 
 mod highlight;
 mod markdown;
 mod search;
 
-pub use highlight::{highlight_lines, is_image_path, language_name};
+pub use highlight::{file_icon, highlight_lines, is_image_path, language_name};
 pub use search::{SearchScope, SearchState};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_secs(2);
@@ -21,11 +23,16 @@ const AUTOSAVE_DELAY: Duration = Duration::from_secs(2);
 pub struct OpenFile {
     pub path: PathBuf,
     pub name: String,
+    pub icon: (char, Color),
     pub lines: Vec<String>,
     pub highlighted: Vec<Vec<Span<'static>>>,
     markdown: Option<MarkdownDocument>,
     pub image: Option<StatefulProtocol>,
     pub scroll: u16,
+    /// Set when the cursor moves: the next frame scrolls to it. The mouse wheel scrolls freely.
+    pub follow_cursor: bool,
+    /// The row under the mouse, which shows its Markdown source like the cursor row.
+    pub hover_row: Option<usize>,
     pub cursor_row: usize,
     pub cursor_column: usize,
     pub dirty: bool,
@@ -39,6 +46,7 @@ impl OpenFile {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
+        let icon = file_icon(&path);
         if is_image_path(&path) {
             let image = image::ImageReader::open(&path)
                 .with_context(|| format!("Could not open {}", path.display()))?
@@ -47,11 +55,14 @@ impl OpenFile {
             return Ok(Self {
                 path,
                 name,
+                icon,
                 lines: Vec::new(),
                 highlighted: Vec::new(),
                 markdown: None,
                 image: Some(picker.new_resize_protocol(image)),
                 scroll: 0,
+                follow_cursor: false,
+                hover_row: None,
                 cursor_row: 0,
                 cursor_column: 0,
                 dirty: false,
@@ -76,11 +87,14 @@ impl OpenFile {
         Ok(Self {
             path,
             name,
+            icon,
             lines,
             highlighted,
             markdown,
             image: None,
             scroll: 0,
+            follow_cursor: false,
+            hover_row: None,
             cursor_row: 0,
             cursor_column: 0,
             dirty: false,
@@ -150,18 +164,56 @@ impl OpenFile {
         self.clamp_cursor();
     }
 
+    /// Rows that show their Markdown source: the cursor row and the row under the mouse.
+    fn source_rows(&self) -> Vec<usize> {
+        let mut rows = vec![self.cursor_row];
+        rows.extend(self.hover_row);
+        rows
+    }
+
     pub fn rendered_line(&self, row: usize) -> Option<Vec<Span<'static>>> {
-        self.markdown.as_ref()?.rendered_line(row, self.cursor_row)
+        let document = self.markdown.as_ref()?;
+        let raw = self.source_rows();
+        if !document.formats_inline(row) {
+            return document.rendered_line(row, &raw);
+        }
+        if raw.contains(&row) {
+            return None;
+        }
+        render_inline(self.lines.get(row)?, self.highlighted.get(row)?)
     }
 
     pub fn cursor_column_for_click(&self, row: usize, visual_column: usize) -> usize {
         let Some(line) = self.lines.get(row) else {
             return visual_column;
         };
+        let raw = self.source_rows();
         self.markdown
             .as_ref()
-            .and_then(|document| document.source_column(row, self.cursor_row, visual_column))
+            .and_then(|document| {
+                if !document.formats_inline(row) {
+                    document.source_column(row, &raw, visual_column)
+                } else if raw.contains(&row) {
+                    None
+                } else {
+                    inline_source_column(line, visual_column)
+                }
+            })
             .unwrap_or_else(|| visual_column_to_char(line, visual_column))
+    }
+
+    /// The row the editor scrolls to before drawing: the cursor's, if it just moved.
+    pub fn scroll_to_cursor(&mut self, viewport_height: usize) {
+        if std::mem::take(&mut self.follow_cursor) {
+            if self.cursor_row < self.scroll as usize {
+                self.scroll = self.cursor_row as u16;
+            } else if viewport_height > 0
+                && self.cursor_row >= self.scroll as usize + viewport_height
+            {
+                self.scroll = (self.cursor_row + 1 - viewport_height) as u16;
+            }
+        }
+        self.scroll = self.scroll.min(self.lines.len().saturating_sub(1) as u16);
     }
 
     pub fn insert(&mut self, character: char) {
@@ -220,6 +272,7 @@ impl OpenFile {
     }
 
     fn changed(&mut self) {
+        self.follow_cursor = true;
         self.dirty = true;
         self.last_edit = Some(Instant::now());
         self.highlighted = highlight_lines(&self.path, &self.lines);
@@ -243,6 +296,7 @@ impl OpenFile {
     }
 
     fn clamp_cursor(&mut self) {
+        self.follow_cursor = true;
         self.cursor_row = self.cursor_row.min(self.lines.len().saturating_sub(1));
         self.cursor_column = self.cursor_column.min(self.current_line().chars().count());
     }
@@ -279,5 +333,25 @@ mod tests {
         assert!(saved.contains("| AnXa | 30 |"));
         assert!(!saved.contains('│'));
         assert!(!saved.contains('├'));
+    }
+
+    #[test]
+    fn the_wheel_scrolls_away_from_the_cursor_until_it_moves() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("long.txt");
+        std::fs::write(&path, "line\n".repeat(100)).unwrap();
+        let mut file = OpenFile::load(path, &mut Picker::halfblocks()).unwrap();
+        file.scroll = 50;
+        file.scroll_to_cursor(20);
+        assert_eq!(
+            file.scroll, 50,
+            "the cursor on row 0 does not pull the view back"
+        );
+        file.scroll = 500;
+        file.scroll_to_cursor(20);
+        assert_eq!(file.scroll, 99, "never past the last line");
+        file.move_cursor(1, 0);
+        file.scroll_to_cursor(20);
+        assert_eq!(file.scroll, 1, "moving the cursor brings it back into view");
     }
 }

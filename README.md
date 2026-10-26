@@ -18,12 +18,13 @@
 
 ## Features
 
-- **Explorer and editor** — open files in tabs; edits save themselves after two idle seconds and before you switch tabs or quit. Syntax highlighting for more than 30 languages, from Rust and Go to SQL, Astro and Mermaid. Markdown tables are shown aligned, and images render inline on Sixel, Kitty and iTerm2 terminals.
+- **Explorer and editor** — every file shows an icon for its type; open files in tabs and drag a tab to an edge of the editor to split it side by side or stacked. Edits save themselves after two idle seconds and before you switch tabs or quit. Syntax highlighting for more than 30 languages, from Rust and Go to SQL, Astro and Mermaid, with its own colour for keywords, types, functions, strings, numbers and comments. Markdown draws aligned tables, typographic quotes, *italic*, **bold** and ==highlight==, and shows the source of the line under the cursor or the mouse. Images render inline on Sixel, Kitty and iTerm2 terminals.
 - **Two terminals** — a bottom and a right terminal, each with its own shell, with scrollback on the mouse wheel or Page Up and Page Down. Drag the dividers to resize every panel.
 - **Source Control** — stage and commit, follow the commit graph and branches, read diffs and the history of a line or a file, and check repository health. Pull is fast-forward only; rebase and checkout ask before they run.
 - **Database** — connect to SQLite, PostgreSQL and MySQL, run queries with `Ctrl+Enter` or `F5`, and read rows, affected counts, duration and history. Saved connections never write passwords to disk.
 - **Search** — in the open file or across the whole folder; files listed in `.gitignore` stay out of the results.
-- **Your terminal's look** — SozoIDE has no colors of its own. It draws with the 16 ANSI colors of your terminal theme.
+- **Your terminal's look** — SozoIDE has no colors of its own. It draws with the 16 ANSI colors of your terminal theme, and shows each shortcut the way your system types it (`fn+F1` and `Ctrl+Option+B` on macOS).
+- **A guided start** — a short tutorial on the first start (skip it with `Esc`), and a note with what is new and what was fixed after each update.
 
 ## Install
 
@@ -76,14 +77,16 @@ sozo --version
 | `Page Up` / `Page Down` | Scroll the editor or the terminal history |
 | Mouse wheel | Scroll panels and terminal history |
 | Drag a divider | Resize the Explorer and the terminals |
+| Drag a tab | To an edge of the editor: split it; to the centre: join it again |
+| `G` (in About) | Open the repository to contribute |
 
 ### Motion
 
-Panels grow from their divider, Source Control and Database draw in line by line, a tab comes in from its side, and dialogs open from their middle row with the rest of the screen dimmed. Transitions never hold up saving, commits or queries. Set `SOZO_REDUCED_MOTION=1` to turn them off.
+Panels grow from their divider, Source Control and Database draw in line by line, a tab comes in from its side, and dialogs open from their middle row with the rest of the screen dimmed. Transitions never hold up saving, commits or queries. In About the SozoIDE flower grows from its centre. Set `SOZO_REDUCED_MOTION=1` to turn them off.
 
 ### Updates
 
-When a newer release is out, SozoIDE tells you at startup. Press `Enter` (or `U`) to update: SozoIDE downloads the installer for your system, installs it and restarts in the same folder. Press `S` to skip that version, or `Esc` to decide later. On Debian, Ubuntu and Fedora the update runs `sudo`, so it asks for your password. Set `SOZO_NO_UPDATE_CHECK=1` to turn the check off.
+When a newer release is out, SozoIDE tells you at startup. Press `Enter` (or `U`) to update: SozoIDE downloads the installer for your system, installs it and restarts in the same folder. Press `S` to skip that version, or `Esc` to decide later. On Debian, Ubuntu and Fedora the update runs `sudo`, so it asks for your password. Set `SOZO_NO_UPDATE_CHECK=1` to turn the check off. The first start after an update shows what the new version brings.
 
 ## Build from source
 

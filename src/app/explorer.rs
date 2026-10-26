@@ -4,12 +4,16 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use ratatui::style::Color;
 
 use super::App;
+use crate::editor::file_icon;
 
 pub struct FileEntry {
     pub path: PathBuf,
     pub name: String,
+    /// The file type icon, looked up once (directories use the folder icons).
+    pub icon: (char, Color),
     pub depth: usize,
     pub is_dir: bool,
     pub expanded: bool,
@@ -66,6 +70,11 @@ impl App {
             let is_dir = child.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
             let is_expanded = expanded.contains(&path);
             entries.push(FileEntry {
+                icon: if is_dir {
+                    (' ', Color::Reset)
+                } else {
+                    file_icon(&path)
+                },
                 name: child.file_name().to_string_lossy().into_owned(),
                 path: path.clone(),
                 depth,

@@ -7,13 +7,15 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, AppMotion},
+    app::{App, AppMotion, TUTORIAL_STEPS},
     branding::{self, ASCII_LOGO},
     editor::SearchScope,
-    update::UpdateState,
+    update::{NOTES, UpdateState},
 };
 
-use super::{ACTIVE, MUTED, TEXT, bar, centered, render_dialog, scale_length, sweep_bar};
+use super::{
+    ACTIVE, MUTED, TEXT, bar, centered, components::key_for, render_dialog, scale_length, sweep_bar,
+};
 
 /// The splash prints line by line, its bar sweeps while SozoIDE starts, and then the IDE is
 /// drawn over it line by line from the top (`DESIGN.md` §1.3).
@@ -201,6 +203,7 @@ fn help_lines(os: &str) -> Vec<&'static str> {
         "Files and search",
         "  Enter              Open file or expand directory",
         "  Ctrl+W             Close active tab",
+        "  Drag a tab         To an editor edge: split it; to the centre: join",
         "  Ctrl+P             Find in current file",
         "  Ctrl+Shift+P       Find in workspace",
         "  Esc                Close dialog or panel",
@@ -248,14 +251,48 @@ fn help_lines(os: &str) -> Vec<&'static str> {
     } else {
         ["  F1                 Help", "  F2                 About"]
     });
-    lines.push("  Ctrl+Q             Quit");
+    lines.extend([
+        "  G (in About)       Open the repository to contribute",
+        "  Ctrl+Q             Quit",
+    ]);
     lines
 }
 
-pub(super) fn render_about(frame: &mut Frame, area: Rect, progress: f32) {
-    let mut lines = ASCII_LOGO
+/// The logo grown up to `progress` (0 to 1): characters appear by their distance from the
+/// centre of the flower, and the newest ones sprout as `.` first (`DESIGN.md` §1.3).
+fn bloom_logo(progress: f32) -> Vec<String> {
+    let center_x = ASCII_LOGO[0].chars().count() as f32 / 2.0;
+    let center_y = ASCII_LOGO.len() as f32 / 2.0;
+    // Terminal cells are about twice as tall as they are wide.
+    let distance = |x: usize, y: usize| ((x as f32 - center_x) / 2.0).hypot(y as f32 - center_y);
+    let farthest = ASCII_LOGO
         .iter()
-        .map(|line| Line::from(Span::styled(*line, Style::default().fg(ACTIVE))))
+        .enumerate()
+        .flat_map(|(y, line)| line.chars().enumerate().map(move |(x, _)| distance(x, y)))
+        .fold(0.0, f32::max);
+    let radius = progress.clamp(0.0, 1.0) * (farthest + 2.0);
+    ASCII_LOGO
+        .iter()
+        .enumerate()
+        .map(|(y, line)| {
+            line.chars()
+                .enumerate()
+                .map(|(x, character)| match distance(x, y) {
+                    _ if character == ' ' => ' ',
+                    reach if reach <= radius - 1.5 => character,
+                    reach if reach <= radius => '.',
+                    _ => ' ',
+                })
+                .collect()
+        })
+        .collect()
+}
+
+pub(super) fn render_about(frame: &mut Frame, app: &mut App, area: Rect) {
+    let button = " Contribute on GitHub [G] ";
+    let mut lines = bloom_logo(app.motion.bloom())
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, Style::default().fg(ACTIVE))))
         .collect::<Vec<_>>();
     lines.extend([
         Line::from(""),
@@ -268,10 +305,19 @@ pub(super) fn render_about(frame: &mut Frame, area: Rect, progress: f32) {
         Line::from("A terminal-native integrated development environment"),
         Line::from(""),
         Line::from(Span::styled(
+            button,
+            Style::default()
+                .fg(ACTIVE)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
             "Press Esc to close",
             Style::default().fg(MUTED),
         )),
     ]);
+    let button_row = lines.len() as u16 - 3;
+    let progress = app.motion.overlay();
     render_dialog(
         frame,
         centered(area, 66, 84),
@@ -284,8 +330,225 @@ pub(super) fn render_about(frame: &mut Frame, area: Rect, progress: f32) {
                     .wrap(Wrap { trim: false }),
                 inner,
             );
+            let width = (button.len() as u16).min(inner.width);
+            if button_row < inner.height {
+                app.regions.about_repository = Rect::new(
+                    inner.x + (inner.width - width) / 2,
+                    inner.y + button_row,
+                    width,
+                    1,
+                );
+            }
         },
     );
+}
+
+/// The tutorial pages for `os` (`std::env::consts::OS`): what each panel does and its key.
+fn tutorial_steps(os: &str) -> [(&'static str, String); TUTORIAL_STEPS] {
+    let key = |label| key_for(os, label);
+    [
+        (
+            "Welcome to SozoIDE",
+            "An IDE that lives in your terminal: files, editor, two shells, Git and SQL side by \
+             side. This tour shows where everything is and takes a minute."
+                .to_string(),
+        ),
+        (
+            "Explorer and editor",
+            format!(
+                "{} shows or hides the Explorer. Enter opens a file in a tab and the editor saves \
+                 by itself 2 seconds after you stop typing. Drag a tab to an edge of the editor \
+                 to split it.",
+                key("Ctrl+B")
+            ),
+        ),
+        (
+            "Terminals",
+            format!(
+                "{} opens the bottom terminal and {} the right one. Drag the dividers to resize \
+                 the panels; the mouse wheel scrolls the history.",
+                key("Ctrl+J"),
+                key("Ctrl+Shift+B")
+            ),
+        ),
+        (
+            "Source Control",
+            format!(
+                "{} opens changes, diffs, the commit graph, branches and history. Stage, commit, \
+                 pull and push are one click away, and risky steps ask first.",
+                key("Ctrl+G")
+            ),
+        ),
+        (
+            "Database",
+            format!(
+                "{} connects to SQLite, PostgreSQL or MySQL. Write a query and run it with \
+                 {} or {}.",
+                key("Ctrl+D"),
+                key("Ctrl+Enter"),
+                key("F5")
+            ),
+        ),
+        (
+            "Search and help",
+            format!(
+                "{} finds in the open file and {} in the whole folder. {} lists every command, \
+                 {} shows About and {} quits.",
+                key("Ctrl+P"),
+                key("Ctrl+Shift+P"),
+                key("F1"),
+                key("F2"),
+                key("Ctrl+Q")
+            ),
+        ),
+    ]
+}
+
+/// The first start (F17): one page at a time, with Next and Skip always in reach.
+pub(super) fn render_tutorial(frame: &mut Frame, app: &mut App, area: Rect) {
+    let steps = tutorial_steps(std::env::consts::OS);
+    let step = app.tutorial_step.min(TUTORIAL_STEPS - 1);
+    let (title, text) = &steps[step];
+    let last = step + 1 == TUTORIAL_STEPS;
+    let next = if last {
+        " Start [Enter] "
+    } else {
+        " Next [Enter] "
+    };
+    let skip = " Skip tutorial [Esc] ";
+    let area = dialog_area(area, 66, 13);
+    let progress = app.motion.overlay();
+    render_dialog(
+        frame,
+        area,
+        progress,
+        format!(" Tutorial {}/{} ", step + 1, TUTORIAL_STEPS),
+        |frame, inner| {
+            let rows = Layout::vertical([
+                Constraint::Length(2),
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    *title,
+                    Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
+                )),
+                rows[0],
+            );
+            frame.render_widget(
+                Paragraph::new(text.as_str()).wrap(Wrap { trim: true }),
+                rows[1],
+            );
+            let (next_area, skip_area) = buttons(frame, rows[2], next, skip);
+            app.regions.dialog_next = next_area;
+            app.regions.dialog_skip = skip_area;
+            let dots = (0..TUTORIAL_STEPS)
+                .map(|index| if index == step { "●" } else { "○" })
+                .collect::<Vec<_>>()
+                .join(" ");
+            frame.render_widget(
+                Paragraph::new(format!("{dots}   Left: back")).style(Style::default().fg(MUTED)),
+                rows[3],
+            );
+        },
+    );
+}
+
+/// After an update (F18): what this version brings and what it fixes.
+pub(super) fn render_whats_new(frame: &mut Frame, app: &mut App, area: Rect) {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("SozoIDE is now on version {}", NOTES.version),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "New",
+            Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
+        )),
+    ];
+    lines.extend(
+        NOTES
+            .new
+            .iter()
+            .map(|item| Line::from(format!("  - {item}"))),
+    );
+    lines.extend([
+        Line::from(""),
+        Line::from(Span::styled(
+            "Fixed",
+            Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
+        )),
+    ]);
+    lines.extend(
+        NOTES
+            .fixed
+            .iter()
+            .map(|item| Line::from(format!("  - {item}"))),
+    );
+    let close = " Close [Enter] ";
+    let area = dialog_area(area, 80, lines.len() as u16 + 4);
+    let progress = app.motion.overlay();
+    render_dialog(
+        frame,
+        area,
+        progress,
+        " What's new ".to_string(),
+        |frame, inner| {
+            let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[0]);
+            let (close_area, _) = buttons(frame, rows[1], close, "");
+            app.regions.dialog_next = close_area;
+        },
+    );
+}
+
+/// A dialog of `width` × `height` cells in the middle of `area`, smaller if it does not fit.
+fn dialog_area(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width.saturating_sub(4));
+    let height = height.min(area.height.saturating_sub(2));
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+/// The main button and, if there is one, the second; returns where they were drawn.
+fn buttons(frame: &mut Frame, row: Rect, main: &str, second: &str) -> (Rect, Rect) {
+    let parts = Layout::horizontal([
+        Constraint::Length(main.len() as u16),
+        Constraint::Length(2),
+        Constraint::Length(second.len() as u16),
+    ])
+    .split(row);
+    frame.render_widget(
+        Paragraph::new(main.to_string()).style(
+            Style::default()
+                .fg(ACTIVE)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        ),
+        parts[0],
+    );
+    if !second.is_empty() {
+        frame.render_widget(
+            Paragraph::new(second.to_string())
+                .style(Style::default().fg(TEXT).add_modifier(Modifier::REVERSED)),
+            parts[2],
+        );
+    }
+    (
+        parts[0],
+        if second.is_empty() {
+            Rect::default()
+        } else {
+            parts[2]
+        },
+    )
 }
 
 pub(super) fn render_update(frame: &mut Frame, app: &mut App, area: Rect, progress: f32) {
@@ -430,5 +693,27 @@ mod tests {
             assert!(!text.contains("fn+"));
         }
         assert_eq!(os_name("windows"), "Windows");
+    }
+
+    #[test]
+    fn the_flower_grows_from_its_centre() {
+        assert!(bloom_logo(0.0).iter().all(|line| line.trim().is_empty()));
+        assert_eq!(bloom_logo(1.0), ASCII_LOGO);
+        let half = bloom_logo(0.45);
+        let middle = &half[ASCII_LOGO.len() / 2];
+        assert!(middle.contains('@'), "{middle}");
+        assert!(half[0].trim().is_empty(), "the top petal is not out yet");
+        assert!(
+            half.iter().any(|line| line.contains('.')),
+            "sprouts at the edge"
+        );
+    }
+
+    #[test]
+    fn the_tutorial_names_the_keys_of_each_system() {
+        let mac = tutorial_steps("macos").map(|(_, text)| text).join("\n");
+        assert!(mac.contains("Ctrl+Option+B") && mac.contains("fn+F1"));
+        let linux = tutorial_steps("linux").map(|(_, text)| text).join("\n");
+        assert!(linux.contains("Ctrl+Shift+B") && !linux.contains("fn+"));
     }
 }

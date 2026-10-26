@@ -6,7 +6,7 @@ use crate::{
     update::UpdateState,
 };
 
-use super::{App, DragTarget, Focus, Overlay};
+use super::{App, DragTarget, DropZone, Focus, Overlay, TUTORIAL_STEPS, TabDrag};
 
 impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -52,8 +52,8 @@ impl App {
                     }
                     _ => {}
                 }
-            } else if matches!(key.code, KeyCode::Esc | KeyCode::F(1) | KeyCode::F(2)) {
-                self.close_overlay();
+            } else {
+                self.handle_overlay_key(key.code);
             }
             return;
         }
@@ -195,7 +195,11 @@ impl App {
                     if let Err(error) = self.open_file(found.path) {
                         self.status = error.to_string();
                     } else if let Some(active) = self.active_tab {
-                        self.open_files[active].scroll = found.line as u16;
+                        // The cursor goes to the match, which sits a few lines below the top.
+                        let file = &mut self.open_files[active];
+                        file.move_cursor_to(found.line, found.column);
+                        file.scroll = found.line.saturating_sub(3) as u16;
+                        file.follow_cursor = false;
                     }
                     self.close_search();
                 }
@@ -236,6 +240,29 @@ impl App {
         }
     }
 
+    /// Esc, F1 and F2 close every dialog; the tutorial pages with Enter and the arrows, About
+    /// opens the repository with G.
+    fn handle_overlay_key(&mut self, code: KeyCode) {
+        match (self.overlay, code) {
+            (Overlay::Tutorial, KeyCode::Enter | KeyCode::Right | KeyCode::Char(' ')) => {
+                if self.tutorial_step + 1 < TUTORIAL_STEPS {
+                    self.tutorial_step += 1;
+                } else {
+                    self.close_overlay();
+                }
+            }
+            (Overlay::Tutorial, KeyCode::Left | KeyCode::Backspace) => {
+                self.tutorial_step = self.tutorial_step.saturating_sub(1);
+            }
+            (Overlay::Tutorial, KeyCode::Char('s' | 'S')) | (Overlay::WhatsNew, KeyCode::Enter) => {
+                self.close_overlay()
+            }
+            (Overlay::About, KeyCode::Char('g' | 'G')) => self.open_repository(),
+            (_, KeyCode::Esc | KeyCode::F(1) | KeyCode::F(2)) => self.close_overlay(),
+            _ => {}
+        }
+    }
+
     /// Enter or U updates, S skips this version, Esc leaves it for later or cancels the download.
     fn handle_update_key(&mut self, code: KeyCode) {
         match (&self.updater.state, code) {
@@ -257,8 +284,12 @@ impl App {
     }
 
     pub(super) fn open_overlay(&mut self, overlay: Overlay) {
+        let now = std::time::Instant::now();
+        if overlay == Overlay::About && self.overlay != Overlay::About {
+            self.motion.restart_bloom(now);
+        }
         self.overlay = overlay;
-        self.motion.open_overlay(std::time::Instant::now());
+        self.motion.open_overlay(now);
     }
 
     fn close_overlay(&mut self) {
@@ -398,6 +429,22 @@ impl App {
                     }
                     return;
                 }
+                if self.overlay != Overlay::None && !self.motion.overlay_closing() {
+                    let regions = &self.regions;
+                    let key = if contains(regions.about_repository, point) {
+                        Some(KeyCode::Char('g'))
+                    } else if contains(regions.dialog_next, point) {
+                        Some(KeyCode::Enter)
+                    } else if contains(regions.dialog_skip, point) {
+                        Some(KeyCode::Esc)
+                    } else {
+                        None
+                    };
+                    if let Some(key) = key {
+                        self.handle_overlay_key(key);
+                    }
+                    return;
+                }
                 if self.overlay != Overlay::None {
                     return;
                 }
@@ -430,31 +477,49 @@ impl App {
                     if contains(close, point) {
                         self.close_tab(index);
                     } else if contains(tab, point) {
-                        self.active_tab = Some(index);
+                        self.tab_drag = Some(TabDrag {
+                            tab: index,
+                            previous: self.active_tab,
+                            zone: None,
+                        });
+                        self.select_tab(index);
                     }
                 } else if self.show_bottom_terminal && contains(self.regions.bottom_terminal, point)
                 {
                     self.focus = Focus::BottomTerminal;
                 } else if self.show_right_terminal && contains(self.regions.right_terminal, point) {
                     self.focus = Focus::RightTerminal;
-                } else if contains(self.regions.editor, point) {
+                } else if contains(self.regions.editor_body, point) {
                     self.focus = Focus::Editor;
-                    if !self.show_git
-                        && !self.show_database
-                        && let Some(file) = self
-                            .active_tab
-                            .and_then(|index| self.open_files.get_mut(index))
-                        && file.image.is_none()
+                    if self.show_git || self.show_database {
+                        return;
+                    }
+                    if let Some(split) = self.split
+                        && contains(self.regions.split_editor, point)
                     {
-                        let area = self.regions.editor;
-                        let row = file.scroll as usize
-                            + mouse.row.saturating_sub(area.y.saturating_add(1)) as usize;
-                        let gutter = file.lines.len().max(1).to_string().len() + 3;
-                        let text_start = area.x.saturating_add(1).saturating_add(gutter as u16);
-                        let visual_column = mouse.column.saturating_sub(text_start) as usize;
+                        self.flush_active_file();
+                        self.select_tab(split.other);
+                    }
+                    let area = self.regions.editor;
+                    if let Some(file) = self
+                        .active_tab
+                        .and_then(|index| self.open_files.get_mut(index))
+                        && file.image.is_none()
+                        && contains(area, point)
+                    {
+                        let (row, visual_column) = text_position(file, area, point);
                         let column = file.cursor_column_for_click(row, visual_column);
                         file.move_cursor_to(row, column);
                     }
+                }
+            }
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left)
+                if self.drag.is_none() && self.tab_drag.is_some() =>
+            {
+                let body = self.regions.editor_body;
+                if let Some(drag) = &mut self.tab_drag {
+                    drag.zone = (!self.show_git && !self.show_database && contains(body, point))
+                        .then(|| DropZone::at(body, point));
                 }
             }
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => match self.drag {
@@ -479,7 +544,15 @@ impl App {
                 }
                 None => {}
             },
-            MouseEventKind::Up(crossterm::event::MouseButton::Left) => self.drag = None,
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                self.drag = None;
+                if let Some(drag) = self.tab_drag.take()
+                    && let Some(zone) = drag.zone
+                {
+                    self.drop_tab(drag, zone);
+                }
+            }
+            MouseEventKind::Moved => self.hover(point),
             MouseEventKind::ScrollUp => self.scroll_at(point, true),
             MouseEventKind::ScrollDown => self.scroll_at(point, false),
             _ => {}
@@ -503,16 +576,50 @@ impl App {
             self.bottom_terminal.scroll(up, 3);
         } else if contains(self.regions.right_terminal, point) {
             self.right_terminal.scroll(up, 3);
-        } else if contains(self.regions.editor, point)
-            && let Some(active) = self.active_tab
-        {
-            self.open_files[active].scroll = if up {
-                self.open_files[active].scroll.saturating_sub(3)
+        } else if let Some(index) = self.pane_at(point) {
+            let file = &mut self.open_files[index];
+            file.scroll = if up {
+                file.scroll.saturating_sub(3)
             } else {
-                self.open_files[active].scroll.saturating_add(3)
+                file.scroll.saturating_add(3)
             };
         }
     }
+
+    /// The file drawn under `point`: the active pane or, with a split, the other one.
+    fn pane_at(&self, point: (u16, u16)) -> Option<usize> {
+        if self.show_git || self.show_database {
+            return None;
+        }
+        if contains(self.regions.editor, point) {
+            return self.active_tab;
+        }
+        self.split
+            .filter(|_| contains(self.regions.split_editor, point))
+            .map(|split| split.other)
+            .filter(|index| *index < self.open_files.len())
+    }
+
+    /// The row under the mouse shows its Markdown source, like the cursor row.
+    fn hover(&mut self, point: (u16, u16)) {
+        let pane = self.pane_at(point);
+        let area = if pane == self.active_tab {
+            self.regions.editor
+        } else {
+            self.regions.split_editor
+        };
+        for (index, file) in self.open_files.iter_mut().enumerate() {
+            file.hover_row = (Some(index) == pane).then(|| text_position(file, area, point).0);
+        }
+    }
+}
+
+/// The source row and the visual column under `point` in a file drawn in `area`.
+fn text_position(file: &crate::editor::OpenFile, area: Rect, point: (u16, u16)) -> (usize, usize) {
+    let row = file.scroll as usize + point.1.saturating_sub(area.y.saturating_add(1)) as usize;
+    let gutter = file.lines.len().max(1).to_string().len() + 3;
+    let text_start = area.x.saturating_add(1).saturating_add(gutter as u16);
+    (row, point.0.saturating_sub(text_start) as usize)
 }
 
 fn contains(area: Rect, point: (u16, u16)) -> bool {
@@ -606,6 +713,7 @@ mod tests {
         app.show_bottom_terminal = true;
         app.show_right_terminal = true;
         app.regions.editor = Rect::new(30, 2, 60, 20);
+        app.regions.editor_body = app.regions.editor;
         app.regions.bottom_terminal = Rect::new(30, 22, 60, 10);
         app.regions.right_terminal = Rect::new(90, 0, 40, 32);
         app.handle_mouse(MouseEvent {

@@ -26,3 +26,4 @@ pub const ASCII_LOGO: &[&str] = &[
 pub const NAME: &str = "SozoIDE";
 pub const AUTHOR: &str = "Vritik Valabdas";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");

@@ -25,6 +25,8 @@ pub const TAB: Timing = timing(160, 160, ease_out_cubic);
 pub const SCREEN: Timing = timing(220, 220, linear);
 pub const SPLASH_DRAW: Timing = timing(420, 420, linear);
 pub const SPLASH_EXIT: Timing = timing(260, 260, linear);
+/// The flower of the About dialog grows from its centre (`DESIGN.md` §1.3).
+pub const BLOOM: Timing = timing(1400, 1400, ease_out_cubic);
 pub const PROGRESS: Timing = timing(160, 160, ease_out_cubic);
 pub const SPINNER_FRAME: Duration = Duration::from_millis(80);
 pub const SWEEP_CYCLE: Duration = Duration::from_millis(1200);

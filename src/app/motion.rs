@@ -6,7 +6,7 @@ use std::{
 use ratatui::buffer::Buffer;
 
 use crate::animation::{
-    DIALOG, Edge, PANEL, PROGRESS, SCREEN, SPLASH_DRAW, SPLASH_EXIT, TAB, Tween,
+    BLOOM, DIALOG, Edge, PANEL, PROGRESS, SCREEN, SPLASH_DRAW, SPLASH_EXIT, TAB, Tween,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -29,6 +29,7 @@ pub struct AppMotion {
     splash_draw: Tween,
     splash_exit: Tween,
     download: Tween,
+    bloom: Tween,
     workspace: Workspace,
     tab: Option<(usize, PathBuf)>,
     previous: Buffer,
@@ -53,6 +54,7 @@ impl AppMotion {
             splash_draw,
             splash_exit: Tween::new(now, 0.0, SPLASH_EXIT),
             download: Tween::new(now, 0.0, PROGRESS),
+            bloom: Tween::new(now, 1.0, BLOOM),
             workspace: Workspace::Editor,
             tab: None,
             previous: Buffer::default(),
@@ -170,6 +172,15 @@ impl AppMotion {
 
     pub fn right_terminal_stable(&self) -> bool {
         self.right_terminal.target() == 1.0 && self.right_terminal.is_finished(self.now)
+    }
+
+    /// How far the About flower has grown, from 0 to 1.
+    pub fn bloom(&self) -> f32 {
+        self.bloom.value(self.now)
+    }
+
+    pub fn restart_bloom(&mut self, now: Instant) {
+        self.bloom.restart(now, BLOOM);
     }
 
     pub fn open_overlay(&mut self, now: Instant) {
