@@ -18,12 +18,12 @@
 
 ## Features
 
-- **Explorer and editor** — every file shows an icon for its type; open files in tabs and drag a tab to an edge of the editor to split it side by side or stacked. Edits save themselves after two idle seconds and before you switch tabs or quit. Syntax highlighting for more than 30 languages, from Rust and Go to SQL, Astro and Mermaid, with its own colour for keywords, types, functions, strings, numbers and comments. Markdown draws aligned tables, typographic quotes, *italic*, **bold** and ==highlight==, and shows the source of the line under the cursor or the mouse. Images render inline on Sixel, Kitty and iTerm2 terminals.
+- **Explorer and editor** — every file shows an icon for its type; open files in tabs (the tab bar scrolls when there are many) and drag a tab to an edge of the editor to split it side by side or stacked, each side with its own tabs; drag tabs back to the other side to join them again. Long lines scroll sideways. Edits save themselves after two idle seconds and before you switch tabs or quit. Syntax highlighting for more than 30 languages, from Rust and Go to SQL, Astro and Mermaid, with its own colour for keywords, types, functions, strings, numbers and comments. Markdown is drawn as you read it: headings in their own size and colour, quotes, rules, framed code blocks, Mermaid diagrams in box-drawing characters, aligned tables with inline formatting, typographic quotes, *italic*, **bold** and ==highlight== — and the source comes back under the cursor or the mouse. Images render inline on Sixel, Kitty and iTerm2 terminals.
 - **Two terminals** — a bottom and a right terminal, each with its own shell, with scrollback on the mouse wheel or Page Up and Page Down. Drag the dividers to resize every panel.
 - **Source Control** — stage and commit, follow the commit graph and branches, read diffs and the history of a line or a file, and check repository health. Pull is fast-forward only; rebase and checkout ask before they run.
 - **Database** — connect to SQLite, PostgreSQL and MySQL, run queries with `Ctrl+Enter` or `F5`, and read rows, affected counts, duration and history. Saved connections never write passwords to disk.
 - **Search** — in the open file or across the whole folder; files listed in `.gitignore` stay out of the results.
-- **Your terminal's look** — SozoIDE has no colors of its own. It draws with the 16 ANSI colors of your terminal theme, and shows each shortcut the way your system types it (`fn+F1` and `Ctrl+Option+B` on macOS).
+- **Your terminal's look** — SozoIDE has no colors of its own. It draws with the 16 ANSI colors of your terminal theme, and shows each shortcut the way your system types it (`fn+F1` and `Ctrl+Option+B` on macOS, `Ctrl+Alt+B` on Linux).
 - **A guided start** — a short tutorial on the first start (skip it with `Esc`), and a note with what is new and what was fixed after each update.
 
 ## Install
@@ -61,7 +61,7 @@ sozo --version
 | --- | --- |
 | `Ctrl+B` | Show or hide the Explorer |
 | `Ctrl+J` | Show or hide the bottom terminal |
-| `Ctrl+Shift+B` (macOS: `Ctrl+Option+B`) | Show or hide the right terminal |
+| `Ctrl+Shift+B` (macOS: `Ctrl+Option+B`, Linux: `Ctrl+Alt+B`) | Show or hide the right terminal |
 | `Ctrl+G` | Open or close Source Control |
 | `Ctrl+D` | Open or close Database |
 | `Ctrl+P` | Search the open file |
@@ -76,8 +76,10 @@ sozo --version
 | `Esc` | Close the dialog or panel |
 | `Page Up` / `Page Down` | Scroll the editor or the terminal history |
 | Mouse wheel | Scroll panels and terminal history |
+| `Shift` + mouse wheel | Scroll the editor sideways |
+| Mouse wheel on the tabs, `‹` / `›` | Scroll the tab bar |
 | Drag a divider | Resize the Explorer and the terminals |
-| Drag a tab | To an edge of the editor: split it; to the centre: join it again |
+| Drag a tab | To an edge of the editor: split it, each side with its own tabs; to the other side: move it there (a side without tabs closes) |
 | `G` (in About) | Open the repository to contribute |
 
 ### Motion

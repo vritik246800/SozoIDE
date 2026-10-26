@@ -17,12 +17,16 @@ pub(crate) const MUTED: Color = Color::DarkGray;
 pub(crate) const BORDER: Color = Color::DarkGray;
 
 /// A shortcut as this system types it (`UX.md` §1): on macOS the function keys need `fn` and
-/// the right terminal is Ctrl+Option+B, because Ctrl+Shift+B arrives as Ctrl+B (E11).
+/// the right terminal is Ctrl+Option+B, because Ctrl+Shift+B arrives as Ctrl+B (E11); on Linux
+/// it is Ctrl+Alt+B for the same reason (E18).
 pub(crate) fn key(label: &'static str) -> &'static str {
     key_for(std::env::consts::OS, label)
 }
 
 pub(crate) fn key_for(os: &str, label: &'static str) -> &'static str {
+    if os == "linux" && label == "Ctrl+Shift+B" {
+        return "Ctrl+Alt+B";
+    }
     if os != "macos" {
         return label;
     }
@@ -35,6 +39,34 @@ pub(crate) fn key_for(os: &str, label: &'static str) -> &'static str {
         "PageDown" => "fn+Down",
         other => other,
     }
+}
+
+/// `spans` without their first `columns` columns, for the horizontal scroll; a wide character
+/// cut in two leaves a space.
+pub(crate) fn skip_columns(spans: Vec<Span<'static>>, columns: usize) -> Vec<Span<'static>> {
+    let mut skipped = 0;
+    let mut kept = Vec::new();
+    for span in spans {
+        if skipped >= columns {
+            kept.push(span);
+            continue;
+        }
+        let mut text = String::new();
+        for character in span.content.chars() {
+            if skipped >= columns {
+                text.push(character);
+                continue;
+            }
+            skipped += Span::raw(character.to_string()).width();
+            if skipped > columns {
+                text.push(' ');
+            }
+        }
+        if !text.is_empty() {
+            kept.push(Span::styled(text, span.style));
+        }
+    }
+    kept
 }
 
 pub(crate) fn panel_block(title: String, focused: bool) -> Block<'static> {

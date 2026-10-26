@@ -12,6 +12,7 @@ use ratatui::{
 
 use crate::app::{App, Overlay, Regions};
 
+pub(crate) use components::skip_columns;
 pub(crate) use components::{
     ACTIVE, BORDER, MUTED, TEXT, bar, busy, centered, key, panel_block, render_dialog,
     scale_length, sweep_bar,
@@ -80,27 +81,28 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         regions.bottom_terminal = center[2];
     }
 
-    let editor_parts =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(editor_area);
-    regions.tabs = editor_parts[0];
-    regions.editor = editor_parts[1];
-    regions.editor_body = editor_parts[1];
-    let content_area = editor_parts[1];
-
     if explorer_width > 0 {
         render_explorer(frame, app, regions.explorer);
         render_handle(frame, regions.explorer_handle, true);
     }
-    let tabs_area = regions.tabs;
-    render_tabs(frame, app, &mut regions, tabs_area);
-    if app.show_database {
-        crate::database::view::render(frame, &mut app.database, regions.editor);
-    } else if app.show_git {
-        crate::git::view::render(frame, &mut app.git, regions.editor);
+    if app.show_database || app.show_git {
+        // Source Control and Database take the text area under the focused pane's tabs.
+        let [tabs, body] =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(editor_area);
+        let pane = app.active_pane();
+        render_tabs(frame, app, &mut regions, tabs, pane);
+        regions.tabs = tabs;
+        regions.editor = body;
+        regions.editor_body = body;
+        if app.show_database {
+            crate::database::view::render(frame, &mut app.database, body);
+        } else {
+            crate::git::view::render(frame, &mut app.git, body);
+        }
     } else {
-        let area = regions.editor;
-        render_editor(frame, app, &mut regions, area);
+        render_editor(frame, app, &mut regions, editor_area);
     }
+    let content_area = regions.editor;
     if bottom_terminal_height > 0 {
         render_handle(frame, regions.bottom_handle, false);
         render_terminal(frame, app, regions.bottom_terminal, true);
@@ -714,11 +716,23 @@ mod tests {
         settle(&mut app);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-        let (active, other) = (app.regions.editor, app.regions.split_editor);
+        let (other, active) = (app.regions.pane_bodies[0], app.regions.pane_bodies[1]);
+        assert_eq!(app.regions.editor, active);
         assert!(
             active.x > other.x && active.y == other.y,
             "right.txt went to the right"
         );
+        // Each pane has its own tab bar with its own tab.
+        let bar = |pane: usize| {
+            let area = app.regions.tab_bars[pane];
+            row(terminal.backend().buffer(), area.y)
+                .chars()
+                .skip(area.x as usize)
+                .take(area.width as usize)
+                .collect::<String>()
+        };
+        assert!(bar(0).contains("left.txt") && !bar(0).contains("right.txt"));
+        assert!(bar(1).contains("right.txt") && !bar(1).contains("left.txt"));
         let line = row(terminal.backend().buffer(), active.y + 1);
         assert!(line.contains("alpha") && line.contains("omega"), "{line}");
         // A click in the other pane focuses it and puts the cursor there.
@@ -730,7 +744,106 @@ mod tests {
         );
         assert_eq!(app.active_file().unwrap().name, "left.txt");
         assert_eq!(app.active_file().unwrap().cursor_column, 4);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert_eq!(app.regions.editor, other);
+
+        // right.txt dragged onto the left pane joins it there; its pane closes.
+        let (_, tab, _) = *app
+            .regions
+            .tab_items
+            .iter()
+            .find(|(index, _, _)| app.open_files[*index].name == "right.txt")
+            .unwrap();
+        click(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            tab.x + 2,
+            tab.y,
+        );
+        click(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            other.x + 5,
+            other.y + 5,
+        );
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("Move here"));
+        click(
+            &mut app,
+            MouseEventKind::Up(MouseButton::Left),
+            other.x + 5,
+            other.y + 5,
+        );
+        assert!(app.split.is_none());
+        assert_eq!(app.pane_tabs(0).len(), 2);
+    }
+
+    #[test]
+    fn long_lines_scroll_sideways_and_many_tabs_scroll_in_their_bar() {
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+        let directory = tempfile::tempdir().unwrap();
+        let long = format!("start {} END", "x".repeat(200));
+        std::fs::write(
+            directory.path().join("long.txt"),
+            format!("{long}\nshort\n"),
+        )
+        .unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        for index in 0..12 {
+            let name = format!("file-number-{index}.txt");
+            std::fs::write(directory.path().join(&name), "text").unwrap();
+            app.open_file(directory.path().join(name)).unwrap();
+        }
+        app.open_file(directory.path().join("long.txt")).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        // The last tab is in view: the bar scrolled and shows `‹`, the first tabs are hidden.
+        let bar = row(terminal.backend().buffer(), app.regions.tabs.y);
+        assert!(bar.contains("long.txt") && bar.contains('‹'), "{bar}");
+        assert!(!bar.contains("file-number-0.txt"), "{bar}");
+        // The wheel over the bar scrolls it back, and the bar stays where the wheel left it.
+        let tabs = app.regions.tabs;
+        for _ in 0..12 {
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: tabs.x + 4,
+                row: tabs.y,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let bar = row(terminal.backend().buffer(), app.regions.tabs.y);
+        assert!(
+            bar.contains("file-number-0.txt") && bar.contains('›'),
+            "{bar}"
+        );
+
+        // Shift and the wheel scroll the text sideways; the end of the long line comes in.
+        let editor = app.regions.editor;
+        let text =
+            |terminal: &Terminal<TestBackend>| row(terminal.backend().buffer(), editor.y + 1);
+        assert!(text(&terminal).contains("start") && !text(&terminal).contains("END"));
+        assert!(row(terminal.backend().buffer(), editor.bottom() - 1).contains('━'));
+        for _ in 0..40 {
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: editor.x + 10,
+                row: editor.y + 2,
+                modifiers: KeyModifiers::SHIFT,
+            });
+        }
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(text(&terminal).contains("END") && !text(&terminal).contains("start"));
+        assert!(app.active_file().unwrap().scroll_x > 0);
+        // A key at the start of the line brings the cursor, and the view, back.
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Home,
+            KeyModifiers::NONE,
+        ));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(text(&terminal).contains("start"));
     }
 
     #[test]

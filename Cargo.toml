@@ -1,6 +1,6 @@
 [package]
 name = "SozoIDE"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Vritik Valabdas"]
 description = "A terminal-native integrated development environment"
@@ -22,6 +22,7 @@ git2 = { version = "0.20", default-features = false, features = ["vendored-libgi
 ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "ico", "webp"] }
 keyring = "3.6"
+mermaid-text = "0.57.0"
 portable-pty = "0.9"
 ratatui = "0.30.2"
 ratatui-image = { version = "10.0", default-features = false, features = ["crossterm"] }
