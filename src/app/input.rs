@@ -12,8 +12,9 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        // macOS terminals send Ctrl+Shift+B as Ctrl+B, so the Mac uses Ctrl+Option+B.
-        let right_terminal_modifier = if cfg!(target_os = "macos") {
+        // macOS and Linux terminals send Ctrl+Shift+B as Ctrl+B (E11, E18), so they use
+        // Ctrl+Option+B and Ctrl+Alt+B.
+        let right_terminal_modifier = if cfg!(any(target_os = "macos", target_os = "linux")) {
             key.modifiers.contains(KeyModifiers::ALT)
         } else {
             shift
@@ -198,7 +199,7 @@ impl App {
                         // The cursor goes to the match, which sits a few lines below the top.
                         let file = &mut self.open_files[active];
                         file.move_cursor_to(found.line, found.column);
-                        file.scroll = found.line.saturating_sub(3) as u16;
+                        file.scroll = file.display_row(found.line).saturating_sub(3) as u16;
                         file.follow_cursor = false;
                     }
                     self.close_search();
@@ -466,6 +467,14 @@ impl App {
                         self.selected_entry = index;
                         self.activate_selected();
                     }
+                } else if let Some((pane, right, _)) = self
+                    .regions
+                    .tab_arrows
+                    .iter()
+                    .find(|(_, _, area)| contains(*area, point))
+                    .copied()
+                {
+                    self.scroll_tabs(pane, right);
                 } else if let Some((index, tab, close)) = self
                     .regions
                     .tab_items
@@ -494,13 +503,16 @@ impl App {
                     if self.show_git || self.show_database {
                         return;
                     }
-                    if let Some(split) = self.split
-                        && contains(self.regions.split_editor, point)
+                    let Some(pane) = self.pane_under(point) else {
+                        return;
+                    };
+                    if pane != self.active_pane()
+                        && let Some(split) = self.split
                     {
                         self.flush_active_file();
                         self.select_tab(split.other);
                     }
-                    let area = self.regions.editor;
+                    let area = self.regions.pane_bodies[pane];
                     if let Some(file) = self
                         .active_tab
                         .and_then(|index| self.open_files.get_mut(index))
@@ -517,9 +529,19 @@ impl App {
                 if self.drag.is_none() && self.tab_drag.is_some() =>
             {
                 let body = self.regions.editor_body;
+                let editor = !self.show_git && !self.show_database;
+                let pane = (0..2).find(|pane| contains(self.regions.pane_areas[*pane], point));
+                let several = self.open_files.len() > 1;
                 if let Some(drag) = &mut self.tab_drag {
-                    drag.zone = (!self.show_git && !self.show_database && contains(body, point))
-                        .then(|| DropZone::at(body, point));
+                    let from = self.open_files.get(drag.tab).map(|file| file.pane);
+                    drag.zone = match self.split {
+                        // Split: another pane takes the tab.
+                        Some(_) => pane
+                            .filter(|pane| editor && Some(*pane) != from)
+                            .map(DropZone::Pane),
+                        None => (editor && several && contains(body, point))
+                            .then(|| DropZone::at(body, point)),
+                    };
                 }
             }
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => match self.drag {
@@ -553,14 +575,19 @@ impl App {
                 }
             }
             MouseEventKind::Moved => self.hover(point),
-            MouseEventKind::ScrollUp => self.scroll_at(point, true),
-            MouseEventKind::ScrollDown => self.scroll_at(point, false),
+            // Shift turns the wheel sideways, for terminals without a horizontal wheel.
+            MouseEventKind::ScrollUp => self.scroll_at(point, true, sideways(mouse)),
+            MouseEventKind::ScrollDown => self.scroll_at(point, false, sideways(mouse)),
+            MouseEventKind::ScrollLeft => self.scroll_at(point, true, true),
+            MouseEventKind::ScrollRight => self.scroll_at(point, false, true),
             _ => {}
         }
     }
 
-    fn scroll_at(&mut self, point: (u16, u16), up: bool) {
-        if self.show_database && contains(self.database.regions.content, point) {
+    fn scroll_at(&mut self, point: (u16, u16), up: bool, sideways: bool) {
+        if let Some(pane) = (0..2).find(|pane| contains(self.regions.tab_bars[*pane], point)) {
+            self.scroll_tabs(pane, !up);
+        } else if self.show_database && contains(self.database.regions.content, point) {
             self.database.scroll(up);
         } else if self.show_git && contains(self.git.regions.content, point) {
             self.git.scroll(up);
@@ -577,49 +604,74 @@ impl App {
         } else if contains(self.regions.right_terminal, point) {
             self.right_terminal.scroll(up, 3);
         } else if let Some(index) = self.pane_at(point) {
+            // The editor clamps both scrolls to the text when it draws.
             let file = &mut self.open_files[index];
-            file.scroll = if up {
-                file.scroll.saturating_sub(3)
+            let scroll = if sideways {
+                &mut file.scroll_x
             } else {
-                file.scroll.saturating_add(3)
+                &mut file.scroll
+            };
+            let step = if sideways { 6 } else { 3 };
+            *scroll = if up {
+                scroll.saturating_sub(step)
+            } else {
+                scroll.saturating_add(step)
             };
         }
     }
 
-    /// The file drawn under `point`: the active pane or, with a split, the other one.
+    /// Moves a tab bar by one tab; it stops at the last one.
+    fn scroll_tabs(&mut self, pane: usize, right: bool) {
+        let count = self.pane_tabs(pane).len();
+        let bar = &mut self.tab_bars[pane];
+        bar.scroll = if right {
+            (bar.scroll + 1).min(count.saturating_sub(1))
+        } else {
+            bar.scroll.saturating_sub(1)
+        };
+    }
+
+    /// The editor pane whose text is under `point`.
+    fn pane_under(&self, point: (u16, u16)) -> Option<usize> {
+        (0..2).find(|pane| contains(self.regions.pane_bodies[*pane], point))
+    }
+
+    /// The file drawn under `point`, in either pane.
     fn pane_at(&self, point: (u16, u16)) -> Option<usize> {
         if self.show_git || self.show_database {
             return None;
         }
-        if contains(self.regions.editor, point) {
-            return self.active_tab;
-        }
-        self.split
-            .filter(|_| contains(self.regions.split_editor, point))
-            .map(|split| split.other)
+        self.pane_under(point)
+            .and_then(|pane| self.shown_tab(pane))
             .filter(|index| *index < self.open_files.len())
     }
 
     /// The row under the mouse shows its Markdown source, like the cursor row.
     fn hover(&mut self, point: (u16, u16)) {
         let pane = self.pane_at(point);
-        let area = if pane == self.active_tab {
-            self.regions.editor
-        } else {
-            self.regions.split_editor
-        };
+        let area = self
+            .pane_under(point)
+            .map(|pane| self.regions.pane_bodies[pane])
+            .unwrap_or_default();
         for (index, file) in self.open_files.iter_mut().enumerate() {
             file.hover_row = (Some(index) == pane).then(|| text_position(file, area, point).0);
         }
     }
 }
 
+fn sideways(mouse: MouseEvent) -> bool {
+    mouse.modifiers.contains(KeyModifiers::SHIFT)
+}
+
 /// The source row and the visual column under `point` in a file drawn in `area`.
 fn text_position(file: &crate::editor::OpenFile, area: Rect, point: (u16, u16)) -> (usize, usize) {
-    let row = file.scroll as usize + point.1.saturating_sub(area.y.saturating_add(1)) as usize;
+    let display = file.scroll as usize + point.1.saturating_sub(area.y.saturating_add(1)) as usize;
+    // Below the last line: a row past the end, which the cursor clamps to the last one.
+    let row = file.source_row(display).unwrap_or(file.lines.len());
     let gutter = file.lines.len().max(1).to_string().len() + 3;
     let text_start = area.x.saturating_add(1).saturating_add(gutter as u16);
-    (row, point.0.saturating_sub(text_start) as usize)
+    let column = point.0.saturating_sub(text_start) as usize + file.scroll_x as usize;
+    (row, column)
 }
 
 fn contains(area: Rect, point: (u16, u16)) -> bool {
@@ -646,7 +698,7 @@ mod tests {
         assert!(!app.show_explorer);
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
         assert!(app.show_bottom_terminal);
-        let right_terminal_key = if cfg!(target_os = "macos") {
+        let right_terminal_key = if cfg!(any(target_os = "macos", target_os = "linux")) {
             KeyEvent::new(
                 KeyCode::Char('b'),
                 KeyModifiers::CONTROL | KeyModifiers::ALT,
@@ -714,6 +766,7 @@ mod tests {
         app.show_right_terminal = true;
         app.regions.editor = Rect::new(30, 2, 60, 20);
         app.regions.editor_body = app.regions.editor;
+        app.regions.pane_bodies[0] = app.regions.editor;
         app.regions.bottom_terminal = Rect::new(30, 22, 60, 10);
         app.regions.right_terminal = Rect::new(90, 0, 40, 32);
         app.handle_mouse(MouseEvent {

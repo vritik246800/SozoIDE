@@ -5,10 +5,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use markdown::{
-    MarkdownDocument, inline_source_column, is_markdown_path, render_inline, visual_column_to_char,
+use markdown::{MarkdownDocument, Row, is_markdown_path, visual_column_to_char};
+use ratatui::{
+    style::Color,
+    text::{Line, Span},
 };
-use ratatui::{style::Color, text::Span};
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 
 mod highlight;
@@ -27,8 +28,16 @@ pub struct OpenFile {
     pub lines: Vec<String>,
     pub highlighted: Vec<Vec<Span<'static>>>,
     markdown: Option<MarkdownDocument>,
+    /// Rows on screen; a Mermaid diagram can take more rows than its source.
+    rows: Vec<Row>,
     pub image: Option<StatefulProtocol>,
+    /// The first row on screen (`rows`, not source lines) and the first column.
     pub scroll: u16,
+    pub scroll_x: u16,
+    /// The widest line as drawn, for the horizontal scroll.
+    pub max_width: usize,
+    /// The editor pane that shows this tab when the editor is split (F19), set by the app.
+    pub pane: usize,
     /// Set when the cursor moves: the next frame scrolls to it. The mouse wheel scrolls freely.
     pub follow_cursor: bool,
     /// The row under the mouse, which shows its Markdown source like the cursor row.
@@ -59,8 +68,12 @@ impl OpenFile {
                 lines: Vec::new(),
                 highlighted: Vec::new(),
                 markdown: None,
+                rows: Vec::new(),
                 image: Some(picker.new_resize_protocol(image)),
                 scroll: 0,
+                scroll_x: 0,
+                max_width: 0,
+                pane: 0,
                 follow_cursor: false,
                 hover_row: None,
                 cursor_row: 0,
@@ -83,16 +96,19 @@ impl OpenFile {
             lines.push(String::new());
         }
         let highlighted = highlight_lines(&path, &lines);
-        let markdown = is_markdown_path(&path).then(|| MarkdownDocument::parse(&lines));
-        Ok(Self {
+        let mut file = Self {
             path,
             name,
             icon,
             lines,
             highlighted,
-            markdown,
+            markdown: None,
+            rows: Vec::new(),
             image: None,
             scroll: 0,
+            scroll_x: 0,
+            max_width: 0,
+            pane: 0,
             follow_cursor: false,
             hover_row: None,
             cursor_row: 0,
@@ -100,7 +116,9 @@ impl OpenFile {
             dirty: false,
             trailing_newline,
             last_edit: None,
-        })
+        };
+        file.layout();
+        Ok(file)
     }
 
     pub fn save(&mut self) -> Result<()> {
@@ -171,49 +189,90 @@ impl OpenFile {
         rows
     }
 
-    pub fn rendered_line(&self, row: usize) -> Option<Vec<Span<'static>>> {
-        let document = self.markdown.as_ref()?;
-        let raw = self.source_rows();
-        if !document.formats_inline(row) {
-            return document.rendered_line(row, &raw);
-        }
-        if raw.contains(&row) {
-            return None;
-        }
-        render_inline(self.lines.get(row)?, self.highlighted.get(row)?)
+    pub fn display_rows(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// The first row on screen of source line `row`.
+    pub fn display_row(&self, row: usize) -> usize {
+        self.rows.partition_point(|display| display.source < row)
+    }
+
+    /// The source line drawn on screen row `display`.
+    pub fn source_row(&self, display: usize) -> Option<usize> {
+        self.rows.get(display).map(|row| row.source)
+    }
+
+    /// Screen row `display`: its line number (none on the rows a diagram adds) and its text,
+    /// drawn Markdown or the highlighted source. A rule reaches `width` columns.
+    pub fn display_line(
+        &self,
+        display: usize,
+        width: usize,
+    ) -> (Option<usize>, Vec<Span<'static>>) {
+        let Some(row) = self.rows.get(display).copied() else {
+            return (None, Vec::new());
+        };
+        let line = &self.lines[row.source];
+        let highlighted = &self.highlighted[row.source];
+        let spans = self
+            .markdown
+            .as_ref()
+            .and_then(|document| {
+                document.render(row, &self.source_rows(), width, line, highlighted)
+            })
+            .unwrap_or_else(|| {
+                if highlighted.is_empty() {
+                    vec![Span::raw(line.clone())]
+                } else {
+                    highlighted.clone()
+                }
+            });
+        ((!row.filler).then_some(row.source + 1), spans)
     }
 
     pub fn cursor_column_for_click(&self, row: usize, visual_column: usize) -> usize {
         let Some(line) = self.lines.get(row) else {
             return visual_column;
         };
-        let raw = self.source_rows();
         self.markdown
             .as_ref()
             .and_then(|document| {
-                if !document.formats_inline(row) {
-                    document.source_column(row, &raw, visual_column)
-                } else if raw.contains(&row) {
-                    None
-                } else {
-                    inline_source_column(line, visual_column)
-                }
+                document.source_column(row, &self.source_rows(), visual_column, line)
             })
             .unwrap_or_else(|| visual_column_to_char(line, visual_column))
     }
 
-    /// The row the editor scrolls to before drawing: the cursor's, if it just moved.
-    pub fn scroll_to_cursor(&mut self, viewport_height: usize) {
+    /// The columns before the cursor on its line, which always shows its source.
+    pub fn cursor_x(&self) -> usize {
+        let prefix = self.lines[self.cursor_row]
+            .chars()
+            .take(self.cursor_column)
+            .collect::<String>();
+        Line::from(prefix).width()
+    }
+
+    /// Scrolls to the cursor before drawing, if it just moved, in a view of `height` rows and
+    /// `width` columns; keeps both scrolls inside the text.
+    pub fn scroll_to_cursor(&mut self, height: usize, width: usize) {
         if std::mem::take(&mut self.follow_cursor) {
-            if self.cursor_row < self.scroll as usize {
-                self.scroll = self.cursor_row as u16;
-            } else if viewport_height > 0
-                && self.cursor_row >= self.scroll as usize + viewport_height
-            {
-                self.scroll = (self.cursor_row + 1 - viewport_height) as u16;
+            let row = self.display_row(self.cursor_row);
+            if row < self.scroll as usize {
+                self.scroll = row as u16;
+            } else if height > 0 && row >= self.scroll as usize + height {
+                self.scroll = (row + 1 - height) as u16;
+            }
+            let column = self.cursor_x();
+            if column < self.scroll_x as usize {
+                self.scroll_x = column as u16;
+            } else if width > 0 && column >= self.scroll_x as usize + width {
+                self.scroll_x = (column + 1 - width) as u16;
             }
         }
-        self.scroll = self.scroll.min(self.lines.len().saturating_sub(1) as u16);
+        self.scroll = self.scroll.min(self.rows.len().saturating_sub(1) as u16);
+        self.scroll_x = self
+            .scroll_x
+            .min((self.max_width + 1).saturating_sub(width) as u16);
     }
 
     pub fn insert(&mut self, character: char) {
@@ -276,7 +335,24 @@ impl OpenFile {
         self.dirty = true;
         self.last_edit = Some(Instant::now());
         self.highlighted = highlight_lines(&self.path, &self.lines);
+        self.layout();
+    }
+
+    /// Parses the Markdown again and works out the rows on screen and the widest line.
+    fn layout(&mut self) {
         self.markdown = is_markdown_path(&self.path).then(|| MarkdownDocument::parse(&self.lines));
+        self.rows = match &self.markdown {
+            Some(document) => document.rows(self.lines.len()),
+            None => (0..self.lines.len()).map(Row::plain).collect(),
+        };
+        let widest = self
+            .lines
+            .iter()
+            .map(|line| Line::from(line.as_str()).width());
+        self.max_width = widest
+            .max()
+            .unwrap_or(0)
+            .max(self.markdown.as_ref().map_or(0, MarkdownDocument::width));
     }
 
     fn current_line(&self) -> &String {
@@ -306,6 +382,12 @@ impl OpenFile {
 mod tests {
     use super::*;
 
+    /// Source line `row` as drawn on screen.
+    fn drawn(file: &OpenFile, row: usize) -> String {
+        let (_, spans) = file.display_line(file.display_row(row), 40);
+        spans.iter().map(|span| span.content.as_ref()).collect()
+    }
+
     #[test]
     fn markdown_tables_toggle_for_editing_without_changing_saved_source() {
         let directory = tempfile::tempdir().unwrap();
@@ -318,16 +400,16 @@ mod tests {
         let mut picker = Picker::halfblocks();
         let mut file = OpenFile::load(path.clone(), &mut picker).unwrap();
 
-        assert!(file.rendered_line(1).is_some());
+        assert_ne!(drawn(&file, 1), file.lines[1]);
         assert_eq!(file.lines[3], "| Ana | 30 |");
         file.move_cursor_to(3, 4);
-        assert!(file.rendered_line(3).is_none());
+        assert_eq!(drawn(&file, 3), file.lines[3]);
         file.insert('X');
         assert_eq!(file.lines[3], "| AnXa | 30 |");
         assert_eq!(file.highlighted.len(), file.lines.len());
 
         file.move_cursor_to(0, 0);
-        assert!(file.rendered_line(1).is_some());
+        assert_ne!(drawn(&file, 1), file.lines[1]);
         file.save().unwrap();
         let saved = std::fs::read_to_string(path).unwrap();
         assert!(saved.contains("| AnXa | 30 |"));
@@ -342,16 +424,16 @@ mod tests {
         std::fs::write(&path, "line\n".repeat(100)).unwrap();
         let mut file = OpenFile::load(path, &mut Picker::halfblocks()).unwrap();
         file.scroll = 50;
-        file.scroll_to_cursor(20);
+        file.scroll_to_cursor(20, 80);
         assert_eq!(
             file.scroll, 50,
             "the cursor on row 0 does not pull the view back"
         );
         file.scroll = 500;
-        file.scroll_to_cursor(20);
+        file.scroll_to_cursor(20, 80);
         assert_eq!(file.scroll, 99, "never past the last line");
         file.move_cursor(1, 0);
-        file.scroll_to_cursor(20);
+        file.scroll_to_cursor(20, 80);
         assert_eq!(file.scroll, 1, "moving the cursor brings it back into view");
     }
 }

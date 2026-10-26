@@ -27,16 +27,16 @@ pub enum SplitDirection {
     Rows,
 }
 
-/// The editor split in two (F19): the active tab in one pane, `other` in the other one.
-/// `active_first` says whether the active pane is the left/top one.
+/// The editor split in two (F19): each pane has its own tabs (`OpenFile::pane`, 0 is the
+/// left/top one). The active tab is shown in its pane and `other` in the other pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Split {
     pub direction: SplitDirection,
     pub other: usize,
-    pub active_first: bool,
 }
 
-/// Where a dragged tab is dropped in the editor: an edge splits, the centre joins.
+/// Where a dragged tab is dropped in the editor: an edge splits it, the centre keeps one
+/// pane and, once split, a pane takes the tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DropZone {
     Left,
@@ -44,6 +44,15 @@ pub enum DropZone {
     Top,
     Bottom,
     Center,
+    Pane(usize),
+}
+
+/// A pane's tab bar: the first tab drawn and the tab it last brought into view, so that it
+/// follows a new tab but the wheel can move it freely.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TabBar {
+    pub scroll: usize,
+    pub shown: Option<usize>,
 }
 
 impl DropZone {
@@ -99,9 +108,15 @@ pub struct Regions {
     pub about_repository: Rect,
     pub dialog_next: Rect,
     pub dialog_skip: Rect,
-    /// Both editor panes together; `editor` is the active pane and `split_editor` the other.
+    /// Both editor panes together; `editor` is the text area of the active pane.
     pub editor_body: Rect,
-    pub split_editor: Rect,
+    /// Each pane with its tab bar, its tab bar and its text area (the second one only when
+    /// split).
+    pub pane_areas: [Rect; 2],
+    pub tab_bars: [Rect; 2],
+    pub pane_bodies: [Rect; 2],
+    /// The `‹` and `›` of a tab bar with hidden tabs: pane, right side, area.
+    pub tab_arrows: Vec<(usize, bool, Rect)>,
     pub search_input: Rect,
     pub search_results: Rect,
     pub search_match_items: Vec<(usize, Rect)>,

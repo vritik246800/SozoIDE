@@ -22,7 +22,7 @@ mod motion;
 
 pub use explorer::FileEntry;
 use layout::{DragTarget, TabDrag, inner_size};
-pub use layout::{DropZone, Focus, Overlay, Regions, Split, SplitDirection};
+pub use layout::{DropZone, Focus, Overlay, Regions, Split, SplitDirection, TabBar};
 pub(crate) use motion::AppMotion;
 
 /// Pages of the first-start tutorial (`ui::overlays` writes them).
@@ -69,6 +69,7 @@ pub struct App {
     pub welcome: Welcome,
     pub tutorial_step: usize,
     pub split: Option<Split>,
+    pub tab_bars: [TabBar; 2],
     tab_drag: Option<TabDrag>,
     splash_until: Instant,
     picker: Picker,
@@ -124,6 +125,7 @@ impl App {
             welcome,
             tutorial_step: 0,
             split: None,
+            tab_bars: [TabBar::default(); 2],
             tab_drag: None,
             splash_until: now + Duration::from_millis(1400),
             picker,
@@ -241,7 +243,8 @@ impl App {
             self.focus = Focus::Editor;
             return Ok(());
         }
-        let file = OpenFile::load(path, &mut self.picker)?;
+        let mut file = OpenFile::load(path, &mut self.picker)?;
+        file.pane = self.active_pane();
         self.flush_active_file();
         self.status = format!("Opened {}", file.name);
         self.open_files.push(file);
@@ -250,16 +253,37 @@ impl App {
         Ok(())
     }
 
-    /// Shows tab `index` in the active pane; a tab already in the other pane takes the focus
-    /// there instead, so the panes never move.
+    /// The pane with the focus: the one that shows the active tab.
+    pub fn active_pane(&self) -> usize {
+        self.active_tab
+            .and_then(|index| self.open_files.get(index))
+            .map_or(0, |file| file.pane)
+    }
+
+    /// The tabs of `pane`, in the order they were opened.
+    pub fn pane_tabs(&self, pane: usize) -> Vec<usize> {
+        (0..self.open_files.len())
+            .filter(|index| self.open_files[*index].pane == pane)
+            .collect()
+    }
+
+    /// The tab on screen in `pane`.
+    pub fn shown_tab(&self, pane: usize) -> Option<usize> {
+        if pane == self.active_pane() {
+            self.active_tab
+        } else {
+            self.split.map(|split| split.other)
+        }
+    }
+
+    /// Shows tab `index` in its pane and gives that pane the focus.
     pub fn select_tab(&mut self, index: usize) {
-        match (&mut self.split, self.active_tab) {
-            (Some(split), Some(active)) if split.other == index => {
-                split.other = active;
-                split.active_first = !split.active_first;
-                std::mem::swap(&mut self.regions.editor, &mut self.regions.split_editor);
-            }
-            _ => {}
+        let pane = |tab: usize| self.open_files.get(tab).map(|file| file.pane);
+        if let Some(active) = self.active_tab
+            && pane(active) != pane(index)
+            && let Some(split) = &mut self.split
+        {
+            split.other = active;
         }
         self.active_tab = Some(index);
     }
@@ -269,33 +293,59 @@ impl App {
         self.tab_drag.and_then(|drag| drag.zone)
     }
 
-    /// Splits the editor with `tab` on the side of `zone` and the file shown before beside it;
-    /// the centre joins the panes again.
+    /// An edge splits the editor: the tab goes to a new pane on that side and the other tabs
+    /// stay in the first one. Once split, a pane takes the tab.
     fn drop_tab(&mut self, drag: TabDrag, zone: DropZone) {
         let tab = drag.tab;
-        if zone == DropZone::Center {
-            self.split = None;
-            self.active_tab = Some(tab);
+        if tab >= self.open_files.len() {
             return;
         }
-        let neighbour = if tab > 0 { tab - 1 } else { tab + 1 };
-        let Some(other) = drag
-            .previous
-            .filter(|previous| *previous != tab)
-            .or((neighbour < self.open_files.len()).then_some(neighbour))
-        else {
-            return;
+        let direction = match zone {
+            DropZone::Center => return self.select_tab(tab),
+            DropZone::Pane(pane) => return self.move_tab(tab, pane, drag.previous),
+            DropZone::Left | DropZone::Right => SplitDirection::Columns,
+            DropZone::Top | DropZone::Bottom => SplitDirection::Rows,
         };
-        self.split = Some(Split {
-            direction: match zone {
-                DropZone::Left | DropZone::Right => SplitDirection::Columns,
-                _ => SplitDirection::Rows,
-            },
-            other,
-            active_first: matches!(zone, DropZone::Left | DropZone::Top),
-        });
+        if self.split.is_some() || self.open_files.len() < 2 {
+            return;
+        }
+        let pane = usize::from(matches!(zone, DropZone::Right | DropZone::Bottom));
+        for (index, file) in self.open_files.iter_mut().enumerate() {
+            file.pane = if index == tab { pane } else { 1 - pane };
+        }
+        let other = drag
+            .previous
+            .filter(|previous| *previous != tab && *previous < self.open_files.len())
+            .unwrap_or(usize::from(tab == 0));
+        self.split = Some(Split { direction, other });
         self.active_tab = Some(tab);
         self.focus = Focus::Editor;
+    }
+
+    /// Moves `tab` to `pane`; the pane it leaves shows another of its tabs, or the editor
+    /// goes back to one pane when it has none left.
+    fn move_tab(&mut self, tab: usize, pane: usize, previous: Option<usize>) {
+        let from = self.open_files[tab].pane;
+        if from == pane {
+            return;
+        }
+        self.open_files[tab].pane = pane;
+        let left = self.pane_tabs(from);
+        match (left.first(), &mut self.split) {
+            (Some(first), Some(split)) => {
+                split.other = previous.filter(|tab| left.contains(tab)).unwrap_or(*first);
+            }
+            _ => self.join_panes(),
+        }
+        self.active_tab = Some(tab);
+        self.focus = Focus::Editor;
+    }
+
+    fn join_panes(&mut self) {
+        self.split = None;
+        for file in &mut self.open_files {
+            file.pane = 0;
+        }
     }
 
     pub fn close_tab(&mut self, index: usize) {
@@ -303,24 +353,39 @@ impl App {
             return;
         }
         self.save_file(index);
+        let pane = self.open_files[index].pane;
+        let was_active = self.active_tab == Some(index);
         self.open_files.remove(index);
         let shift = |tab: usize| if tab > index { tab - 1 } else { tab };
-        // Closing either pane leaves the other file alone in the editor.
+        // The tab that takes the place of the closed one in its pane.
+        let tabs = self.pane_tabs(pane);
+        let neighbour = tabs
+            .iter()
+            .copied()
+            .find(|tab| *tab >= index)
+            .or(tabs.last().copied());
         if let Some(mut split) = self.split.take() {
-            if self.active_tab == Some(index) {
-                self.active_tab = Some(shift(split.other));
+            // A pane without tabs closes: the other one fills the editor.
+            if tabs.is_empty() {
+                self.join_panes();
+                self.active_tab = if was_active {
+                    Some(shift(split.other))
+                } else {
+                    self.active_tab.map(shift)
+                };
                 return;
             }
-            if split.other != index {
-                split.other = shift(split.other);
-                self.split = Some(split);
-            }
+            split.other = if split.other == index {
+                neighbour.unwrap_or(0)
+            } else {
+                shift(split.other)
+            };
+            self.split = Some(split);
         }
-        self.active_tab = match (self.open_files.is_empty(), self.active_tab) {
-            (true, _) => None,
-            (false, Some(active)) if active > index => Some(active - 1),
-            (false, Some(active)) if active == index => Some(index.min(self.open_files.len() - 1)),
-            (false, active) => active,
+        self.active_tab = match self.active_tab {
+            _ if self.open_files.is_empty() => None,
+            Some(_) if was_active => neighbour,
+            active => active.map(shift),
         };
     }
 
@@ -446,38 +511,66 @@ mod tests {
             previous,
             zone: None,
         };
-        // c.txt was on screen; a.txt goes to the right and c.txt stays on the left.
+        // c.txt was on screen; a.txt goes to a pane of its own on the right.
         app.drop_tab(drag(0, Some(2)), DropZone::Right);
         let split = app.split.unwrap();
         assert_eq!(split.direction, SplitDirection::Columns);
-        assert_eq!(
-            (app.active_tab, split.other, split.active_first),
-            (Some(0), 2, false)
-        );
+        assert_eq!((app.active_tab, split.other), (Some(0), 2));
+        assert_eq!((app.pane_tabs(0), app.pane_tabs(1)), (vec![1, 2], vec![0]));
 
         // Choosing the tab of the other pane focuses that pane; the panes stay where they are.
         app.select_tab(2);
-        let split = app.split.unwrap();
-        assert_eq!(
-            (app.active_tab, split.other, split.active_first),
-            (Some(2), 0, true)
-        );
+        assert_eq!((app.active_tab, app.split.unwrap().other), (Some(2), 0));
+        assert_eq!(app.active_pane(), 0);
+        // A file opened now goes to the pane with the focus.
+        std::fs::write(directory.path().join("d.txt"), "d").unwrap();
+        app.open_file(directory.path().join("d.txt")).unwrap();
+        assert_eq!(app.pane_tabs(0), vec![1, 2, 3]);
+        app.close_tab(3);
 
-        // Closing a tab outside the split keeps it, with the indexes moved.
+        // Closing a tab of a pane with more tabs keeps the split, with the indexes moved.
         app.close_tab(1);
         assert_eq!((app.active_tab, app.split.unwrap().other), (Some(1), 0));
+        // Closing the last tab of a pane joins the editor again.
         app.close_tab(1);
         assert_eq!((app.active_tab, app.split), (Some(0), None));
 
         app.open_file(directory.path().join("b.txt")).unwrap();
         app.drop_tab(drag(1, Some(0)), DropZone::Bottom);
         assert_eq!(app.split.unwrap().direction, SplitDirection::Rows);
-        app.drop_tab(drag(0, Some(1)), DropZone::Center);
-        assert_eq!((app.active_tab, app.split), (Some(0), None));
+        assert_eq!((app.pane_tabs(0), app.pane_tabs(1)), (vec![0], vec![1]));
+        // Moving a tab to the other pane leaves its pane empty: one editor again.
+        app.drop_tab(drag(1, Some(0)), DropZone::Pane(0));
+        assert_eq!((app.active_tab, app.split), (Some(1), None));
+        assert_eq!(app.pane_tabs(0), vec![0, 1]);
         assert_eq!(
             DropZone::at(ratatui::layout::Rect::new(10, 10, 100, 40), (12, 30)),
             DropZone::Left
         );
+    }
+
+    #[test]
+    fn a_pane_keeps_the_tabs_it_does_not_give_away() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(directory.path().join(name), name).unwrap();
+        }
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            app.open_file(directory.path().join(name)).unwrap();
+        }
+        let drag = |tab, previous| TabDrag {
+            tab,
+            previous,
+            zone: None,
+        };
+        app.drop_tab(drag(2, Some(2)), DropZone::Left);
+        assert_eq!((app.pane_tabs(0), app.pane_tabs(1)), (vec![2], vec![0, 1]));
+        // b.txt joins c.txt on the left; a.txt stays alone on the right.
+        app.drop_tab(drag(1, Some(2)), DropZone::Pane(0));
+        assert_eq!((app.pane_tabs(0), app.pane_tabs(1)), (vec![1, 2], vec![0]));
+        assert_eq!((app.active_tab, app.split.unwrap().other), (Some(1), 0));
+        assert_eq!(app.shown_tab(1), Some(0));
     }
 
     fn test_app() -> App {

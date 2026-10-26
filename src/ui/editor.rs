@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use ratatui_image::{Resize, StatefulImage};
 use tui_term::widget::{Cursor, PseudoTerminal};
@@ -14,7 +14,7 @@ use crate::{
     editor::{OpenFile, language_name},
 };
 
-use super::{ACTIVE, BORDER, MUTED, TEXT, key, panel_block};
+use super::{ACTIVE, BORDER, MUTED, TEXT, key, panel_block, skip_columns};
 
 pub(super) fn render_explorer(frame: &mut Frame, app: &App, area: Rect) {
     let title = format!(" {} Explorer ", app.icon("custom-folder"));
@@ -62,23 +62,81 @@ pub(super) fn render_explorer(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-pub(super) fn render_tabs(frame: &mut Frame, app: &App, regions: &mut Regions, area: Rect) {
+/// The tab bar of `pane`: it keeps the tab on screen in view when that changes and shows
+/// `‹`/`›` when tabs are hidden on a side; the wheel or those arrows scroll it.
+pub(super) fn render_tabs(
+    frame: &mut Frame,
+    app: &mut App,
+    regions: &mut Regions,
+    area: Rect,
+    pane: usize,
+) {
+    let tabs = app.pane_tabs(pane);
+    let shown = app.shown_tab(pane);
+    let focused_pane = pane == app.active_pane();
+    let labels = tabs
+        .iter()
+        .map(|index| {
+            let file = &app.open_files[*index];
+            let dirty = if file.dirty { "*" } else { "" };
+            let text = format!(" {} {}{}  x ", file.icon.0, file.name, dirty);
+            let width = Line::from(text.as_str()).width() as u16;
+            (*index, text, width)
+        })
+        .collect::<Vec<_>>();
+    let bar = &mut app.tab_bars[pane];
+    if bar.shown != shown {
+        bar.shown = shown;
+        if let Some(position) = shown.and_then(|shown| tabs.iter().position(|tab| *tab == shown)) {
+            // Room for both arrows, so the tab is still whole once they are drawn.
+            let room = area.width.saturating_sub(4);
+            if position < bar.scroll {
+                bar.scroll = position;
+            }
+            while bar.scroll < position
+                && labels[bar.scroll..=position]
+                    .iter()
+                    .map(|(_, _, width)| width)
+                    .sum::<u16>()
+                    > room
+            {
+                bar.scroll += 1;
+            }
+        }
+    }
+    bar.scroll = bar.scroll.min(tabs.len().saturating_sub(1));
+    let scroll = bar.scroll;
+
+    let arrow = Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD);
     let mut spans = Vec::new();
     let mut x = area.x;
-    for (index, file) in app.open_files.iter().enumerate() {
-        let active = app.active_tab == Some(index);
-        let dirty = if file.dirty { "*" } else { "" };
-        let text = format!(" {} {}{}  x ", file.icon.0, file.name, dirty);
-        let width = Line::from(text.clone()).width() as u16;
-        if x.saturating_add(width) > area.x.saturating_add(area.width) {
+    if scroll > 0 {
+        spans.push(Span::styled("‹ ", arrow));
+        regions
+            .tab_arrows
+            .push((pane, false, Rect::new(x, area.y, 2, 1)));
+        x += 2;
+    }
+    let total = labels[scroll..]
+        .iter()
+        .map(|(_, _, width)| width)
+        .sum::<u16>();
+    let overflow = x.saturating_add(total) > area.right();
+    let end = if overflow {
+        area.right().saturating_sub(2)
+    } else {
+        area.right()
+    };
+    for (index, text, width) in labels.into_iter().skip(scroll) {
+        if x.saturating_add(width) > end {
             break;
         }
-        let style = if active {
-            Style::default()
+        let style = match (shown == Some(index), focused_pane) {
+            (true, true) => Style::default()
                 .fg(ACTIVE)
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-        } else {
-            Style::default().fg(MUTED)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            (true, false) => Style::default().fg(MUTED).add_modifier(Modifier::REVERSED),
+            _ => Style::default().fg(MUTED),
         };
         spans.push(Span::styled(text, style));
         let tab = Rect::new(x, area.y, width.saturating_sub(3), 1);
@@ -90,45 +148,66 @@ pub(super) fn render_tabs(frame: &mut Frame, app: &App, regions: &mut Regions, a
         Paragraph::new(Line::from(spans)),
         Rect::new(area.x, area.y, area.width, 1),
     );
+    if overflow {
+        let right = Rect::new(end, area.y, 2, 1);
+        frame.render_widget(Paragraph::new(Span::styled(" ›", arrow)), right);
+        regions.tab_arrows.push((pane, true, right));
+    }
     frame.render_widget(
         Block::default()
             .borders(Borders::BOTTOM)
             .border_style(Style::default().fg(BORDER)),
         area,
     );
+    regions.tab_bars[pane] = area;
 }
 
-/// The active file, and beside it the other pane of a split (F19). With no file, the logo and
-/// the first keys sit in the middle of whatever space the panels leave.
+/// The editor: one pane, or two when split (F19), each with its tabs above its file. With no
+/// file, the logo and the first keys sit in the middle of whatever space the panels leave.
 pub(super) fn render_editor(frame: &mut Frame, app: &mut App, regions: &mut Regions, area: Rect) {
-    let Some(active) = app.active_tab else {
-        render_empty(frame, app.focus == Focus::Editor, area);
-        return;
-    };
     let focused = app.focus == Focus::Editor;
     let split = app
         .split
-        .filter(|split| split.other != active && split.other < app.open_files.len());
-    if let Some(split) = split {
-        let halves = [Constraint::Percentage(50), Constraint::Percentage(50)];
-        let [first, second] = match split.direction {
-            SplitDirection::Columns => Layout::horizontal(halves).areas(area),
-            SplitDirection::Rows => Layout::vertical(halves).areas(area),
-        };
-        let (mine, other) = if split.active_first {
-            (first, second)
-        } else {
-            (second, first)
-        };
-        regions.editor = mine;
-        regions.split_editor = other;
-        render_file(frame, &mut app.open_files[split.other], other, false);
-        render_file(frame, &mut app.open_files[active], mine, focused);
-    } else {
-        render_file(frame, &mut app.open_files[active], area, focused);
+        .filter(|split| split.other < app.open_files.len() && app.active_tab.is_some());
+    let panes = match split {
+        Some(split) => {
+            let halves = [Constraint::Percentage(50), Constraint::Percentage(50)];
+            let [first, second] = match split.direction {
+                SplitDirection::Columns => Layout::horizontal(halves).areas(area),
+                SplitDirection::Rows => Layout::vertical(halves).areas(area),
+            };
+            vec![first, second]
+        }
+        None => vec![area],
+    };
+    let active_pane = app.active_pane();
+    for (pane, pane_area) in panes.into_iter().enumerate() {
+        let [tabs, body] =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(pane_area);
+        render_tabs(frame, app, regions, tabs, pane);
+        regions.pane_areas[pane] = pane_area;
+        regions.pane_bodies[pane] = body;
+        if pane == active_pane {
+            regions.tabs = tabs;
+            regions.editor = body;
+        }
+        match app.shown_tab(pane) {
+            Some(index) => render_file(
+                frame,
+                &mut app.open_files[index],
+                body,
+                focused && pane == active_pane,
+            ),
+            None => render_empty(frame, focused, body),
+        }
     }
+    regions.editor_body = if split.is_some() {
+        area
+    } else {
+        regions.pane_bodies[0]
+    };
     if let Some(zone) = app.tab_drop_zone() {
-        render_drop_preview(frame, area, zone);
+        render_drop_preview(frame, regions, zone);
     }
 }
 
@@ -171,8 +250,10 @@ fn render_empty(frame: &mut Frame, focused: bool, area: Rect) {
     );
 }
 
-/// The half of the editor a dragged tab would take, or all of it for the centre.
-fn render_drop_preview(frame: &mut Frame, area: Rect, zone: DropZone) {
+/// The half of the editor a dragged tab would take, all of it for the centre, or the pane
+/// that would take it.
+fn render_drop_preview(frame: &mut Frame, regions: &Regions, zone: DropZone) {
+    let area = regions.editor_body;
     let halves = [Constraint::Percentage(50), Constraint::Percentage(50)];
     let [left, right] = Layout::horizontal(halves).areas(area);
     let [top, bottom] = Layout::vertical(halves).areas(area);
@@ -182,6 +263,7 @@ fn render_drop_preview(frame: &mut Frame, area: Rect, zone: DropZone) {
         DropZone::Top => (top, " Split up "),
         DropZone::Bottom => (bottom, " Split down "),
         DropZone::Center => (area, " Single editor "),
+        DropZone::Pane(pane) => (regions.pane_areas[pane], " Move here "),
     };
     frame.render_widget(
         Block::default()
@@ -196,6 +278,8 @@ fn render_drop_preview(frame: &mut Frame, area: Rect, zone: DropZone) {
     );
 }
 
+/// The rows of `file` on screen, cut at its horizontal scroll, with a scrollbar on the bottom
+/// border when the text is wider than the pane.
 fn render_file(frame: &mut Frame, file: &mut OpenFile, area: Rect, focused: bool) {
     let title = format!(" {} — {} ", file.path.display(), language_name(&file.path));
     if let Some(image) = &mut file.image {
@@ -205,52 +289,66 @@ fn render_file(frame: &mut Frame, file: &mut OpenFile, area: Rect, focused: bool
         frame.render_widget(block, area);
         return;
     }
-    file.scroll_to_cursor(area.height.saturating_sub(2) as usize);
     let number_width = file.lines.len().max(1).to_string().len();
-    let lines = file
-        .lines
-        .iter()
-        .zip(&file.highlighted)
-        .enumerate()
-        .map(|(index, (line, highlighted))| {
-            let mut spans = vec![Span::styled(
-                format!("{:>number_width$} | ", index + 1),
+    let gutter = number_width + 3;
+    let height = area.height.saturating_sub(2) as usize;
+    let text_width = (area.width.saturating_sub(2) as usize).saturating_sub(gutter);
+    file.scroll_to_cursor(height, text_width);
+    let (scroll, scroll_x) = (file.scroll as usize, file.scroll_x as usize);
+    let lines = (scroll..(scroll + height).min(file.display_rows()))
+        .map(|display| {
+            let (number, spans) = file.display_line(display, text_width + scroll_x);
+            let number = number.map_or_else(
+                || " ".repeat(number_width),
+                |number| format!("{number:>number_width$}"),
+            );
+            let mut line = vec![Span::styled(
+                format!("{number} | "),
                 Style::default().fg(MUTED),
             )];
-            if let Some(rendered) = file.rendered_line(index) {
-                spans.extend(rendered);
-            } else if highlighted.is_empty() {
-                spans.push(Span::raw(line.clone()));
-            } else {
-                spans.extend(highlighted.clone());
-            }
-            Line::from(spans)
+            line.extend(skip_columns(spans, scroll_x));
+            Line::from(line)
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(lines)
-            .scroll((file.scroll, 0))
-            .block(panel_block(title, focused)),
+        Paragraph::new(lines).block(panel_block(title, focused)),
         area,
     );
+    if file.max_width > text_width && area.height > 2 {
+        let track = Rect::new(
+            area.x + 1 + gutter as u16,
+            area.bottom() - 1,
+            text_width as u16,
+            1,
+        );
+        let mut state = ScrollbarState::new(file.max_width + 1 - text_width)
+            .position(scroll_x)
+            .viewport_content_length(text_width);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::HorizontalBottom)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("─"))
+                .thumb_symbol("━")
+                .track_style(Style::default().fg(BORDER))
+                .thumb_style(Style::default().fg(if focused { ACTIVE } else { MUTED })),
+            track,
+            &mut state,
+        );
+    }
     if focused {
-        let prefix = file.lines[file.cursor_row]
-            .chars()
-            .take(file.cursor_column)
-            .collect::<String>();
-        let x = area
-            .x
-            .saturating_add(1 + number_width as u16 + 3 + Line::from(prefix).width() as u16);
-        let row = file.cursor_row.checked_sub(file.scroll as usize);
-        let y = area
-            .y
-            .saturating_add(1)
-            .saturating_add(row.unwrap_or(usize::MAX).min(u16::MAX as usize) as u16);
-        if row.is_some()
-            && x < area.right().saturating_sub(1)
-            && y < area.bottom().saturating_sub(1)
-        {
-            frame.set_cursor_position((x, y));
+        let column = file.cursor_x().checked_sub(scroll_x);
+        let row = file.display_row(file.cursor_row).checked_sub(scroll);
+        if let (Some(column), Some(row)) = (column, row) {
+            let x = area
+                .x
+                .saturating_add((1 + gutter + column).min(u16::MAX as usize) as u16);
+            let y = area
+                .y
+                .saturating_add((1 + row).min(u16::MAX as usize) as u16);
+            if x < area.right().saturating_sub(1) && y < area.bottom().saturating_sub(1) {
+                frame.set_cursor_position((x, y));
+            }
         }
     }
 }

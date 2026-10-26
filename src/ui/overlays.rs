@@ -186,6 +186,8 @@ fn help_lines(os: &str) -> Vec<&'static str> {
             "                     or iTerm2 > Profiles > Keys > Left Option key: Esc+)",
         ]
         .as_slice()
+    } else if os == "linux" {
+        ["  Ctrl+Alt+B         Toggle right terminal"].as_slice()
     } else {
         ["  Ctrl+Shift+B       Toggle right terminal"].as_slice()
     });
@@ -194,6 +196,7 @@ fn help_lines(os: &str) -> Vec<&'static str> {
         "  Ctrl+D             Open Database",
         "  Mouse drag         Resize panel dividers",
         "  Mouse wheel        Scroll panel or terminal history",
+        "  Shift+wheel        Scroll the editor sideways",
         if mac {
             "  fn+Up/fn+Down      Scroll focused editor or terminal (PageUp/PageDown)"
         } else {
@@ -203,7 +206,9 @@ fn help_lines(os: &str) -> Vec<&'static str> {
         "Files and search",
         "  Enter              Open file or expand directory",
         "  Ctrl+W             Close active tab",
-        "  Drag a tab         To an editor edge: split it; to the centre: join",
+        "  Wheel on the tabs  Scroll the tabs (or click < and >)",
+        "  Drag a tab         To an editor edge: split it, each pane with its tabs",
+        "                     To the other pane: move it; an empty pane closes",
         "  Ctrl+P             Find in current file",
         "  Ctrl+Shift+P       Find in workspace",
         "  Esc                Close dialog or panel",
@@ -358,7 +363,7 @@ fn tutorial_steps(os: &str) -> [(&'static str, String); TUTORIAL_STEPS] {
             format!(
                 "{} shows or hides the Explorer. Enter opens a file in a tab and the editor saves \
                  by itself 2 seconds after you stop typing. Drag a tab to an edge of the editor \
-                 to split it.",
+                 to split it; each side keeps its own tabs.",
                 key("Ctrl+B")
             ),
         ),
@@ -490,7 +495,17 @@ pub(super) fn render_whats_new(frame: &mut Frame, app: &mut App, area: Rect) {
             .map(|item| Line::from(format!("  - {item}"))),
     );
     let close = " Close [Enter] ";
-    let area = dialog_area(area, 80, lines.len() as u16 + 4);
+    // Long notes wrap: count the rows they take inside the borders, with one to spare for
+    // words that wrap early.
+    let inner = usize::from(80.min(area.width.saturating_sub(4)).saturating_sub(2)).max(1);
+    let rows = lines
+        .iter()
+        .map(|line| match line.width() {
+            width if width <= inner => 1,
+            width => width.div_ceil(inner) + 1,
+        })
+        .sum::<usize>();
+    let area = dialog_area(area, 80, rows as u16 + 4);
     let progress = app.motion.overlay();
     render_dialog(
         frame,
@@ -683,9 +698,20 @@ mod tests {
         assert!(mac.contains("replaces SozoIDE.app"));
         assert!(!mac.contains("Ctrl+Shift+B"));
 
-        for (os, installer) in [("windows", "MSI installer"), ("linux", "sudo password")] {
+        for (os, installer, right) in [
+            (
+                "windows",
+                "MSI installer",
+                "Ctrl+Shift+B       Toggle right terminal",
+            ),
+            (
+                "linux",
+                "sudo password",
+                "Ctrl+Alt+B         Toggle right terminal",
+            ),
+        ] {
             let text = help_lines(os).join("\n");
-            assert!(text.contains("Ctrl+Shift+B       Toggle right terminal"));
+            assert!(text.contains(right), "{os}");
             assert!(text.contains("  F1                 Help"));
             assert!(text.contains("Ctrl+Enter/F5"));
             assert!(text.contains(installer));
@@ -714,6 +740,8 @@ mod tests {
         let mac = tutorial_steps("macos").map(|(_, text)| text).join("\n");
         assert!(mac.contains("Ctrl+Option+B") && mac.contains("fn+F1"));
         let linux = tutorial_steps("linux").map(|(_, text)| text).join("\n");
-        assert!(linux.contains("Ctrl+Shift+B") && !linux.contains("fn+"));
+        assert!(linux.contains("Ctrl+Alt+B") && !linux.contains("fn+"));
+        let windows = tutorial_steps("windows").map(|(_, text)| text).join("\n");
+        assert!(windows.contains("Ctrl+Shift+B"));
     }
 }
