@@ -8,9 +8,9 @@ pub struct Notes {
 }
 
 pub const NOTES: Notes = Notes {
-    version: "0.3.2",
+    version: "0.3.3",
     new: &[
-        "Updates are now counted once too, like new installations, anonymously (system, architecture and version only); SOZO_NO_TELEMETRY=1 turns both off",
+        "Updates always install the latest release, even when a newer one comes out while SozoIDE is open",
     ],
     fixed: &[],
 };
