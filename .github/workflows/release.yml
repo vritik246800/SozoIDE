@@ -107,11 +107,12 @@ jobs:
 
             The installers are not signed yet. On macOS, if the app does not open, go to System Settings, Privacy & Security, and choose Open Anyway. On Windows, if SmartScreen appears, choose More info, then Run anyway. `SHA256SUMS.txt` has the checksum of every file.
 
-            On its first start SozoIDE downloads the `SozoIDE-<system>-<arch>.installed.txt` file of this release once, so GitHub's download counter counts the installation. Nothing else is sent. Set `SOZO_NO_TELEMETRY=1` to turn it off.
+            On its first start SozoIDE downloads the `SozoIDE-<system>-<arch>.installed.txt` file of this release once (`.updated.txt` after an update), so GitHub's download counter counts the installation or update. Nothing else is sent. Set `SOZO_NO_TELEMETRY=1` to turn it off.
         run: |
-          # GitHub counts the downloads of these files: one per new installation (F20).
+          # GitHub counts the downloads of these files: one per new installation or update (F20).
           for target in macos-arm64 windows-x86_64 windows-arm64 linux-x86_64 linux-arm64; do
             echo "Counts one installation of SozoIDE $GITHUB_REF_NAME on $target." > "SozoIDE-$target.installed.txt"
+            echo "Counts one update to SozoIDE $GITHUB_REF_NAME on $target." > "SozoIDE-$target.updated.txt"
           done
           sha256sum -- * > SHA256SUMS.txt
           gh release create "$GITHUB_REF_NAME" ./* --verify-tag --generate-notes --notes "$NOTES" --title "SozoIDE $GITHUB_REF_NAME"

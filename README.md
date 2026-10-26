@@ -92,7 +92,7 @@ When a newer release is out, SozoIDE tells you at startup. Press `Enter` (or `U`
 
 ### Privacy
 
-On its first start SozoIDE counts the installation once: it downloads the small `SozoIDE-<system>-<arch>.installed.txt` file of its release, and GitHub's public download counter goes up by one. That counter only knows the system, the architecture and the version; nothing about you or your files is sent, and SozoIDE has no server of its own. Set `SOZO_NO_TELEMETRY=1` before the first start to turn it off. The startup check for updates also asks GitHub for the latest release (`SOZO_NO_UPDATE_CHECK=1` turns it off).
+On its first start SozoIDE counts the installation once: it downloads the small `SozoIDE-<system>-<arch>.installed.txt` file of its release, and GitHub's public download counter goes up by one. The first start after an update does the same with `SozoIDE-<system>-<arch>.updated.txt`. That counter only knows the system, the architecture and the version; nothing about you or your files is sent, and SozoIDE has no server of its own. Set `SOZO_NO_TELEMETRY=1` to turn both off. The startup check for updates also asks GitHub for the latest release (`SOZO_NO_UPDATE_CHECK=1` turns it off).
 
 ## Build from source
 

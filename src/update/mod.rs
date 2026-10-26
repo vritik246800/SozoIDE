@@ -35,8 +35,8 @@ pub fn enabled() -> bool {
     !cfg!(debug_assertions) && env::var_os("SOZO_NO_UPDATE_CHECK").is_none()
 }
 
-/// Release builds count a new installation once (F20); `SOZO_NO_TELEMETRY=1` opts out.
-fn counts_installs() -> bool {
+/// Release builds count a new installation or update once (F20); `SOZO_NO_TELEMETRY=1` opts out.
+fn counts() -> bool {
     !cfg!(debug_assertions) && env::var_os("SOZO_NO_TELEMETRY").is_none()
 }
 
@@ -187,10 +187,13 @@ impl Updater {
         let mut settings = Settings::load(path);
         let welcome = match settings.seen.as_deref() {
             None => {
-                count_install();
+                count("installed");
                 Welcome::Tutorial
             }
-            Some(seen) if is_newer(CURRENT, seen) => Welcome::WhatsNew,
+            Some(seen) if is_newer(CURRENT, seen) => {
+                count("updated");
+                Welcome::WhatsNew
+            }
             Some(_) => Welcome::None,
         };
         if settings.seen.as_deref() != Some(CURRENT) {
@@ -246,21 +249,22 @@ pub fn asset_name(os: &str, arch: &str, extension: &str) -> String {
 }
 
 /// GitHub counts every download of a release file, so fetching the small
-/// `SozoIDE-<os>-<arch>.installed.txt` of this version counts one installation. Nothing else is sent.
-fn count_install() {
-    if !counts_installs() {
+/// `SozoIDE-<os>-<arch>.<kind>.txt` of this version counts one installation (`installed`) or
+/// update (`updated`). Nothing else is sent.
+fn count(kind: &str) {
+    if !counts() {
         return;
     }
-    let url = install_counter_url(env::consts::OS, env::consts::ARCH);
+    let url = counter_url(kind, env::consts::OS, env::consts::ARCH);
     thread::spawn(move || {
         let _ = curl(&["-fsSL", "--max-time", "10", &url]);
     });
 }
 
-fn install_counter_url(os: &str, arch: &str) -> String {
+fn counter_url(kind: &str, os: &str, arch: &str) -> String {
     format!(
         "{REPOSITORY}/releases/download/v{CURRENT}/{}",
-        asset_name(os, arch, "installed.txt")
+        asset_name(os, arch, &format!("{kind}.txt"))
     )
 }
 
@@ -394,15 +398,15 @@ mod tests {
     }
 
     #[test]
-    fn installations_are_counted_on_the_file_of_this_version() {
-        assert!(!counts_installs(), "debug builds never touch the network");
+    fn installations_and_updates_are_counted_on_the_files_of_this_version() {
+        assert!(!counts(), "debug builds never touch the network");
         assert_eq!(
-            install_counter_url("macos", "aarch64"),
+            counter_url("installed", "macos", "aarch64"),
             format!("{REPOSITORY}/releases/download/v{CURRENT}/SozoIDE-macos-arm64.installed.txt")
         );
         assert!(
-            install_counter_url("windows", "x86_64")
-                .ends_with("SozoIDE-windows-x86_64.installed.txt")
+            counter_url("updated", "windows", "x86_64")
+                .ends_with(&format!("v{CURRENT}/SozoIDE-windows-x86_64.updated.txt"))
         );
     }
 

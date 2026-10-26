@@ -33,14 +33,16 @@ for file in "${FILES[@]}"; do
         failed=1
     fi
 done
-# The files SozoIDE downloads once to count an installation (F20).
+# The files SozoIDE downloads once to count an installation or an update (F20).
 for target in macos-arm64 windows-x86_64 windows-arm64 linux-x86_64 linux-arm64; do
-    url="$REPO/releases/download/v$VERSION/SozoIDE-$target.installed.txt"
-    if [[ $(curl -sIL -o /dev/null -w '%{http_code}' "$url") == 200 ]]; then
-        echo "OK  SozoIDE-$target.installed.txt"
-    else
-        echo "BAD SozoIDE-$target.installed.txt missing from v$VERSION" >&2
-        failed=1
-    fi
+    for kind in installed updated; do
+        url="$REPO/releases/download/v$VERSION/SozoIDE-$target.$kind.txt"
+        if [[ $(curl -sIL -o /dev/null -w '%{http_code}' "$url") == 200 ]]; then
+            echo "OK  SozoIDE-$target.$kind.txt"
+        else
+            echo "BAD SozoIDE-$target.$kind.txt missing from v$VERSION" >&2
+            failed=1
+        fi
+    done
 done
 exit "$failed"
