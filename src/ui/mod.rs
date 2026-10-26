@@ -879,7 +879,8 @@ mod tests {
         settle(&mut app);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert_eq!(app.overlay, Overlay::Tutorial);
-        assert!(buffer_text(&terminal).contains("Welcome to SozoIDE"));
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Welcome to SozoIDE") && text.contains("SOZO_NO_TELEMETRY=1"));
 
         let next = app.regions.dialog_next;
         click(
@@ -901,7 +902,16 @@ mod tests {
         settle(&mut app);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("What's new") && text.contains(NOTES.fixed[0]));
+        assert!(text.contains("What's new"));
+        // Every word of every note is on screen: long notes wrap without pushing the last out (E19).
+        let words = NOTES
+            .new
+            .iter()
+            .chain(NOTES.fixed)
+            .flat_map(|note| note.split_whitespace());
+        for word in words {
+            assert!(text.contains(word), "{word} is missing");
+        }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         settle(&mut app);
         assert_eq!(app.overlay, Overlay::None);
