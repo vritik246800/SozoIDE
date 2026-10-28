@@ -1194,6 +1194,8 @@ mod tests {
             "Previous / next result",
             "Click a commit",
             "Remove the builder row",
+            "Undo the last edit",
+            "New, rename, delete",
         ] {
             assert!(text.contains(keys), "{keys}");
         }
@@ -1266,7 +1268,15 @@ mod tests {
             .iter()
             .map(|(action, area)| (action.label(), area.y - explorer.y))
             .collect::<Vec<_>>();
-        assert_eq!(labels, [("New File", 2), ("New Folder", 3), ("Rename", 4)]);
+        assert_eq!(
+            labels,
+            [
+                ("New File", 2),
+                ("New Folder", 3),
+                ("Rename", 4),
+                ("Delete", 5)
+            ]
+        );
         assert!(buffer_text(&terminal).contains(" New Folder"));
 
         app.choose_entry_action(crate::app::EntryAction::NewFile);
@@ -1277,6 +1287,22 @@ mod tests {
         assert!(text.contains(&format!("> {icon} main.rs█")), "{text}");
         assert!(text.contains("Enter: create  Esc: cancel"));
         assert!(app.regions.entry_menu_items.is_empty());
+
+        // Delete asks first, with what goes and that it does not come back.
+        app.name_prompt = None;
+        app.open_entry_menu(Some(0), (explorer.x + 2, explorer.y + 1));
+        app.choose_entry_action(crate::app::EntryAction::Delete);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        for part in [
+            "╭ Delete ",
+            "a.txt?",
+            "The file is deleted for good.",
+            "This cannot be undone.",
+            "Enter: delete  Esc: cancel",
+        ] {
+            assert!(text.contains(part), "{part}\n{text}");
+        }
     }
 
     #[test]

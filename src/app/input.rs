@@ -8,7 +8,7 @@ use crate::{
     update::UpdateState,
 };
 
-use super::{App, DragTarget, DropZone, Focus, Overlay, TUTORIAL_STEPS, TabDrag};
+use super::{App, DragTarget, DropZone, EntryAction, Focus, Overlay, TUTORIAL_STEPS, TabDrag};
 
 impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -248,9 +248,11 @@ impl App {
         let Some(prompt) = &mut self.name_prompt else {
             return;
         };
+        let typing = prompt.action != EntryAction::Delete;
         match code {
             KeyCode::Esc => self.name_prompt = None,
             KeyCode::Enter => self.confirm_name(),
+            _ if !typing => {}
             KeyCode::Backspace => {
                 prompt.name.pop();
                 prompt.error = None;
@@ -264,7 +266,11 @@ impl App {
     }
 
     pub fn name_paste(&mut self, text: &str) {
-        if let Some(prompt) = &mut self.name_prompt {
+        if let Some(prompt) = self
+            .name_prompt
+            .as_mut()
+            .filter(|prompt| prompt.action != EntryAction::Delete)
+        {
             prompt
                 .name
                 .extend(text.chars().filter(|character| !character.is_control()));
@@ -422,6 +428,13 @@ impl App {
                 if let Some(target) = target {
                     file.show_page(target, &mut self.picker);
                 }
+            }
+            return;
+        }
+        // Ctrl+Z on every system: on a Mac, Cmd+Z stays with the terminal.
+        if ctrl && matches!(key.code, KeyCode::Char('z' | 'Z')) {
+            if !file.undo() {
+                self.status = "Nothing to undo".into();
             }
             return;
         }
@@ -794,9 +807,11 @@ impl App {
                 {
                     return;
                 }
-                self.page_turned = Some(now);
                 let page = if up { page.saturating_sub(1) } else { page + 1 };
                 self.open_files[index].show_page(page, &mut self.picker);
+                // The gesture counts from when the page is on screen: drawing a page can take
+                // longer than the gesture itself on a slow machine (E27).
+                self.page_turned = Some(Instant::now());
                 return;
             }
             // The editor clamps both scrolls to the text when it draws.
@@ -881,7 +896,6 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::app::EntryAction;
 
     fn test_app() -> App {
         App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap()
@@ -1120,6 +1134,89 @@ mod tests {
     }
 
     #[test]
+    fn delete_in_the_explorer_menu_asks_then_removes_and_closes_the_tabs() {
+        use crossterm::event::MouseButton;
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("docs");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("a.md"), "a").unwrap();
+        std::fs::write(directory.path().join("b.txt"), "b").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.show_explorer = true;
+        app.regions.explorer = Rect::new(0, 0, 30, 20);
+        app.open_file(folder.join("a.md")).unwrap();
+        app.insert_editor_character('!');
+        // The project folder has no Delete.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 10);
+        assert!(
+            !app.entry_menu
+                .as_ref()
+                .unwrap()
+                .actions
+                .contains(&EntryAction::Delete)
+        );
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        // docs is the first row: Delete is the last entry of its menu.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 1);
+        assert_eq!(
+            app.entry_menu.as_ref().unwrap().actions.last(),
+            Some(&EntryAction::Delete)
+        );
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            app.name_prompt.as_ref().unwrap().action,
+            EntryAction::Delete
+        );
+        // Nothing to type, and Esc keeps everything.
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        app.name_paste("y");
+        assert!(app.name_prompt.as_ref().unwrap().name.is_empty());
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(folder.exists());
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 1);
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!folder.exists() && app.name_prompt.is_none());
+        // The tab of the file inside closed without saving it back.
+        assert!(app.open_files.is_empty());
+        app.flush_all_files();
+        assert!(!folder.exists());
+        assert!(
+            app.entries
+                .iter()
+                .all(|entry| !entry.path.starts_with(&folder))
+        );
+        assert!(directory.path().join("b.txt").exists());
+    }
+
+    #[test]
+    fn ctrl_z_undoes_in_the_editor_and_reaches_the_terminals_elsewhere() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.txt");
+        std::fs::write(&path, "one\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path.clone()).unwrap();
+        app.focus = Focus::Editor;
+        press(&mut app, KeyCode::End, KeyModifiers::NONE);
+        for character in " two".chars() {
+            press(&mut app, KeyCode::Char(character), KeyModifiers::NONE);
+        }
+        let active = app.active_tab.unwrap();
+        assert_eq!(app.open_files[active].lines, ["one two"]);
+        press(&mut app, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(app.open_files[active].lines, ["one"]);
+        press(&mut app, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(app.status, "Nothing to undo");
+        // In a terminal Ctrl+Z belongs to the shell; the editor keeps its text.
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        app.focus = Focus::BottomTerminal;
+        press(&mut app, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(app.open_files[active].lines, ["onex"]);
+    }
+
+    #[test]
     fn right_clicks_in_the_explorer_create_and_rename_files_and_folders() {
         use crossterm::event::MouseButton;
         let directory = tempfile::tempdir().unwrap();
@@ -1137,7 +1234,7 @@ mod tests {
 
         // On the src folder: a new file goes inside it, opens and is selected.
         mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 1);
-        assert_eq!(app.entry_menu.as_ref().unwrap().actions.len(), 3);
+        assert_eq!(app.entry_menu.as_ref().unwrap().actions.len(), 4);
         app.regions.entry_menu_items = vec![(EntryAction::NewFile, Rect::new(3, 2, 14, 1))];
         mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 5, 2);
         assert!(app.entry_menu.is_none());
@@ -1177,6 +1274,8 @@ mod tests {
             3,
             row as u16 + 1,
         );
+        // Up from the top goes round to Delete, then Rename.
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
         press(&mut app, KeyCode::Up, KeyModifiers::NONE);
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.name_prompt.as_ref().unwrap().name, "main.rs");

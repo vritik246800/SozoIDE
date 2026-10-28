@@ -10,6 +10,14 @@ pub struct Notes {
 
 pub const NOTES: &[Notes] = &[
     Notes {
+        version: "0.6.0",
+        new: &[
+            "Explorer: right-click a file or a folder and choose Delete; it asks first and says it cannot be undone",
+            "Ctrl+Z undoes the last edit in the editor, on macOS too; a word typed or a paste undoes in one step",
+        ],
+        fixed: &[],
+    },
+    Notes {
         version: "0.5.0",
         new: &[
             "Explorer: right-click to create a file or a folder, or to rename one; the icon follows the extension you type",

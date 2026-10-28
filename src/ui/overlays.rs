@@ -359,7 +359,7 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             color: Color::Blue,
             keys: vec![
                 ("Enter", "Open a file or a folder"),
-                ("Right-click", "New file or folder, rename (Explorer)"),
+                ("Right-click", "New, rename, delete (Explorer)"),
                 ("Ctrl+W", "Close the tab"),
                 ("Wheel on the tabs", "Scroll the tabs, or click < and >"),
                 ("Drag a tab", "To an editor edge: split the editor"),
@@ -381,6 +381,7 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
                 ),
                 ("Shift+arrows", "Select, or drag with the mouse"),
                 ("Ctrl+A", "Select all"),
+                ("Ctrl+Z", "Undo the last edit"),
                 ("Ctrl+C / Ctrl+X", "Copy / cut the selection"),
                 (
                     if mac {
