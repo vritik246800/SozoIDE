@@ -26,6 +26,25 @@ use pdf::{PdfDocument, is_pdf_path};
 pub use search::{MAX_MATCHES, SearchMatch, SearchScope, SearchState};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_secs(2);
+/// Edits of one kind closer than this undo together: a word typed, a paste.
+const UNDO_GROUP: Duration = Duration::from_secs(1);
+/// Steps of undo kept for each file.
+const UNDO_STEPS: usize = 200;
+
+/// The text and the cursor before an edit.
+struct Snapshot {
+    lines: Vec<String>,
+    cursor: (usize, usize),
+    trailing_newline: bool,
+}
+
+/// What an edit did, to group the ones that undo together.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Change {
+    Type,
+    Erase,
+    Cut,
+}
 
 pub struct OpenFile {
     pub path: PathBuf,
@@ -59,6 +78,9 @@ pub struct OpenFile {
     pub anchor: Option<(usize, usize)>,
     pub dirty: bool,
     trailing_newline: bool,
+    /// The text before each edit, for `undo`, and the kind and time of the last one.
+    history: Vec<Snapshot>,
+    last_change: Option<(Change, Instant)>,
     last_edit: Option<Instant>,
 }
 
@@ -108,6 +130,8 @@ impl OpenFile {
                 anchor: None,
                 dirty: false,
                 trailing_newline: false,
+                history: Vec::new(),
+                last_change: None,
                 last_edit: None,
             });
         }
@@ -147,6 +171,8 @@ impl OpenFile {
             anchor: None,
             dirty: false,
             trailing_newline,
+            history: Vec::new(),
+            last_change: None,
             last_edit: None,
         };
         file.layout();
@@ -249,6 +275,9 @@ impl OpenFile {
 
     /// Removes the selected text and leaves the cursor where it started.
     pub fn delete_selection(&mut self) -> bool {
+        if self.selection().is_some() {
+            self.remember(Change::Cut);
+        }
         let removed = self.remove_selection();
         if removed {
             self.changed();
@@ -431,6 +460,7 @@ impl OpenFile {
     }
 
     pub fn insert(&mut self, character: char) {
+        self.remember(Change::Type);
         self.remove_selection();
         if character == '\n' {
             let index = self.byte_index(self.cursor_column);
@@ -450,6 +480,9 @@ impl OpenFile {
     pub fn backspace(&mut self) {
         if self.delete_selection() {
             return;
+        }
+        if self.cursor_column > 0 || self.cursor_row > 0 {
+            self.remember(Change::Erase);
         }
         if self.cursor_column > 0 {
             let start = self.byte_index(self.cursor_column - 1);
@@ -473,6 +506,9 @@ impl OpenFile {
             return;
         }
         let line_length = self.current_line().chars().count();
+        if self.cursor_column < line_length || self.cursor_row + 1 < self.lines.len() {
+            self.remember(Change::Erase);
+        }
         if self.cursor_column < line_length {
             let start = self.byte_index(self.cursor_column);
             let end = self.byte_index(self.cursor_column + 1);
@@ -485,6 +521,41 @@ impl OpenFile {
             return;
         }
         self.changed();
+    }
+
+    /// Keeps the text before an edit, unless it continues the last one (same kind, within
+    /// `UNDO_GROUP`).
+    fn remember(&mut self, change: Change) {
+        let now = Instant::now();
+        let continues = self
+            .last_change
+            .is_some_and(|(last, at)| last == change && now.duration_since(at) < UNDO_GROUP);
+        self.last_change = Some((change, now));
+        if continues {
+            return;
+        }
+        if self.history.len() == UNDO_STEPS {
+            self.history.remove(0);
+        }
+        self.history.push(Snapshot {
+            lines: self.lines.clone(),
+            cursor: (self.cursor_row, self.cursor_column),
+            trailing_newline: self.trailing_newline,
+        });
+    }
+
+    /// Puts back the text before the last edit; false when there is nothing to undo.
+    pub fn undo(&mut self) -> bool {
+        let Some(snapshot) = self.history.pop() else {
+            return false;
+        };
+        self.lines = snapshot.lines;
+        (self.cursor_row, self.cursor_column) = snapshot.cursor;
+        self.trailing_newline = snapshot.trailing_newline;
+        self.anchor = None;
+        self.last_change = None;
+        self.changed();
+        true
     }
 
     #[cfg(test)]
@@ -551,6 +622,43 @@ mod tests {
     fn drawn(file: &OpenFile, row: usize) -> String {
         let (_, spans) = file.display_line(file.display_row(row), 40);
         spans.iter().map(|span| span.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn undo_puts_back_words_erasures_and_cuts_one_step_at_a_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.txt");
+        fs::write(&path, "one\n").unwrap();
+        let mut picker = Picker::halfblocks();
+        let mut file = OpenFile::load(path, &mut picker).unwrap();
+        assert!(!file.undo());
+        file.move_cursor_to(0, 3);
+        for character in " two\nthree".chars() {
+            file.insert(character);
+        }
+        file.backspace();
+        file.backspace();
+        file.mark(false);
+        file.select_all();
+        file.delete_selection();
+        assert_eq!(file.lines, [""]);
+        // The cut, then both erasures, then everything typed in one go.
+        assert!(file.undo());
+        assert_eq!(file.lines, ["one two", "thr"]);
+        assert!(file.undo());
+        assert_eq!(file.lines, ["one two", "three"]);
+        assert_eq!((file.cursor_row, file.cursor_column), (1, 5));
+        assert!(file.undo());
+        assert_eq!(file.lines, ["one"]);
+        assert!(file.dirty && !file.undo());
+        // A pause starts a new step.
+        file.insert('!');
+        file.last_change = file
+            .last_change
+            .map(|(change, at)| (change, at - UNDO_GROUP));
+        file.insert('?');
+        assert!(file.undo());
+        assert_eq!(file.lines, ["one!"]);
     }
 
     #[test]

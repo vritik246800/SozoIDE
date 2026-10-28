@@ -108,14 +108,14 @@ pub(super) fn render_name_prompt(frame: &mut Frame, app: &App, screen: Rect) {
     let folder = match prompt.action {
         EntryAction::NewFolder => true,
         EntryAction::NewFile => false,
-        EntryAction::Rename => prompt.target.is_dir(),
+        EntryAction::Rename | EntryAction::Delete => prompt.target.is_dir(),
     };
     let (icon, color) = if folder {
         (app.icon("custom-folder"), ACTIVE)
     } else {
         file_icon(std::path::Path::new(&prompt.name))
     };
-    let place = if prompt.action == EntryAction::Rename {
+    let place = if matches!(prompt.action, EntryAction::Rename | EntryAction::Delete) {
         prompt.target.clone()
     } else if prompt.target.is_dir() {
         prompt.target.join("")
@@ -134,6 +134,48 @@ pub(super) fn render_name_prompt(frame: &mut Frame, app: &App, screen: Rect) {
         width,
         7.min(screen.height),
     );
+    if prompt.action == EntryAction::Delete {
+        // Nothing to type: what goes, that it does not come back, and the two keys (Q39).
+        let (icon, color) = if folder {
+            (app.icon("custom-folder"), ACTIVE)
+        } else {
+            file_icon(&prompt.target)
+        };
+        let what = if folder {
+            "The folder and everything in it are deleted for good."
+        } else {
+            "The file is deleted for good."
+        };
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(format!("{icon} "), Style::default().fg(color)),
+                Span::styled(
+                    format!("{place}?"),
+                    Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(Span::styled(
+                what,
+                Style::default().fg(ratatui::style::Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "This cannot be undone.",
+                Style::default().fg(ratatui::style::Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                prompt.error.clone().unwrap_or_default(),
+                Style::default().fg(ratatui::style::Color::Red),
+            )),
+            Line::from(Span::styled(
+                "Enter: delete  Esc: cancel",
+                Style::default().fg(MUTED),
+            )),
+        ];
+        super::render_dialog(frame, area, 1.0, " Delete ".into(), |frame, inner| {
+            frame.render_widget(Paragraph::new(lines), inner);
+        });
+        return;
+    }
     let verb = if prompt.action == EntryAction::Rename {
         "rename"
     } else {

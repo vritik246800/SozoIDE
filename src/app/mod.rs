@@ -456,7 +456,7 @@ impl App {
         }
     }
 
-    fn insert_editor_character(&mut self, character: char) {
+    pub(super) fn insert_editor_character(&mut self, character: char) {
         if let Some(active) = self.active_tab {
             self.open_files[active].insert(character);
         }

@@ -25,6 +25,7 @@ pub enum EntryAction {
     NewFile,
     NewFolder,
     Rename,
+    Delete,
 }
 
 impl EntryAction {
@@ -33,6 +34,7 @@ impl EntryAction {
             Self::NewFile => "New File",
             Self::NewFolder => "New Folder",
             Self::Rename => "Rename",
+            Self::Delete => "Delete",
         }
     }
 }
@@ -95,6 +97,19 @@ pub fn rename_entry(path: &Path, name: &str) -> Result<PathBuf> {
     }
     fs::rename(path, &renamed).with_context(|| format!("Could not rename {}", path.display()))?;
     Ok(renamed)
+}
+
+/// Deletes a file, or a folder with everything in it, for good (Q39); never `root`.
+pub fn delete_entry(root: &Path, path: &Path) -> Result<()> {
+    if path == root || !path.starts_with(root) {
+        bail!("Only files and folders inside the project can be deleted");
+    }
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+    .with_context(|| format!("Could not delete {}", path.display()))
 }
 
 impl App {
@@ -185,7 +200,7 @@ impl App {
             .map_or_else(|| self.root.clone(), |entry| entry.path.clone());
         let mut actions = vec![EntryAction::NewFile, EntryAction::NewFolder];
         if target != self.root {
-            actions.push(EntryAction::Rename);
+            actions.extend([EntryAction::Rename, EntryAction::Delete]);
         }
         if let Some(index) = index.filter(|index| *index < self.entries.len()) {
             self.selected_entry = index;
@@ -233,10 +248,18 @@ impl App {
                 .parent()
                 .map_or_else(|| self.root.clone(), Path::to_path_buf)
         };
+        if prompt.action == EntryAction::Delete {
+            let target = prompt.target.clone();
+            match delete_entry(&self.root, &target) {
+                Ok(()) => self.deleted(&target),
+                Err(error) => prompt.error = Some(format!("{error:#}")),
+            }
+            return;
+        }
         let result = match prompt.action {
             EntryAction::NewFile => create_entry(&parent, &prompt.name, false),
             EntryAction::NewFolder => create_entry(&parent, &prompt.name, true),
-            EntryAction::Rename => rename_entry(&prompt.target, &prompt.name),
+            EntryAction::Rename | EntryAction::Delete => rename_entry(&prompt.target, &prompt.name),
         };
         let path = match result {
             Ok(path) => path,
@@ -263,6 +286,26 @@ impl App {
         {
             self.status = error.to_string();
         }
+    }
+
+    /// After a delete: the tabs of what was deleted close without saving it back.
+    fn deleted(&mut self, path: &Path) {
+        self.name_prompt = None;
+        while let Some(index) = self
+            .open_files
+            .iter()
+            .position(|file| file.path.starts_with(path))
+        {
+            self.open_files[index].dirty = false;
+            self.close_tab(index);
+        }
+        if let Err(error) = self.refresh_entries() {
+            self.status = error.to_string();
+        }
+        self.status = format!(
+            "Deleted {}",
+            path.strip_prefix(&self.root).unwrap_or(path).display()
+        );
     }
 
     /// Follows a rename in the tree (expanded folders) and in the open tabs.
@@ -315,6 +358,13 @@ mod tests {
         assert_eq!(renamed, root.join("lib.rs"));
         assert!(!file.exists() && renamed.is_file());
         assert!(rename_entry(&renamed, "src").is_err());
+        // Deleting takes a folder with what it has, and never the project.
+        fs::write(folder.join("inner.txt"), "x").unwrap();
+        delete_entry(root, &folder).unwrap();
+        delete_entry(root, &renamed).unwrap();
+        assert!(!folder.exists() && !renamed.exists());
+        assert!(delete_entry(root, root).is_err());
+        assert!(delete_entry(root, &root.join("missing")).is_err());
         assert_eq!(rename_entry(&renamed, "lib.rs").unwrap(), renamed);
     }
 }
