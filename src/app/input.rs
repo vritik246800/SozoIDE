@@ -807,9 +807,11 @@ impl App {
                 {
                     return;
                 }
-                self.page_turned = Some(now);
                 let page = if up { page.saturating_sub(1) } else { page + 1 };
                 self.open_files[index].show_page(page, &mut self.picker);
+                // The gesture counts from when the page is on screen: drawing a page can take
+                // longer than the gesture itself on a slow machine (E27).
+                self.page_turned = Some(Instant::now());
                 return;
             }
             // The editor clamps both scrolls to the text when it draws.
