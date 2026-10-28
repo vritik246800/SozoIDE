@@ -1,16 +1,20 @@
 use std::collections::HashMap;
 
+use chrono::{DateTime, FixedOffset, Local};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::{Block, BorderType, Paragraph, Wrap},
 };
 
 use crate::{
-    git::{ChangeArea, CommitInfo, GitPanel, GitTab},
-    ui::{ACTIVE, MUTED, TEXT, busy, centered, panel_block, render_dialog},
+    git::{
+        BranchRow, ChangeArea, ChangeEntry, CommitInfo, DiffLine, DiffLineKind, DiffRow,
+        FileStatus, GitPanel, GitTab, branch_tree,
+    },
+    ui::{ACTIVE, BORDER, MUTED, TEXT, busy, centered, panel_block, render_dialog},
 };
 
 use super::controller::{GitController, GitMode, GitUiAction};
@@ -22,67 +26,44 @@ pub fn render(frame: &mut Frame, controller: &mut GitController, area: Rect) {
     let block = panel_block(" Source Control [Ctrl+G] ".into(), true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let sections = Layout::vertical([
-        Constraint::Length(2),
+    let [tabs, toolbar, content, status] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Min(3),
-        Constraint::Length(2),
+        Constraint::Length(1),
     ])
-    .split(inner);
-    for (index, tab) in GitTab::ALL.into_iter().enumerate() {
-        let row = index / 5;
-        let column = index % 5;
-        let width = sections[0].width / 5;
-        let button_area = Rect::new(
-            sections[0].x + column as u16 * width,
-            sections[0].y + row as u16,
-            width.saturating_sub(1),
-            1,
-        );
-        let selected = controller
-            .panel
-            .try_lock()
-            .map(|panel| panel.active_tab == tab)
-            .unwrap_or(false);
-        action_button(
-            frame,
-            controller,
-            button_area,
-            tab.label(),
-            GitUiAction::Tab(tab),
-            selected,
-        );
-    }
-    let content_area = sections[2];
-    controller.regions.content = content_area;
+    .areas(inner);
+    let active = controller
+        .panel
+        .try_lock()
+        .map(|panel| panel.active_tab)
+        .ok();
+    let tab_buttons =
+        GitTab::ALL.map(|tab| (tab.label(), GitUiAction::Tab(tab), active == Some(tab)));
+    buttons(frame, controller, tabs, &tab_buttons);
+    controller.regions.content = content;
     let panel_handle = std::sync::Arc::clone(&controller.panel);
     let Ok(panel) = panel_handle.try_lock() else {
         let message = busy(controller.motion.spinner(), "Git operation in progress...");
-        frame.render_widget(Paragraph::new(message.clone()), content_area);
-        frame.render_widget(Paragraph::new(message), sections[3]);
+        frame.render_widget(Paragraph::new(message.clone()), content);
+        frame.render_widget(Paragraph::new(message), status);
         return;
     };
-    render_toolbar(frame, controller, &panel, sections[1]);
+    render_toolbar(frame, controller, &panel, toolbar);
     if !panel.in_repository() {
         frame.render_widget(
             Paragraph::new("This directory is not inside a Git repository.")
                 .style(Style::default().fg(MUTED)),
-            content_area,
+            content,
         );
     } else {
         match panel.active_tab {
-            GitTab::Changes => render_changes(frame, controller, &panel, content_area),
-            GitTab::CommitGraph => render_graph(frame, controller, &panel, content_area),
-            GitTab::Branches => render_branches(frame, controller, &panel, content_area),
-            GitTab::Diff => render_diff(frame, &panel, content_area),
-            GitTab::Launchpad => render_launchpad(frame, &panel, content_area),
-            GitTab::Inspect => render_inspect(frame, &panel, content_area),
-            GitTab::LineHistory => render_line_history(frame, controller, &panel, content_area),
-            GitTab::FileHistory => render_file_history(frame, controller, &panel, content_area),
-            GitTab::VisualFileHistory => {
-                render_visual_history(frame, controller, &panel, content_area)
-            }
-            GitTab::Health => render_health(frame, controller, &panel, content_area),
+            GitTab::Changes => render_changes(frame, controller, &panel, content),
+            GitTab::CommitGraph => render_graph(frame, controller, &panel, content),
+            GitTab::Branches => render_branches(frame, controller, &panel, content),
+            GitTab::Diff => render_diff(frame, controller, &panel, content),
+            GitTab::Launchpad => render_launchpad(frame, controller, &panel, content),
+            GitTab::Inspect => render_inspect(frame, &panel, content),
         }
     }
     let message = if controller.operation {
@@ -99,29 +80,32 @@ pub fn render(frame: &mut Frame, controller: &mut GitController, area: Rect) {
     let error = !controller.operation && panel.last_error.is_some();
     frame.render_widget(
         Paragraph::new(message).style(Style::default().fg(if error { Color::Red } else { MUTED })),
-        sections[3],
+        status,
     );
 }
 
 fn render_toolbar(frame: &mut Frame, controller: &mut GitController, panel: &GitPanel, area: Rect) {
+    let split = if panel.diff_split {
+        "Unified [v]"
+    } else {
+        "Side by side [v]"
+    };
     let actions: &[(&str, GitUiAction)] = match panel.active_tab {
         GitTab::Changes => &[
             ("Refresh", GitUiAction::Refresh),
-            ("Stage", GitUiAction::Stage),
-            ("Unstage", GitUiAction::Unstage),
+            ("Stage [s]", GitUiAction::Stage),
+            ("Unstage [u]", GitUiAction::Unstage),
             ("Stage All", GitUiAction::StageAll),
-            ("Commit", GitUiAction::OpenCommit),
-            ("Diff", GitUiAction::ShowDiff),
+            ("Commit [c]", GitUiAction::OpenCommit),
+            ("Diff [Enter]", GitUiAction::ShowDiff),
             ("Pull", GitUiAction::Pull),
             ("Push", GitUiAction::Push),
             ("Fetch", GitUiAction::Fetch),
             ("Rebase", GitUiAction::OpenRebase),
-            ("Line History", GitUiAction::LineHistory),
-            ("File History", GitUiAction::FileHistory),
         ],
         GitTab::CommitGraph => &[
             ("Refresh", GitUiAction::Refresh),
-            ("Inspect", GitUiAction::Inspect),
+            ("Inspect [Enter]", GitUiAction::Inspect),
             ("Pull", GitUiAction::Pull),
             ("Push", GitUiAction::Push),
             ("Fetch", GitUiAction::Fetch),
@@ -129,94 +113,174 @@ fn render_toolbar(frame: &mut Frame, controller: &mut GitController, panel: &Git
         ],
         GitTab::Branches => &[
             ("Refresh", GitUiAction::Refresh),
-            ("Checkout", GitUiAction::Checkout),
+            ("Checkout [Enter]", GitUiAction::Checkout),
+            ("Fetch", GitUiAction::Fetch),
             ("Pull", GitUiAction::Pull),
             ("Push", GitUiAction::Push),
-            ("Fetch", GitUiAction::Fetch),
             ("Rebase", GitUiAction::OpenRebase),
         ],
-        GitTab::Launchpad | GitTab::Health => &[
+        GitTab::Diff => &[
+            ("◀ Prev file [", GitUiAction::PreviousFile),
+            ("Next file ▶ ]", GitUiAction::NextFile),
+            ("Stage [s]", GitUiAction::StageDiff),
+            ("Unstage [u]", GitUiAction::UnstageDiff),
+            ("Open [o]", GitUiAction::OpenFile),
+            (split, GitUiAction::ToggleSplit),
             ("Refresh", GitUiAction::Refresh),
+        ],
+        GitTab::Launchpad => &[
+            ("Refresh", GitUiAction::Refresh),
+            ("Fetch", GitUiAction::Fetch),
             ("Pull", GitUiAction::Pull),
             ("Push", GitUiAction::Push),
-            ("Fetch", GitUiAction::Fetch),
             ("Rebase", GitUiAction::OpenRebase),
         ],
-        GitTab::FileHistory => &[
-            ("Refresh", GitUiAction::Refresh),
-            ("Visual File History", GitUiAction::VisualFileHistory),
-        ],
-        _ => &[("Refresh", GitUiAction::Refresh)],
+        GitTab::Inspect => &[("Refresh", GitUiAction::Refresh)],
     };
-    let width = (area.width / 6).max(12);
-    for (index, (label, action)) in actions.iter().enumerate() {
-        let row = index / 6;
-        let column = index % 6;
-        if row > 1 {
+    let row = Rect::new(area.x, area.y, area.width, 1);
+    let actions = actions
+        .iter()
+        .map(|(label, action)| (*label, action.clone(), false))
+        .collect::<Vec<_>>();
+    buttons(frame, controller, row, &actions);
+}
+
+/// Buttons side by side, each as wide as its label; the ones that do not fit are left out.
+fn buttons(
+    frame: &mut Frame,
+    controller: &mut GitController,
+    area: Rect,
+    buttons: &[(&str, GitUiAction, bool)],
+) {
+    let mut x = area.x;
+    for (label, action, selected) in buttons {
+        let width = Line::from(*label).width() as u16 + 2;
+        if x + width > area.right() {
             break;
         }
         action_button(
             frame,
             controller,
-            Rect::new(
-                area.x + column as u16 * width,
-                area.y + row as u16,
-                width.saturating_sub(1),
-                1,
-            ),
+            Rect::new(x, area.y, width, 1),
             label,
             action.clone(),
-            false,
+            *selected,
         );
+        x += width + 1;
     }
+}
+
+/// The first row to draw so that row `selected` stays inside `height` rows.
+fn scroll_to(selected: usize, height: usize) -> usize {
+    (selected + 1).saturating_sub(height.max(1))
+}
+
+/// A whole row in reverse video when it is the selected one.
+fn row_style(selected: bool) -> Style {
+    if selected {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    }
+}
+
+/// The letter and colour of a change: added, modified, deleted, renamed…
+fn status_mark(status: FileStatus, area: ChangeArea) -> (&'static str, Color) {
+    match (status, area) {
+        (_, ChangeArea::Untracked) => ("U", Color::Green),
+        (FileStatus::Added, _) => ("A", Color::Green),
+        (FileStatus::Modified, _) => ("M", Color::Yellow),
+        (FileStatus::Deleted, _) => ("D", Color::Red),
+        (FileStatus::Renamed, _) => ("R", Color::Blue),
+        (FileStatus::TypeChanged, _) => ("T", Color::Magenta),
+        (FileStatus::Conflict, _) => ("!", Color::Red),
+        (FileStatus::Unknown, _) => ("?", MUTED),
+    }
+}
+
+/// How long ago `time` was, counted from `now`.
+fn ago_from(now: DateTime<FixedOffset>, time: DateTime<FixedOffset>) -> String {
+    let seconds = (now - time).num_seconds().max(0);
+    let (amount, unit) = match seconds {
+        0..60 => return "just now".to_owned(),
+        60..3_600 => (seconds / 60, "minute"),
+        3_600..86_400 => (seconds / 3_600, "hour"),
+        86_400..2_592_000 => (seconds / 86_400, "day"),
+        2_592_000..31_536_000 => (seconds / 2_592_000, "month"),
+        _ => (seconds / 31_536_000, "year"),
+    };
+    format!("{amount} {unit}{} ago", if amount == 1 { "" } else { "s" })
+}
+
+fn ago(time: DateTime<FixedOffset>) -> String {
+    ago_from(Local::now().fixed_offset(), time)
 }
 
 fn render_changes(frame: &mut Frame, controller: &mut GitController, panel: &GitPanel, area: Rect) {
     let mut lines = Vec::new();
+    let mut targets = Vec::new();
     let mut index = 0;
-    for (title, area_kind, entries) in [
-        ("Staged", ChangeArea::Staged, &panel.status.staged),
-        ("Unstaged", ChangeArea::Unstaged, &panel.status.unstaged),
-        ("Untracked", ChangeArea::Untracked, &panel.status.untracked),
+    for (title, entries) in [
+        ("Staged", &panel.status.staged),
+        ("Unstaged", &panel.status.unstaged),
+        ("Untracked", &panel.status.untracked),
     ] {
         lines.push(Line::from(Span::styled(
             format!("{title} ({})", entries.len()),
             Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
         )));
+        targets.push(None);
         for change in entries {
-            let row = area.y + lines.len() as u16;
-            if row < area.bottom() {
-                controller.regions.actions.push((
-                    GitUiAction::Select(index),
-                    Rect::new(area.x, row, area.width, 1),
-                ));
-            }
-            let style = if panel.selected == index {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "  {:?}  {:?}  {}",
-                    area_kind,
-                    change.status,
-                    change.path.display()
-                ),
-                style,
-            )));
+            lines.push(change_line(change, panel.selected == index));
+            targets.push(Some(index));
             index += 1;
         }
     }
     if index == 0 {
         lines.push(Line::from("Working tree clean."));
+        targets.push(None);
     }
-    frame.render_widget(Paragraph::new(lines), area);
+    let selected_row = targets
+        .iter()
+        .position(|target| *target == Some(panel.selected))
+        .unwrap_or(0);
+    let offset = scroll_to(selected_row, area.height.into());
+    for (row, target) in targets.iter().enumerate().skip(offset) {
+        let y = area.y + (row - offset) as u16;
+        if y >= area.bottom() {
+            break;
+        }
+        if let Some(index) = target {
+            controller.regions.actions.push((
+                GitUiAction::Select(*index),
+                Rect::new(area.x, y, area.width, 1),
+            ));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), area);
+}
+
+fn change_line(change: &ChangeEntry, selected: bool) -> Line<'static> {
+    let (mark, color) = status_mark(change.status, change.area);
+    let path = match &change.old_path {
+        Some(old) => format!("{} → {}", old.display(), change.path.display()),
+        None => change.path.display().to_string(),
+    };
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            mark,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" {path}")),
+    ])
+    .style(row_style(selected))
 }
 
 fn render_graph(frame: &mut Frame, controller: &mut GitController, panel: &GitPanel, area: Rect) {
     let mut lanes: Vec<Option<String>> = Vec::new();
     let mut assigned = HashMap::<String, usize>::new();
+    let offset = scroll_to(panel.selected, area.height.into());
     let lines = panel
         .commits
         .iter()
@@ -247,10 +311,18 @@ fn render_graph(frame: &mut Frame, controller: &mut GitController, panel: &GitPa
             } else {
                 format!("{}* ", "  ".repeat(lane))
             };
-            selectable_line(controller, index, panel.selected, area, graph, commit)
+            commit_line(
+                controller,
+                index,
+                panel.selected,
+                offset,
+                area,
+                graph,
+                commit,
+            )
         })
         .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines), area);
+    frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), area);
 }
 
 fn allocate_lane(lanes: &mut Vec<Option<String>>) -> usize {
@@ -262,140 +334,596 @@ fn allocate_lane(lanes: &mut Vec<Option<String>>) -> usize {
     }
 }
 
-fn selectable_line(
+fn commit_line(
     controller: &mut GitController,
     index: usize,
     selected: usize,
+    offset: usize,
     area: Rect,
     graph: String,
     commit: &CommitInfo,
 ) -> Line<'static> {
-    let row = area.y + index as u16;
-    if row < area.bottom() {
+    if let Some(row) = index.checked_sub(offset)
+        && row < usize::from(area.height)
+    {
         controller.regions.actions.push((
             GitUiAction::Select(index),
-            Rect::new(area.x, row, area.width, 1),
+            Rect::new(area.x, area.y + row as u16, area.width, 1),
         ));
     }
-    Line::from(Span::styled(
-        format!(
-            "{graph} {} {}  {}  {}",
-            commit.short_id,
-            commit.committed_at.format("%Y-%m-%d"),
-            commit.author,
-            commit.summary
+    Line::from(vec![
+        Span::styled(graph, Style::default().fg(ACTIVE)),
+        Span::styled(
+            format!(" {}", commit.short_id),
+            Style::default().fg(Color::Yellow),
         ),
-        if selected == index {
-            Style::default().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default()
-        },
-    ))
+        Span::raw(format!(" {}", commit.summary)),
+        Span::styled(
+            format!(
+                "  {} · {}",
+                commit.author,
+                commit.committed_at.format("%Y-%m-%d")
+            ),
+            Style::default().fg(MUTED),
+        ),
+    ])
+    .style(row_style(selected == index))
 }
 
+/// Local branches and each remote as a tree, folders for the `/` in the names; a click on a
+/// branch asks to switch to it.
 fn render_branches(
     frame: &mut Frame,
     controller: &mut GitController,
     panel: &GitPanel,
     area: Rect,
 ) {
-    let lines = panel
-        .branches
+    let rows = branch_tree(&panel.branches);
+    let selected_row = rows
+        .iter()
+        .position(|row| row.branch == Some(panel.selected))
+        .unwrap_or(0);
+    let offset = scroll_to(selected_row, area.height.into());
+    let lines = rows
         .iter()
         .enumerate()
-        .map(|(index, branch)| {
-            let row = area.y + index as u16;
-            if row < area.bottom() {
+        .skip(offset)
+        .take(area.height.into())
+        .map(|(index, row)| {
+            if let Some(branch) = row.branch {
                 controller.regions.actions.push((
-                    GitUiAction::Select(index),
-                    Rect::new(area.x, row, area.width, 1),
+                    GitUiAction::Branch(branch),
+                    Rect::new(area.x, area.y + (index - offset) as u16, area.width, 1),
                 ));
             }
-            Line::from(Span::styled(
-                format!(
-                    "{} {}{}  {}  {}  {}  +{} -{}",
-                    if branch.is_head { "*" } else { " " },
-                    branch.name,
-                    if branch.is_remote { " [remote]" } else { "" },
-                    branch.full_name,
-                    branch.commit_id.as_deref().unwrap_or("unborn"),
-                    branch.upstream.as_deref().unwrap_or("no upstream"),
-                    branch.ahead,
-                    branch.behind
-                ),
-                if panel.selected == index {
-                    Style::default().fg(ACTIVE).add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default()
-                },
-            ))
+            branch_line(panel, &rows, index, row)
         })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn render_diff(frame: &mut Frame, panel: &GitPanel, area: Rect) {
-    let lines = std::iter::once(Line::from(Span::styled(
-        panel.diff.title.clone(),
-        Style::default().fg(ACTIVE),
-    )))
-    .chain(panel.diff.text.lines().skip(panel.selected).map(|line| {
-        let color = if line.starts_with('+') {
-            Color::Green
-        } else if line.starts_with('-') {
-            Color::Red
-        } else if line.starts_with('@') {
-            Color::Cyan
+fn branch_line(
+    panel: &GitPanel,
+    rows: &[BranchRow],
+    index: usize,
+    row: &BranchRow,
+) -> Line<'static> {
+    let guide = Style::default().fg(BORDER);
+    let mut spans = row
+        .guides
+        .iter()
+        .map(|line| Span::styled(if *line { "│  " } else { "   " }, guide))
+        .collect::<Vec<_>>();
+    if !row.group {
+        spans.push(Span::styled(if row.last { "└─ " } else { "├─ " }, guide));
+    }
+    let Some(branch_index) = row.branch else {
+        if row.group {
+            let count = rows[index + 1..]
+                .iter()
+                .take_while(|next| !next.group)
+                .filter(|next| next.branch.is_some())
+                .count();
+            spans.push(Span::styled(
+                row.label.clone(),
+                Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                format!(" ({count})"),
+                Style::default().fg(MUTED),
+            ));
         } else {
-            TEXT
-        };
-        Line::from(Span::styled(line.to_owned(), Style::default().fg(color)))
-    }))
-    .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+            spans.push(Span::styled(
+                format!("{}/", row.label),
+                Style::default().fg(Color::Blue),
+            ));
+        }
+        return Line::from(spans);
+    };
+    let branch = &panel.branches[branch_index];
+    if branch.is_head {
+        spans.push(Span::styled(
+            format!("● {}", row.label),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        spans.push(Span::raw(format!("  {}", row.label)));
+    }
+    if let Some(upstream) = &branch.upstream {
+        spans.push(Span::styled(
+            format!("  ⇄ {upstream}"),
+            Style::default().fg(MUTED),
+        ));
+        for (count, arrow, color) in [
+            (branch.ahead, "↑", Color::Green),
+            (branch.behind, "↓", Color::Yellow),
+        ] {
+            if count > 0 {
+                spans.push(Span::styled(
+                    format!(" {arrow}{count}"),
+                    Style::default().fg(color),
+                ));
+            }
+        }
+    }
+    let short = branch
+        .commit_id
+        .as_deref()
+        .map_or("", |id| &id[..id.len().min(7)]);
+    spans.push(Span::styled(
+        format!("  {short}"),
+        Style::default().fg(Color::Yellow),
+    ));
+    spans.push(Span::styled(
+        format!(" {}", branch.summary),
+        Style::default().fg(MUTED),
+    ));
+    if let Some(time) = branch.committed_at {
+        spans.push(Span::styled(
+            format!(" · {}", ago(time)),
+            Style::default().fg(MUTED),
+        ));
+    }
+    Line::from(spans).style(row_style(panel.selected == branch_index))
 }
 
-fn render_launchpad(frame: &mut Frame, panel: &GitPanel, area: Rect) {
+/// The diff as rows: files and hunks that fold, line numbers before and after the change, and
+/// the removed lines next to the added ones when side by side.
+fn render_diff(frame: &mut Frame, controller: &mut GitController, panel: &GitPanel, area: Rect) {
+    let diff = &panel.diff;
+    if diff.files.is_empty() {
+        let message = if diff.path.is_some() || diff.commit_id.is_some() {
+            "No differences."
+        } else {
+            "Choose a change in Changes or Launchpad and press Enter to see its diff."
+        };
+        frame.render_widget(
+            Paragraph::new(message).style(Style::default().fg(MUTED)),
+            area,
+        );
+        return;
+    }
+    let [title, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    let (added, removed) = diff.counts();
+    let position = panel
+        .diff_change()
+        .map(|index| format!("   change {} of {}", index + 1, panel.changes().count()))
+        .unwrap_or_default();
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                diff.title.clone(),
+                Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("   +{added}"), Style::default().fg(Color::Green)),
+            Span::styled(format!(" −{removed}"), Style::default().fg(Color::Red)),
+            Span::styled(
+                format!(
+                    "   {} file{}{position}   n/p hunks  Enter folds",
+                    diff.files.len(),
+                    if diff.files.len() == 1 { "" } else { "s" }
+                ),
+                Style::default().fg(MUTED),
+            ),
+        ])),
+        title,
+    );
+    let rows = panel.diff_rows();
+    let digits = diff
+        .files
+        .iter()
+        .flat_map(|file| &file.hunks)
+        .flat_map(|hunk| &hunk.lines)
+        .filter_map(|line| line.old.max(line.new))
+        .max()
+        .unwrap_or(0)
+        .to_string()
+        .len()
+        .max(3);
+    let offset = scroll_to(panel.selected, body.height.into());
+    let half = usize::from(body.width.saturating_sub(1)) / 2;
+    let lines = rows
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(body.height.into())
+        .map(|(index, row)| {
+            controller.regions.actions.push((
+                GitUiAction::DiffRow(index),
+                Rect::new(body.x, body.y + (index - offset) as u16, body.width, 1),
+            ));
+            diff_line(panel, *row, digits, half).style(row_style(index == panel.selected))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), body);
+}
+
+fn diff_line(panel: &GitPanel, row: DiffRow, digits: usize, half: usize) -> Line<'static> {
+    let fold = |key| {
+        if panel.diff_folds.contains(&key) {
+            "▸ "
+        } else {
+            "▾ "
+        }
+    };
+    let file = &panel.diff.files[row.file()];
+    match row {
+        DiffRow::File(index) => {
+            let (mark, color) = status_mark(file.status, ChangeArea::Unstaged);
+            let path = match &file.old_path {
+                Some(old) => format!("{} → {}", old.display(), file.path.display()),
+                None => file.path.display().to_string(),
+            };
+            let (added, removed) = file.counts();
+            Line::from(vec![
+                Span::styled(fold((index, None)), Style::default().fg(ACTIVE)),
+                Span::styled(
+                    mark,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {path}"),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  +{added}"), Style::default().fg(Color::Green)),
+                Span::styled(format!(" −{removed}"), Style::default().fg(Color::Red)),
+                Span::styled(
+                    if file.binary { "  binary file" } else { "" },
+                    Style::default().fg(MUTED),
+                ),
+            ])
+        }
+        DiffRow::Hunk(index, hunk) => Line::from(vec![
+            Span::raw("  "),
+            Span::styled(fold((index, Some(hunk))), Style::default().fg(ACTIVE)),
+            Span::styled(
+                file.hunks[hunk].header.clone(),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+        DiffRow::Line(_, hunk, line) => {
+            let line = &file.hunks[hunk].lines[line];
+            let mut spans = vec![Span::styled(
+                format!(
+                    "{} {} │",
+                    number(line.old, digits),
+                    number(line.new, digits)
+                ),
+                Style::default().fg(MUTED),
+            )];
+            spans.extend(diff_text(line));
+            Line::from(spans)
+        }
+        DiffRow::Pair(_, hunk, left, right) => {
+            let lines = &file.hunks[hunk].lines;
+            let side = |line: Option<usize>, old: bool| {
+                let Some(line) = line.map(|line| &lines[line]) else {
+                    return vec![Span::raw(" ".repeat(half))];
+                };
+                let shown = if old { line.old } else { line.new };
+                let mut spans = vec![Span::styled(
+                    format!("{} │", number(shown, digits)),
+                    Style::default().fg(MUTED),
+                )];
+                let mut text = diff_text(line);
+                // Each half keeps its width: cut the text, fill the rest.
+                let room = half.saturating_sub(digits + 2);
+                let mut used = 0;
+                for span in &mut text {
+                    let content = span
+                        .content
+                        .chars()
+                        .take(room.saturating_sub(used))
+                        .collect::<String>();
+                    used += Line::from(content.as_str()).width();
+                    span.content = content.into();
+                }
+                spans.extend(text);
+                spans.push(Span::raw(" ".repeat(room.saturating_sub(used))));
+                spans
+            };
+            let mut spans = side(left, true);
+            spans.push(Span::styled("┃", Style::default().fg(BORDER)));
+            spans.extend(side(right, false));
+            Line::from(spans)
+        }
+    }
+}
+
+fn number(number: Option<u32>, digits: usize) -> String {
+    number.map_or_else(|| " ".repeat(digits), |number| format!("{number:>digits$}"))
+}
+
+fn diff_text(line: &DiffLine) -> Vec<Span<'static>> {
+    let (sign, style) = match line.kind {
+        DiffLineKind::Added => ("+", Style::default().fg(Color::Green)),
+        DiffLineKind::Removed => ("-", Style::default().fg(Color::Red)),
+        DiffLineKind::Context => (" ", Style::default().fg(TEXT)),
+        DiffLineKind::Note => (
+            "\\",
+            Style::default().fg(MUTED).add_modifier(Modifier::ITALIC),
+        ),
+    };
+    vec![Span::styled(format!("{sign} {}", line.text), style)]
+}
+
+/// The branch as cards: where it is, where it goes, how far apart they are and what is waiting
+/// to be committed; every number leads to what resolves it.
+fn render_launchpad(
+    frame: &mut Frame,
+    controller: &mut GitController,
+    panel: &GitPanel,
+    area: Rect,
+) {
     let summary = &panel.launchpad;
-    let lines = vec![
-        Line::from(format!(
-            "Current branch: {}",
-            summary.current_branch.as_deref().unwrap_or("detached HEAD")
+    let [top, middle, bottom] = Layout::vertical([
+        Constraint::Length(5),
+        Constraint::Length(4),
+        Constraint::Min(4),
+    ])
+    .areas(area);
+    let [branch_card, upstream_card] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(top);
+
+    let inner = card(frame, branch_card, " Current branch ", Color::Green);
+    let branch = match &summary.current_branch {
+        Some(name) => Span::styled(
+            format!("● {name}"),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        None => Span::styled("Detached HEAD", Style::default().fg(Color::Yellow)),
+    };
+    let last = summary.last_commit.as_ref().map_or_else(
+        || Line::from(Span::styled("No commits yet", Style::default().fg(MUTED))),
+        |commit| {
+            Line::from(vec![
+                Span::styled(commit.short_id.clone(), Style::default().fg(Color::Yellow)),
+                Span::raw(format!(" {}", commit.summary)),
+                Span::styled(
+                    format!(" · {}", ago(commit.committed_at)),
+                    Style::default().fg(MUTED),
+                ),
+            ])
+        },
+    );
+    frame.render_widget(Paragraph::new(vec![Line::from(branch), last]), inner);
+    let third = row_of(inner, 2);
+    match &summary.operation {
+        Some(operation) => frame.render_widget(
+            Paragraph::new(Span::styled(
+                format!("{operation}: finish or abort it in a terminal"),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )),
+            third,
+        ),
+        None => buttons(
+            frame,
+            controller,
+            third,
+            &[("Switch branch", GitUiAction::Tab(GitTab::Branches), false)],
+        ),
+    }
+
+    let inner = card(frame, upstream_card, " Upstream ", Color::Blue);
+    let upstream = match &summary.upstream {
+        Some(upstream) => Line::from(Span::styled(
+            format!("⇄ {upstream}"),
+            Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
         )),
-        Line::from(format!(
-            "Upstream: {}",
-            summary.upstream.as_deref().unwrap_or("none")
+        None => Line::from(Span::styled(
+            "No upstream: Push publishes this branch",
+            Style::default().fg(MUTED),
         )),
-        Line::from(format!(
-            "Ahead: {}  Behind: {}",
-            summary.ahead, summary.behind
-        )),
-        Line::from(format!(
-            "Staged: {}  Unstaged: {}  Untracked: {}",
-            summary.staged_count, summary.unstaged_count, summary.untracked_count
-        )),
-        Line::from(format!(
-            "Last commit: {}",
-            summary
-                .last_commit
-                .as_ref()
-                .map(|commit| commit.summary.as_str())
-                .unwrap_or("none")
-        )),
-        Line::from(""),
-        Line::from(Span::styled("Remotes", Style::default().fg(ACTIVE))),
-    ];
-    let lines = lines
-        .into_iter()
-        .chain(summary.remotes.iter().map(|remote| {
-            Line::from(format!(
+    };
+    let remote = summary.remotes.first().map_or_else(
+        || "No remotes".to_owned(),
+        |remote| {
+            format!(
                 "{}  {}",
                 remote.name,
                 remote.url.as_deref().unwrap_or("no URL")
-            ))
-        }))
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+            )
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            upstream,
+            Line::from(Span::styled(remote, Style::default().fg(MUTED))),
+        ]),
+        inner,
+    );
+    buttons(
+        frame,
+        controller,
+        row_of(inner, 2),
+        &[
+            ("Fetch", GitUiAction::Fetch, false),
+            ("Pull", GitUiAction::Pull, false),
+            ("Push", GitUiAction::Push, false),
+        ],
+    );
+
+    let inner = card(frame, middle, " Ahead / Behind ", Color::Yellow);
+    let scale = summary.ahead.max(summary.behind).max(1);
+    let bar =
+        |count: usize| "█".repeat((count * 12).div_ceil(scale).min(12) * usize::from(count > 0));
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("↑ {} ahead ", summary.ahead),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<13}", bar(summary.ahead)),
+                Style::default().fg(Color::Green),
+            ),
+            Span::styled(
+                format!("↓ {} behind ", summary.behind),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(bar(summary.behind), Style::default().fg(Color::Yellow)),
+        ])),
+        inner,
+    );
+    let plural = |count: usize| if count == 1 { "" } else { "s" };
+    let advice = match (&summary.upstream, summary.ahead, summary.behind) {
+        (None, _, _) => "Push to create the upstream branch".to_owned(),
+        (Some(upstream), 0, 0) => format!("Up to date with {upstream}"),
+        (Some(_), ahead, 0) => format!("Push {ahead} commit{}", plural(ahead)),
+        (Some(_), 0, behind) => format!("Pull {behind} commit{}", plural(behind)),
+        (Some(_), ahead, behind) => format!(
+            "Diverged: pull {behind} commit{} (rebase if it cannot fast-forward), then push {ahead}",
+            plural(behind)
+        ),
+    };
+    let advice_row = row_of(inner, 1);
+    frame.render_widget(
+        Paragraph::new(Span::styled(advice.clone(), Style::default().fg(MUTED))),
+        advice_row,
+    );
+    let start = (Line::from(advice.as_str()).width() as u16 + 2).min(advice_row.width);
+    buttons(
+        frame,
+        controller,
+        Rect::new(
+            advice_row.x + start,
+            advice_row.y,
+            advice_row.width - start,
+            1,
+        ),
+        &[
+            ("Push", GitUiAction::Push, summary.ahead > 0),
+            ("Pull", GitUiAction::Pull, summary.behind > 0),
+        ],
+    );
+
+    let columns = Layout::horizontal([Constraint::Ratio(1, 3); 3]).split(bottom);
+    let mut first = 0;
+    for (column, (title, entries, color, actions)) in [
+        (
+            "Staged",
+            &panel.status.staged,
+            Color::Green,
+            &[
+                ("Commit [c]", GitUiAction::OpenCommit),
+                ("Unstage [u]", GitUiAction::Unstage),
+            ][..],
+        ),
+        (
+            "Unstaged",
+            &panel.status.unstaged,
+            Color::Yellow,
+            &[
+                ("Stage [s]", GitUiAction::Stage),
+                ("Stage all", GitUiAction::StageAll),
+            ][..],
+        ),
+        (
+            "Untracked",
+            &panel.status.untracked,
+            Color::Magenta,
+            &[
+                ("Stage [s]", GitUiAction::Stage),
+                ("Stage all", GitUiAction::StageAll),
+            ][..],
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let inner = card(
+            frame,
+            columns[column],
+            &format!(" {title} {} ", entries.len()),
+            color,
+        );
+        let rows = usize::from(inner.height.saturating_sub(1));
+        let local = panel
+            .selected
+            .checked_sub(first)
+            .filter(|local| *local < entries.len());
+        let offset = local.map_or(0, |local| scroll_to(local, rows));
+        let mut lines = Vec::new();
+        for (index, change) in entries.iter().enumerate().skip(offset).take(rows) {
+            let row = (index - offset) as u16;
+            controller.regions.actions.push((
+                GitUiAction::OpenChange(first + index),
+                Rect::new(inner.x, inner.y + row, inner.width, 1),
+            ));
+            lines.push(change_line(change, panel.selected == first + index));
+        }
+        if entries.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "Nothing here",
+                Style::default().fg(MUTED),
+            )));
+        }
+        frame.render_widget(Paragraph::new(lines), inner);
+        let actions = actions
+            .iter()
+            .map(|(label, action)| (*label, action.clone(), false))
+            .collect::<Vec<_>>();
+        if !entries.is_empty() {
+            buttons(
+                frame,
+                controller,
+                row_of(inner, inner.height.saturating_sub(1)),
+                &actions,
+            );
+        }
+        first += entries.len();
+    }
+}
+
+/// A rounded card titled in `color`; returns the area inside it.
+fn card(frame: &mut Frame, area: Rect, title: &str, color: Color) -> Rect {
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(BORDER))
+        .title(Span::styled(
+            title.to_owned(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    inner
+}
+
+/// Row `row` of `area`, empty past its end.
+fn row_of(area: Rect, row: u16) -> Rect {
+    if row < area.height {
+        Rect::new(area.x, area.y + row, area.width, 1)
+    } else {
+        Rect::default()
+    }
 }
 
 fn render_inspect(frame: &mut Frame, panel: &GitPanel, area: Rect) {
@@ -435,174 +963,6 @@ fn render_inspect(frame: &mut Frame, panel: &GitPanel, area: Rect) {
         ))
     }));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-}
-
-fn render_line_history(
-    frame: &mut Frame,
-    controller: &mut GitController,
-    panel: &GitPanel,
-    area: Rect,
-) {
-    let lines = panel
-        .line_history
-        .iter()
-        .enumerate()
-        .skip(panel.selected)
-        .map(|(index, line)| {
-            selectable_row(
-                controller,
-                index,
-                panel.selected,
-                area,
-                format!(
-                    "{:>5} (origin {:>5})  {}  {}  {}  {:<18}  {}  {}",
-                    line.line_number,
-                    line.original_line_number,
-                    line.short_id,
-                    line.commit_id,
-                    line.committed_at.format("%Y-%m-%d"),
-                    line.author,
-                    line.summary,
-                    line.content
-                ),
-            )
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn render_file_history(
-    frame: &mut Frame,
-    controller: &mut GitController,
-    panel: &GitPanel,
-    area: Rect,
-) {
-    let selected_path = panel
-        .selected_file_history()
-        .map(|entry| entry.path.clone())
-        .unwrap_or_default();
-    let lines = std::iter::once(Line::from(Span::styled(
-        format!("History for {}", selected_path.display()),
-        Style::default().fg(ACTIVE),
-    )))
-    .chain(panel.file_history.iter().enumerate().map(|(index, entry)| {
-        selectable_line(
-            controller,
-            index,
-            panel.selected,
-            area,
-            format!(
-                "{:?}  {}{}  ",
-                entry.status,
-                entry
-                    .old_path
-                    .as_ref()
-                    .map(|path| format!("{} -> ", path.display()))
-                    .unwrap_or_default(),
-                entry.path.display()
-            ),
-            &entry.commit,
-        )
-    }))
-    .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn render_visual_history(
-    frame: &mut Frame,
-    controller: &mut GitController,
-    panel: &GitPanel,
-    area: Rect,
-) {
-    let lines = panel
-        .visual_file_history
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            let graph = format!(
-                "{}*{}",
-                "  ".repeat(entry.lane),
-                if entry.parent_ids.len() > 1 {
-                    "─╮"
-                } else {
-                    "──"
-                }
-            );
-            selectable_row(
-                controller,
-                index,
-                panel.selected,
-                area,
-                format!(
-                    "{graph} {}  {}  {}  {}  {:?}",
-                    entry.short_id,
-                    entry.commit_id,
-                    entry.committed_at.format("%Y-%m-%d"),
-                    entry.summary,
-                    entry.status
-                ),
-            )
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn render_health(frame: &mut Frame, controller: &mut GitController, panel: &GitPanel, area: Rect) {
-    let health = &panel.health;
-    let mut lines = vec![
-        Line::from(format!(
-            "Working tree: {}",
-            if health.is_clean {
-                "clean"
-            } else {
-                "changes present"
-            }
-        )),
-        Line::from(format!("Upstream configured: {}", health.has_upstream)),
-        Line::from(format!(
-            "Ahead: {}  Behind: {}",
-            health.ahead, health.behind
-        )),
-        Line::from(format!(
-            "Operation: {}",
-            health.operation.as_deref().unwrap_or("none")
-        )),
-        Line::from(format!("Conflicts: {}", health.conflicts.len())),
-    ];
-    lines.extend(health.conflicts.iter().enumerate().map(|(index, path)| {
-        selectable_row(
-            controller,
-            index,
-            panel.selected,
-            area,
-            format!("CONFLICT  {}", path.display()),
-        )
-    }));
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn selectable_row(
-    controller: &mut GitController,
-    index: usize,
-    selected: usize,
-    area: Rect,
-    text: String,
-) -> Line<'static> {
-    let row = area.y + index as u16;
-    if row < area.bottom() {
-        controller.regions.actions.push((
-            GitUiAction::Select(index),
-            Rect::new(area.x, row, area.width, 1),
-        ));
-    }
-    Line::from(Span::styled(
-        text,
-        if index == selected {
-            Style::default().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default()
-        },
-    ))
 }
 
 /// The Commit, Rebase and confirmation dialogs, drawn by `ui::draw` over everything else.
@@ -682,8 +1042,26 @@ fn action_button(
             .fg(ACTIVE)
             .add_modifier(Modifier::BOLD | Modifier::REVERSED)
     } else {
-        Style::default().fg(TEXT)
+        Style::default().fg(TEXT).add_modifier(Modifier::REVERSED)
     };
     frame.render_widget(Paragraph::new(format!(" {label} ")).style(style), area);
     controller.regions.actions.push((action, area));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn times_read_as_how_long_ago() {
+        let now = DateTime::parse_from_rfc3339("2026-10-28T12:00:00+00:00").unwrap();
+        let before = |seconds: i64| now - chrono::Duration::seconds(seconds);
+        assert_eq!(ago_from(now, before(30)), "just now");
+        assert_eq!(ago_from(now, before(60)), "1 minute ago");
+        assert_eq!(ago_from(now, before(7_200)), "2 hours ago");
+        assert_eq!(ago_from(now, before(3 * 86_400)), "3 days ago");
+        assert_eq!(ago_from(now, before(400 * 86_400)), "1 year ago");
+        assert_eq!(scroll_to(3, 10), 0);
+        assert_eq!(scroll_to(12, 10), 3);
+    }
 }

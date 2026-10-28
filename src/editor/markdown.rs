@@ -431,17 +431,9 @@ impl MarkdownDocument {
     }
 }
 
-/// A Mermaid block drawn with box characters by `mermaid-text`; `None` keeps the code frame.
+/// A Mermaid block drawn with box characters (`editor::mermaid`); `None` keeps the code frame.
 fn render_diagram(body: &[String]) -> Option<Vec<String>> {
-    let drawn = mermaid_text::render(&body.join("\n")).ok()?;
-    let mut lines = drawn
-        .lines()
-        .map(|line| line.trim_end().to_owned())
-        .collect::<Vec<_>>();
-    while lines.last().is_some_and(String::is_empty) {
-        lines.pop();
-    }
-    (!lines.is_empty()).then_some(lines)
+    super::mermaid::render(&body.join("\n"))
 }
 
 /// A diagram line: box drawing and arrows in the accent colour, labels in the text colour.

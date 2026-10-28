@@ -10,7 +10,7 @@ use syntect::{
         Color as ThemeColor, FontStyle, ScopeSelectors, StyleModifier, Theme, ThemeItem,
         ThemeSettings,
     },
-    parsing::SyntaxSet,
+    parsing::{SyntaxReference, SyntaxSet},
 };
 
 use super::markdown::{is_markdown_path, mermaid_lines};
@@ -111,10 +111,17 @@ const SCOPES: &[(&str, Color, FontStyle)] = &[
     ),
     (
         "support.type.property-name, entity.name.tag.yaml, meta.mapping.key, \
-         variable.other.member, variable.other.property, meta.object-literal.key",
+         variable.other.member, variable.other.property, meta.object-literal.key, \
+         entity.name.key, entity.name.tag.toml, variable.other.env, keyword.name.ini",
         Color::Blue,
         FontStyle::empty(),
     ),
+    (
+        "entity.section, entity.name.table, entity.name.section.group-title",
+        Color::Yellow,
+        FontStyle::BOLD,
+    ),
+    ("entity.name.pattern", Color::Green, FontStyle::empty()),
     (
         "markup.heading, entity.name.section",
         Color::Blue,
@@ -225,14 +232,10 @@ pub fn file_icon(path: &Path) -> (char, Color) {
     )
 }
 
-pub fn language_name(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
+/// The name shown in the editor title: the common languages by name, other files by the syntax
+/// that highlights them (`DotENV`, `Git Ignore`, `Dockerfile`…).
+pub fn language_name(path: &Path, first_line: &str) -> &'static str {
+    let named = match extension(path).as_str() {
         "java" => "Java",
         "rs" => "Rust",
         "swift" => "Swift",
@@ -257,7 +260,7 @@ pub fn language_name(path: &Path) -> &'static str {
         "json" => "JSON",
         "yaml" | "yml" => "YAML",
         "toml" => "TOML",
-        "ini" | "cfg" | "conf" | "properties" => "INI",
+        "ini" | "cfg" | "conf" => "INI",
         "csv" => "CSV",
         "svg" => "SVG",
         "py" | "pyw" => "Python",
@@ -268,29 +271,97 @@ pub fn language_name(path: &Path) -> &'static str {
         "r" => "R",
         "sh" | "bash" | "zsh" | "fish" => "Shell",
         "bat" | "cmd" => "Batch",
-        _ => "Plain Text",
+        "jsp" | "jspf" => "JSP",
+        _ => "",
+    };
+    if !named.is_empty() {
+        return named;
+    }
+    syntax_for(path, first_line).name.as_str()
+}
+
+fn extension(path: &Path) -> String {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+/// The syntax of a file: a `#!` line, its whole name (`Cargo.lock`, `.env`, `Dockerfile`), the
+/// configuration files no syntax names, the extension and its aliases, in that order.
+fn syntax_for(path: &Path, first_line: &str) -> &'static SyntaxReference {
+    let by = |token: &str| SYNTAXES.find_syntax_by_extension(token);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let extension = extension(path);
+    first_line
+        .starts_with("#!")
+        .then(|| SYNTAXES.find_syntax_by_first_line(first_line))
+        .flatten()
+        .or_else(|| by(name))
+        .or_else(|| config_syntax(&name.to_ascii_lowercase(), &extension, first_line).and_then(by))
+        .or_else(|| by(alias(&extension)))
+        .unwrap_or_else(|| SYNTAXES.find_syntax_plain_text())
+}
+
+/// Configuration files that no syntax names, by their name or by how they start: `.env.*`,
+/// `*ignore`, `*rc`, `.config` (XML or INI), `.lock` (JSON, TOML or YAML), .NET projects.
+fn config_syntax(name: &str, extension: &str, first_line: &str) -> Option<&'static str> {
+    let start = first_line.trim_start();
+    let object = start.starts_with('{');
+    if name == ".env" || name.starts_with(".env.") || extension == "env" {
+        return Some(".env");
+    }
+    if name.starts_with('.') && name.ends_with("ignore") {
+        return Some("gitignore");
+    }
+    if name.starts_with('.') && name.ends_with("rc") && !name[1..].contains('.') {
+        return Some(if object {
+            "json"
+        } else if start.contains('=') {
+            "ini"
+        } else {
+            "yaml"
+        });
+    }
+    match extension {
+        "config" => Some(if start.starts_with('<') { "xml" } else { "ini" }),
+        "lock" | "resolved" => Some(if object {
+            "json"
+        } else if start.starts_with('[') || start.contains(" = ") {
+            "toml"
+        } else {
+            "yaml"
+        }),
+        "jsonc" | "json5" | "webmanifest" | "code-workspace" => Some("json"),
+        "csproj" | "fsproj" | "vbproj" | "vcxproj" | "props" | "targets" | "nuspec" | "resx"
+        | "wxs" | "xib" | "storyboard" => Some("xml"),
+        "service" | "socket" | "timer" | "mount" | "target" | "cnf" => Some("ini"),
+        _ => None,
     }
 }
 
-fn syntax_for_path(path: &Path) -> Option<&'static syntect::parsing::SyntaxReference> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    let extension = match extension.as_str() {
+/// Extensions highlighted by the syntax of another one.
+fn alias(extension: &str) -> &str {
+    match extension {
         "pls" | "plsql" | "pks" | "pkb" => "sql",
         "astro" => "html",
         "svg" | "xsd" | "xsl" | "xslt" | "plist" => "xml",
         "cts" | "mts" => "ts",
+        "mjs" | "cjs" => "js",
+        "jsx" => "tsx",
+        "jspf" => "jsp",
         "phtml" => "php",
         "yml" => "yaml",
-        "cfg" | "conf" | "properties" => "ini",
+        "cfg" | "conf" => "ini",
         "rake" | "gemspec" => "rb",
         "kts" => "kt",
         "bash" | "zsh" | "fish" => "sh",
         "cmd" => "bat",
         other => other,
-    };
-    SYNTAXES
-        .find_syntax_by_extension(extension)
-        .or_else(|| SYNTAXES.find_syntax_plain_text().into())
+    }
 }
 
 pub fn highlight_lines(path: &Path, lines: &[String]) -> Vec<Vec<Span<'static>>> {
@@ -300,12 +371,7 @@ pub fn highlight_lines(path: &Path, lines: &[String]) -> Vec<Vec<Span<'static>>>
             .map(|line| highlight_mermaid_line(line))
             .collect();
     }
-    let Some(syntax) = syntax_for_path(path) else {
-        return lines
-            .iter()
-            .map(|line| vec![Span::raw(line.clone())])
-            .collect();
-    };
+    let syntax = syntax_for(path, lines.first().map_or("", String::as_str));
     let mermaid = if is_markdown_path(path) {
         mermaid_lines(lines)
     } else {
@@ -316,12 +382,19 @@ pub fn highlight_lines(path: &Path, lines: &[String]) -> Vec<Vec<Span<'static>>>
         .iter()
         .enumerate()
         .map(|(index, line)| {
+            // The syntaxes end line comments, and other scopes, at the newline: without it the
+            // rest of the file stayed a comment after the first `//` or `#` (E22).
+            let line_with_newline = format!("{line}\n");
             let highlighted = highlighter
-                .highlight_line(line, &SYNTAXES)
+                .highlight_line(&line_with_newline, &SYNTAXES)
                 .map(|regions| {
                     regions
                         .into_iter()
-                        .map(|(style, text)| Span::styled(text.to_owned(), span_style(style)))
+                        .filter_map(|(style, text)| {
+                            let text = text.strip_suffix('\n').unwrap_or(text);
+                            (!text.is_empty())
+                                .then(|| Span::styled(text.to_owned(), span_style(style)))
+                        })
                         .collect()
                 })
                 .unwrap_or_else(|_| vec![Span::raw(line.clone())]);
@@ -371,6 +444,21 @@ fn mermaid_tokens(line: &str) -> Vec<(Style, &str)> {
         "packet-beta",
         "architecture-beta",
         "requirementdiagram",
+        "sankey",
+        "xychart",
+        "block",
+        "packet",
+        "architecture",
+        "c4context",
+        "c4container",
+        "c4component",
+        "c4dynamic",
+        "c4deployment",
+        "zenuml",
+        "kanban",
+        "radar-beta",
+        "treemap-beta",
+        "treemap",
     ];
     const KEYWORDS: &[&str] = &[
         "subgraph",
@@ -408,6 +496,14 @@ fn mermaid_tokens(line: &str) -> Vec<(Style, &str)> {
         "destroy",
         "return",
         "box",
+        "axis",
+        "curve",
+        "group",
+        "service",
+        "commit",
+        "branch",
+        "checkout",
+        "merge",
     ];
 
     let plain = Style::default().fg(Color::Reset);
@@ -631,8 +727,8 @@ mod tests {
             ("bat", "Batch"),
         ] {
             let path = std::path::PathBuf::from(format!("sample.{extension}"));
-            assert_eq!(language_name(&path), language);
-            let syntax = syntax_for_path(&path).expect("extension should have a syntax");
+            assert_eq!(language_name(&path, ""), language);
+            let syntax = syntax_for(&path, "");
             assert_ne!(syntax.name, "Plain Text", "missing syntax for {extension}");
         }
     }
@@ -648,7 +744,11 @@ mod tests {
             ("yml", "YAML"),
             ("cfg", "INI"),
             ("conf", "INI"),
-            ("properties", "INI"),
+            ("properties", "Java Properties"),
+            ("jspf", "JSP"),
+            ("mjs", "JavaScript"),
+            ("cjs", "JavaScript"),
+            ("jsx", "JavaScript"),
             ("rake", "Ruby"),
             ("gemspec", "Ruby"),
             ("kts", "Kotlin"),
@@ -658,8 +758,8 @@ mod tests {
             ("cmd", "Batch"),
         ] {
             let path = std::path::PathBuf::from(format!("sample.{extension}"));
-            assert_eq!(language_name(&path), language);
-            let syntax = syntax_for_path(&path).expect("alias should have a syntax");
+            assert_eq!(language_name(&path, ""), language);
+            let syntax = syntax_for(&path, "");
             assert_ne!(syntax.name, "Plain Text", "missing syntax for {extension}");
         }
     }
@@ -750,7 +850,7 @@ mod tests {
         ];
         let highlighted = highlight_lines(Path::new("README.md"), &lines);
 
-        assert_eq!(language_name(Path::new("diagram.mmd")), "Mermaid");
+        assert_eq!(language_name(Path::new("diagram.mmd"), ""), "Mermaid");
         for (line, spans) in lines.iter().zip(&highlighted) {
             assert_eq!(spans_text(spans), *line);
             assert!(
@@ -799,6 +899,129 @@ mod tests {
                 .iter()
                 .any(|span| span.content == "->>" && span.style.fg == Some(Color::Green)),
             "{tokens:?}"
+        );
+    }
+
+    /// Spans of the last line of `text` in a file called `name`.
+    fn last_line(name: &str, text: &str) -> Vec<Span<'static>> {
+        let lines = text.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+        highlight_lines(Path::new(name), &lines).pop().unwrap()
+    }
+
+    #[test]
+    fn line_comments_end_with_their_line() {
+        for (name, text, keyword) in [
+            ("Point.java", "// note\nclass Point {}", "class"),
+            ("app.js", "// note\nfunction run() {}", "function"),
+            ("tool.py", "# note\ndef run():", "def"),
+            ("main.c", "// note\nint main() { return 0; }", "return"),
+            ("index.php", "<?php\n// note\nfunction run() {}", "function"),
+        ] {
+            let spans = last_line(name, text);
+            assert!(
+                spans
+                    .iter()
+                    .all(|span| span.style.fg != Some(Color::DarkGray)),
+                "{name}: the comment ran into the next line: {spans:?}"
+            );
+            assert!(
+                spans
+                    .iter()
+                    .any(|span| span.content == keyword && span.style.fg == Some(Color::Magenta)),
+                "{name}: {spans:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn configuration_files_get_their_syntax() {
+        for (name, first_line, syntax) in [
+            (".env", "API_KEY=1", "DotENV"),
+            (".env.production", "API_KEY=1", "DotENV"),
+            ("local.env", "API_KEY=1", "DotENV"),
+            (
+                "Cargo.lock",
+                "# This file is automatically @generated by Cargo.",
+                "TOML",
+            ),
+            ("poetry.lock", "[[package]]", "TOML"),
+            ("composer.lock", "{", "JSON"),
+            ("yarn.lock", "# yarn lockfile v1", "YAML"),
+            ("Pipfile.lock", "{", "JSON"),
+            ("web.config", "<?xml version=\"1.0\"?>", "XML"),
+            ("app.config", "[settings]", "INI"),
+            (
+                "application.properties",
+                "server.port=8080",
+                "Java Properties",
+            ),
+            (
+                "vite.config.ts",
+                "import { defineConfig } from 'vite'",
+                "TypeScript",
+            ),
+            (
+                "astro.config.mjs",
+                "import { defineConfig } from 'astro/config';",
+                "JavaScript",
+            ),
+            (".gitignore", "target/", "Git Ignore"),
+            (".dockerignore", "target/", "Git Ignore"),
+            (".editorconfig", "root = true", "INI"),
+            (".prettierrc", "{ \"semi\": false }", "JSON"),
+            (".npmrc", "save-exact=true", "INI"),
+            ("Dockerfile", "FROM rust:1.97", "Dockerfile"),
+            ("Makefile", "all: build", "Makefile"),
+            ("go.mod", "module example.com/app", "Gomod"),
+            ("requirements.txt", "flask==3.0", "Requirements.txt"),
+            (".zshrc", "export PATH", "Bourne Again Shell (bash)"),
+            ("nginx.conf", "server {", "nginx"),
+            ("App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\">", "XML"),
+            (
+                "header.jspf",
+                "<%@ page pageEncoding=\"UTF-8\" %>",
+                "Java Server Page (JSP)",
+            ),
+            ("deploy", "#!/bin/bash", "Bourne Again Shell (bash)"),
+        ] {
+            assert_eq!(
+                syntax_for(Path::new(name), first_line).name,
+                syntax,
+                "{name}"
+            );
+        }
+        assert_eq!(language_name(Path::new(".env"), ""), "DotENV");
+        assert_eq!(language_name(Path::new("header.jspf"), ""), "JSP");
+    }
+
+    #[test]
+    fn configuration_keys_values_and_sections_are_coloured() {
+        let colour = |name: &str, text: &str, word: &str| {
+            last_line(name, text)
+                .into_iter()
+                .find(|span| span.content.contains(word))
+                .unwrap_or_else(|| panic!("{word} in {name}"))
+                .style
+        };
+        assert_eq!(
+            colour(".env", "# keys\nAPI_KEY=secret", "API_KEY").fg,
+            Some(Color::Blue)
+        );
+        assert_eq!(
+            colour("app.properties", "# keys\nserver.port=8080", "server.port").fg,
+            Some(Color::Blue)
+        );
+        assert_eq!(
+            colour("setup.cfg", "; c\n[metadata]", "metadata").fg,
+            Some(Color::Yellow)
+        );
+        assert_eq!(
+            colour("Cargo.lock", "# c\nname = \"sozo\"", "name").fg,
+            Some(Color::Blue)
+        );
+        assert_eq!(
+            colour("page.jspf", "<% int x = 1; %>", "int").fg,
+            Some(Color::Yellow)
         );
     }
 

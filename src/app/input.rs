@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
@@ -75,11 +77,7 @@ impl App {
                 self.show_git = !self.show_git;
                 self.show_database = false;
                 self.focus = if self.show_git {
-                    let current_file = self
-                        .active_tab
-                        .and_then(|index| self.open_files.get(index))
-                        .map(|file| file.path.clone());
-                    self.git.open(current_file);
+                    self.git.open();
                     Focus::Git
                 } else {
                     Focus::Editor
@@ -260,6 +258,19 @@ impl App {
             }
             (Overlay::About, KeyCode::Char('g' | 'G')) => self.open_repository(),
             (_, KeyCode::Esc | KeyCode::F(1) | KeyCode::F(2)) => self.close_overlay(),
+            (Overlay::Help | Overlay::WhatsNew, code) => {
+                // The dialog clamps the scroll when it draws.
+                let scroll = self.overlay_scroll;
+                self.overlay_scroll = match code {
+                    KeyCode::Up => scroll.saturating_sub(1),
+                    KeyCode::Down => scroll.saturating_add(1),
+                    KeyCode::PageUp => scroll.saturating_sub(10),
+                    KeyCode::PageDown => scroll.saturating_add(10),
+                    KeyCode::Home => 0,
+                    KeyCode::End => u16::MAX,
+                    _ => scroll,
+                };
+            }
             _ => {}
         }
     }
@@ -290,6 +301,7 @@ impl App {
             self.motion.restart_bloom(now);
         }
         self.overlay = overlay;
+        self.overlay_scroll = 0;
         self.motion.open_overlay(now);
     }
 
@@ -327,22 +339,51 @@ impl App {
         let Some(active) = self.active_tab else {
             return;
         };
-        if self.open_files[active].image.is_some() {
-            if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                self.close_tab(active);
-            }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && matches!(key.code, KeyCode::Char('w' | 'W')) {
+            self.close_tab(active);
             return;
         }
         let file = &mut self.open_files[active];
+        if file.image.is_some() {
+            // A PDF turns its pages; an image has nothing to edit.
+            if let Some((page, _)) = file.page() {
+                let target = match key.code {
+                    KeyCode::PageDown | KeyCode::Right | KeyCode::Down | KeyCode::Char(' ') => {
+                        Some(page + 1)
+                    }
+                    KeyCode::PageUp | KeyCode::Left | KeyCode::Up => Some(page.saturating_sub(1)),
+                    KeyCode::Home => Some(0),
+                    KeyCode::End => Some(usize::MAX),
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    file.show_page(target, &mut self.picker);
+                }
+            }
+            return;
+        }
+        let mut copied = None;
         match key.code {
-            KeyCode::Up => file.move_cursor(-1, 0),
-            KeyCode::Down => file.move_cursor(1, 0),
-            KeyCode::Left => file.move_cursor(0, -1),
-            KeyCode::Right => file.move_cursor(0, 1),
-            KeyCode::Home => file.move_cursor_to(file.cursor_row, 0),
-            KeyCode::End => {
-                let column = file.lines[file.cursor_row].chars().count();
-                file.move_cursor_to(file.cursor_row, column);
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Home
+            | KeyCode::End => {
+                // Shift selects as the cursor moves; without it the selection ends.
+                file.mark(key.modifiers.contains(KeyModifiers::SHIFT));
+                match key.code {
+                    KeyCode::Up => file.move_cursor(-1, 0),
+                    KeyCode::Down => file.move_cursor(1, 0),
+                    KeyCode::Left => file.move_cursor(0, -1),
+                    KeyCode::Right => file.move_cursor(0, 1),
+                    KeyCode::Home => file.move_cursor_to(file.cursor_row, 0),
+                    _ => {
+                        let column = file.lines[file.cursor_row].chars().count();
+                        file.move_cursor_to(file.cursor_row, column);
+                    }
+                }
             }
             KeyCode::PageUp => file.scroll = file.scroll.saturating_sub(10),
             KeyCode::PageDown => file.scroll = file.scroll.saturating_add(10),
@@ -350,13 +391,17 @@ impl App {
             KeyCode::Tab => file.insert('\t'),
             KeyCode::Backspace => file.backspace(),
             KeyCode::Delete => file.delete(),
-            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.close_tab(active)
+            KeyCode::Char('a' | 'A') if ctrl => file.select_all(),
+            KeyCode::Char('c' | 'C') if ctrl => copied = file.selected_text(),
+            KeyCode::Char('x' | 'X') if ctrl => {
+                copied = file.selected_text();
+                file.delete_selection();
             }
-            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                file.insert(character);
-            }
+            KeyCode::Char(character) if !ctrl => file.insert(character),
             _ => {}
+        }
+        if let Some(text) = copied {
+            self.copy(text);
         }
     }
 
@@ -382,6 +427,7 @@ impl App {
         let point = (mouse.column, mouse.row);
         match mouse.kind {
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                self.selecting = false;
                 if !contains(self.regions.editor, point) {
                     self.flush_active_file();
                 }
@@ -519,10 +565,36 @@ impl App {
                         && file.image.is_none()
                         && contains(area, point)
                     {
+                        // A click starts a selection that a drag makes longer; Shift extends
+                        // the one there is.
+                        let extend = mouse.modifiers.contains(KeyModifiers::SHIFT);
                         let (row, visual_column) = text_position(file, area, point);
                         let column = file.cursor_column_for_click(row, visual_column);
+                        file.mark(extend);
                         file.move_cursor_to(row, column);
+                        if !extend {
+                            file.anchor = Some((file.cursor_row, file.cursor_column));
+                        }
+                        self.selecting = true;
                     }
+                }
+            }
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) if self.selecting => {
+                let area = self.regions.pane_bodies[self.active_pane()];
+                if let Some(file) = self
+                    .active_tab
+                    .and_then(|index| self.open_files.get_mut(index))
+                    && file.image.is_none()
+                {
+                    // Past the top or the bottom of the text the view follows the selection.
+                    let (row, visual_column) = if point.1 <= area.y {
+                        let display = (file.scroll as usize).saturating_sub(1);
+                        (file.source_row(display).unwrap_or(0), 0)
+                    } else {
+                        text_position(file, area, point)
+                    };
+                    let column = file.cursor_column_for_click(row, visual_column);
+                    file.move_cursor_to(row, column);
                 }
             }
             MouseEventKind::Drag(crossterm::event::MouseButton::Left)
@@ -568,6 +640,7 @@ impl App {
             },
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
                 self.drag = None;
+                self.selecting = false;
                 if let Some(drag) = self.tab_drag.take()
                     && let Some(zone) = drag.zone
                 {
@@ -585,6 +658,14 @@ impl App {
     }
 
     fn scroll_at(&mut self, point: (u16, u16), up: bool, sideways: bool) {
+        if matches!(self.overlay, Overlay::Help | Overlay::WhatsNew) {
+            self.overlay_scroll = if up {
+                self.overlay_scroll.saturating_sub(3)
+            } else {
+                self.overlay_scroll.saturating_add(3)
+            };
+            return;
+        }
         if let Some(pane) = (0..2).find(|pane| contains(self.regions.tab_bars[*pane], point)) {
             self.scroll_tabs(pane, !up);
         } else if self.show_database && contains(self.database.regions.content, point) {
@@ -604,6 +685,20 @@ impl App {
         } else if contains(self.regions.right_terminal, point) {
             self.right_terminal.scroll(up, 3);
         } else if let Some(index) = self.pane_at(point) {
+            if let Some((page, _)) = self.open_files[index].page() {
+                // One page per turn of the wheel, however many events it sends.
+                let now = Instant::now();
+                if self
+                    .page_turned
+                    .is_some_and(|last| now.duration_since(last) < Duration::from_millis(250))
+                {
+                    return;
+                }
+                self.page_turned = Some(now);
+                let page = if up { page.saturating_sub(1) } else { page + 1 };
+                self.open_files[index].show_page(page, &mut self.picker);
+                return;
+            }
             // The editor clamps both scrolls to the text when it draws.
             let file = &mut self.open_files[index];
             let scroll = if sideways {
@@ -872,6 +967,106 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
         assert_eq!(app.overlay, Overlay::Help);
+    }
+
+    fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+        app.handle_key(KeyEvent::new(code, modifiers));
+    }
+
+    fn mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
+        app.handle_mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    #[test]
+    fn the_keyboard_and_the_mouse_select_copy_and_cut_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.txt");
+        std::fs::write(&path, "alpha beta\ngamma\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path).unwrap();
+        let shift = KeyModifiers::SHIFT;
+        press(&mut app, KeyCode::Right, shift);
+        press(&mut app, KeyCode::Right, shift);
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(app.clipboard.take().as_deref(), Some("al"));
+        press(&mut app, KeyCode::Down, shift);
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
+        assert_eq!(app.clipboard.take().as_deref(), Some("alpha beta\nga"));
+        assert_eq!(app.active_file().unwrap().lines, ["mma"]);
+        press(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        press(&mut app, KeyCode::Char('Z'), shift);
+        assert_eq!(app.active_file().unwrap().lines, ["Z"]);
+
+        // A drag from the first column to the third selects two characters.
+        app.editor_paste("\nsecond line");
+        app.regions.editor_body = Rect::new(30, 2, 60, 20);
+        app.regions.pane_bodies[0] = app.regions.editor_body;
+        let text_x = 30 + 1 + 4;
+        mouse(
+            &mut app,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            text_x,
+            4,
+        );
+        mouse(
+            &mut app,
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            text_x + 3,
+            4,
+        );
+        mouse(
+            &mut app,
+            MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            text_x + 3,
+            4,
+        );
+        assert_eq!(
+            app.active_file().unwrap().selected_text().as_deref(),
+            Some("sec")
+        );
+        press(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert!(app.active_file().unwrap().selection().is_none());
+    }
+
+    #[test]
+    fn pdf_tabs_turn_their_pages_with_keys_and_the_wheel() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("manual.pdf");
+        std::fs::write(&path, crate::editor::sample_pdf(3)).unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path).unwrap();
+        let page = |app: &App| app.active_file().unwrap().page().unwrap().0;
+        press(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(page(&app), 2);
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(page(&app), 2, "the last page");
+        press(&mut app, KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(page(&app), 0);
+        app.regions.pane_bodies[0] = Rect::new(30, 2, 60, 20);
+        mouse(&mut app, MouseEventKind::ScrollDown, 40, 5);
+        mouse(&mut app, MouseEventKind::ScrollDown, 40, 5);
+        assert_eq!(page(&app), 1, "one page per turn of the wheel");
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert!(app.open_files.is_empty());
+    }
+
+    #[test]
+    fn long_dialogs_scroll_with_the_keys_and_the_wheel() {
+        let mut app = test_app();
+        press(&mut app, KeyCode::F(1), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(app.overlay_scroll, 11);
+        mouse(&mut app, MouseEventKind::ScrollUp, 10, 10);
+        assert_eq!(app.overlay_scroll, 8);
+        press(&mut app, KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(app.overlay_scroll, 0);
     }
 
     #[test]

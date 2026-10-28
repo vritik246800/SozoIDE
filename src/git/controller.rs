@@ -10,7 +10,7 @@ use ratatui::layout::Rect;
 
 use crate::{
     animation::InterfaceMotion,
-    git::{GitAction, GitPanel, GitTab},
+    git::{DiffRow, GitAction, GitPanel, GitTab},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,10 +37,22 @@ pub enum GitUiAction {
     Push,
     ShowDiff,
     Inspect,
-    LineHistory,
-    FileHistory,
-    VisualFileHistory,
     Checkout,
+    /// A branch clicked in the Branches tree: switch to it, after the confirmation.
+    Branch(usize),
+    /// A file clicked in the Launchpad: its diff.
+    OpenChange(usize),
+    /// A row clicked in the Diff tab: a file or hunk header folds and unfolds.
+    DiffRow(usize),
+    NextHunk,
+    PreviousHunk,
+    NextFile,
+    PreviousFile,
+    ToggleSplit,
+    StageDiff,
+    UnstageDiff,
+    /// Opens the file of the diff in the editor.
+    OpenFile,
     Submit,
     Cancel,
 }
@@ -58,7 +70,8 @@ pub struct GitController {
     pub mode: GitMode,
     pub motion: InterfaceMotion<GitTab>,
     pub operation: bool,
-    pub current_file: Option<PathBuf>,
+    /// A file the Diff tab asked to open in the editor; the app opens it.
+    pub open_request: Option<PathBuf>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -70,13 +83,12 @@ impl GitController {
             mode: GitMode::None,
             motion: InterfaceMotion::new(Instant::now(), GitTab::Changes),
             operation: false,
-            current_file: None,
+            open_request: None,
             task: None,
         }
     }
 
-    pub fn open(&mut self, current_file: Option<PathBuf>) {
-        self.current_file = current_file;
+    pub fn open(&mut self) {
         if !self.operation {
             self.spawn(GitAction::Refresh, None);
         }
@@ -129,11 +141,13 @@ impl GitController {
             let Ok(mut panel) = self.panel.try_lock() else {
                 return true;
             };
+            let tab = panel.active_tab;
+            let changes = matches!(tab, GitTab::Changes | GitTab::Launchpad);
             match key.code {
                 KeyCode::Tab => {
                     let index = GitTab::ALL
                         .iter()
-                        .position(|tab| *tab == panel.active_tab)
+                        .position(|other| *other == tab)
                         .unwrap_or(0);
                     panel.change_tab_by_index((index + 1) % GitTab::ALL.len());
                     None
@@ -146,18 +160,45 @@ impl GitController {
                     panel.select_next();
                     None
                 }
-                KeyCode::Enter => match panel.active_tab {
-                    GitTab::Changes => Some(GitUiAction::ShowDiff),
+                KeyCode::PageUp => {
+                    let target = panel.selected.saturating_sub(10);
+                    panel.select(target);
+                    None
+                }
+                KeyCode::PageDown => {
+                    let target = panel.selected + 10;
+                    panel.select(target);
+                    None
+                }
+                KeyCode::Home => {
+                    panel.select(0);
+                    None
+                }
+                KeyCode::End => {
+                    panel.select(usize::MAX);
+                    None
+                }
+                KeyCode::Enter => match tab {
+                    GitTab::Changes | GitTab::Launchpad => Some(GitUiAction::ShowDiff),
                     GitTab::CommitGraph => Some(GitUiAction::Inspect),
                     GitTab::Branches => Some(GitUiAction::Checkout),
+                    GitTab::Diff => Some(GitUiAction::DiffRow(panel.selected)),
+                    GitTab::Inspect => None,
+                },
+                KeyCode::Char('s') if changes => Some(GitUiAction::Stage),
+                KeyCode::Char('u') if changes => Some(GitUiAction::Unstage),
+                KeyCode::Char('c') if changes => Some(GitUiAction::OpenCommit),
+                KeyCode::Char(character) if tab == GitTab::Diff => match character {
+                    'n' => Some(GitUiAction::NextHunk),
+                    'p' => Some(GitUiAction::PreviousHunk),
+                    ']' => Some(GitUiAction::NextFile),
+                    '[' => Some(GitUiAction::PreviousFile),
+                    'v' => Some(GitUiAction::ToggleSplit),
+                    's' => Some(GitUiAction::StageDiff),
+                    'u' => Some(GitUiAction::UnstageDiff),
+                    'o' => Some(GitUiAction::OpenFile),
                     _ => None,
                 },
-                KeyCode::Char('s') if panel.active_tab == GitTab::Changes => {
-                    Some(GitUiAction::Stage)
-                }
-                KeyCode::Char('u') if panel.active_tab == GitTab::Changes => {
-                    Some(GitUiAction::Unstage)
-                }
                 _ => None,
             }
         };
@@ -203,17 +244,28 @@ impl GitController {
     }
 
     pub fn action(&mut self, action: GitUiAction) {
+        // Choices that only move the view, made at once on the panel.
+        let local = |controller: &mut Self, change: &dyn Fn(&mut GitPanel)| {
+            if let Ok(mut panel) = controller.panel.try_lock() {
+                change(&mut panel);
+            }
+        };
         match action {
-            GitUiAction::Tab(tab) => {
-                if let Ok(mut panel) = self.panel.try_lock() {
-                    panel.change_tab(tab);
+            GitUiAction::Tab(tab) => local(self, &|panel| panel.change_tab(tab)),
+            GitUiAction::Select(index) => local(self, &|panel| panel.select(index)),
+            GitUiAction::DiffRow(index) => local(self, &|panel| {
+                let header = matches!(
+                    panel.diff_rows().get(index),
+                    Some(DiffRow::File(_) | DiffRow::Hunk(..))
+                );
+                panel.select(index);
+                if header {
+                    panel.toggle_fold(index);
                 }
-            }
-            GitUiAction::Select(index) => {
-                if let Ok(mut panel) = self.panel.try_lock() {
-                    panel.select(index);
-                }
-            }
+            }),
+            GitUiAction::NextHunk => local(self, &|panel| panel.jump_hunk(true)),
+            GitUiAction::PreviousHunk => local(self, &|panel| panel.jump_hunk(false)),
+            GitUiAction::ToggleSplit => local(self, &GitPanel::toggle_split),
             GitUiAction::Refresh => self.spawn(GitAction::Refresh, None),
             GitUiAction::Stage => self.spawn(GitAction::StageSelected, None),
             GitUiAction::Unstage => self.spawn(GitAction::UnstageSelected, None),
@@ -224,15 +276,33 @@ impl GitController {
             GitUiAction::Pull => self.spawn(GitAction::Pull, None),
             GitUiAction::Push => self.spawn(GitAction::Push, None),
             GitUiAction::ShowDiff => self.spawn(GitAction::ShowDiff, Some(GitTab::Diff)),
+            GitUiAction::OpenChange(index) => {
+                local(self, &|panel| panel.select(index));
+                self.spawn(GitAction::ShowDiff, Some(GitTab::Diff));
+            }
             GitUiAction::Inspect => self.spawn(GitAction::InspectSelected, Some(GitTab::Inspect)),
-            GitUiAction::LineHistory => self.load_file(true, GitTab::LineHistory),
-            GitUiAction::FileHistory => self.load_file(false, GitTab::FileHistory),
-            GitUiAction::VisualFileHistory => self.load_file(false, GitTab::VisualFileHistory),
+            GitUiAction::NextFile => self.spawn(GitAction::DiffNeighbour(true), None),
+            GitUiAction::PreviousFile => self.spawn(GitAction::DiffNeighbour(false), None),
+            GitUiAction::StageDiff => self.spawn(GitAction::StageDiff, None),
+            GitUiAction::UnstageDiff => self.spawn(GitAction::UnstageDiff, None),
+            GitUiAction::OpenFile => {
+                self.open_request = self.panel.try_lock().ok().and_then(|panel| {
+                    let row = panel.diff_rows().get(panel.selected).copied();
+                    let file = panel.diff.files.get(row.map_or(0, DiffRow::file))?;
+                    Some(panel.repository_root.as_ref()?.join(&file.path))
+                });
+            }
+            GitUiAction::Branch(index) => {
+                local(self, &|panel| panel.select(index));
+                self.action(GitUiAction::Checkout);
+            }
             GitUiAction::Checkout => {
-                let branch =
-                    self.panel.try_lock().ok().and_then(|panel| {
-                        panel.selected_branch().map(|branch| branch.name.clone())
-                    });
+                let branch = self.panel.try_lock().ok().and_then(|panel| {
+                    panel
+                        .selected_branch()
+                        .filter(|branch| !branch.is_head)
+                        .map(|branch| branch.name.clone())
+                });
                 if let Some(branch) = branch {
                     self.open_mode(GitMode::ConfirmCheckout(branch));
                 }
@@ -241,7 +311,7 @@ impl GitController {
                 GitMode::Commit(message) => {
                     self.close_mode();
                     if !message.trim().is_empty() {
-                        self.spawn(GitAction::Commit(message), Some(GitTab::Changes));
+                        self.spawn(GitAction::Commit(message), None);
                     }
                 }
                 GitMode::Rebase(target) if !target.trim().is_empty() => {
@@ -251,7 +321,7 @@ impl GitController {
                 GitMode::Rebase(_) => self.close_mode(),
                 GitMode::ConfirmRebase(target) => {
                     self.close_mode();
-                    self.spawn(GitAction::Rebase(target), Some(GitTab::Health));
+                    self.spawn(GitAction::Rebase(target), Some(GitTab::Launchpad));
                 }
                 GitMode::ConfirmCheckout(branch) => {
                     self.close_mode();
@@ -270,23 +340,6 @@ impl GitController {
 
     fn close_mode(&mut self) {
         self.motion.close_dialog(Instant::now());
-    }
-
-    fn load_file(&mut self, line: bool, tab: GitTab) {
-        let selected_change = self
-            .panel
-            .try_lock()
-            .ok()
-            .and_then(|panel| panel.selected_change().map(|change| change.path.clone()));
-        let path = self.current_file.clone().or(selected_change);
-        if let Some(path) = path {
-            let action = if line {
-                GitAction::LineHistorySelected
-            } else {
-                GitAction::FileHistorySelected
-            };
-            self.spawn_with_path(action, path, tab);
-        }
     }
 
     fn spawn(&mut self, action: GitAction, tab: Option<GitTab>) {
@@ -308,29 +361,6 @@ impl GitController {
                 let _ = panel.diff_commit(&commit.id);
             }
             if let Some(tab) = tab {
-                panel.change_tab(tab);
-            }
-        }));
-    }
-
-    fn spawn_with_path(&mut self, action: GitAction, path: PathBuf, tab: GitTab) {
-        if self.operation {
-            return;
-        }
-        let panel = Arc::clone(&self.panel);
-        self.operation = true;
-        self.task = Some(thread::spawn(move || {
-            let Ok(mut panel) = panel.lock() else {
-                return;
-            };
-            let result = match action {
-                GitAction::LineHistorySelected => panel.load_line_history(path),
-                GitAction::FileHistorySelected => panel.load_file_history(path),
-                _ => Ok(()),
-            };
-            if let Err(error) = result {
-                panel.last_error = Some(error.to_string());
-            } else {
                 panel.change_tab(tab);
             }
         }));
@@ -374,5 +404,100 @@ mod tests {
         assert!(matches!(controller.mode, GitMode::Commit(_)));
         controller.tick_at(closed + DIALOG.close);
         assert_eq!(controller.mode, GitMode::None);
+    }
+
+    /// Waits for the operation and lets a closing dialog finish, which swallows keys meanwhile.
+    fn finish(controller: &mut GitController) {
+        while controller.operation || controller.mode != GitMode::None {
+            controller.tick_at(Instant::now() + DIALOG.close);
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap()
+            .status;
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn clicking_a_branch_asks_to_switch_and_the_diff_answers_its_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.name", "Test User"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "Base"]);
+        git(root, &["branch", "feature/login"]);
+        let mut controller = GitController::new(root.to_path_buf());
+        let feature = {
+            let panel = controller.panel.lock().unwrap();
+            panel
+                .branches
+                .iter()
+                .position(|branch| branch.name == "feature/login")
+                .unwrap()
+        };
+        let main = 1 - feature;
+        controller.action(GitUiAction::Tab(GitTab::Branches));
+        // The branch already checked out asks nothing.
+        controller.action(GitUiAction::Branch(main));
+        assert_eq!(controller.mode, GitMode::None);
+        controller.action(GitUiAction::Branch(feature));
+        assert_eq!(
+            controller.mode,
+            GitMode::ConfirmCheckout("feature/login".to_owned())
+        );
+        controller.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        finish(&mut controller);
+        assert_eq!(
+            controller
+                .panel
+                .lock()
+                .unwrap()
+                .launchpad
+                .current_branch
+                .as_deref(),
+            Some("feature/login")
+        );
+
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        controller.action(GitUiAction::Refresh);
+        finish(&mut controller);
+        controller.action(GitUiAction::Tab(GitTab::Changes));
+        controller.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        finish(&mut controller);
+        assert_eq!(controller.panel.lock().unwrap().active_tab, GitTab::Diff);
+        let key = |controller: &mut GitController, character| {
+            controller.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        };
+        key(&mut controller, 'n');
+        assert_eq!(controller.panel.lock().unwrap().selected, 1);
+        controller.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            controller.panel.lock().unwrap().entry_count(),
+            2,
+            "the hunk folded"
+        );
+        key(&mut controller, 'v');
+        assert!(controller.panel.lock().unwrap().diff_split);
+        key(&mut controller, 'o');
+        assert_eq!(
+            controller
+                .open_request
+                .as_deref()
+                .map(|path| path.ends_with("a.txt")),
+            Some(true)
+        );
+        key(&mut controller, 's');
+        finish(&mut controller);
+        assert_eq!(controller.panel.lock().unwrap().status.staged.len(), 1);
     }
 }

@@ -8,7 +8,9 @@ import screens from '../data/screens.json';
 // The ASCII art, the author and the version come from the app itself, so the site never drifts
 // from it: a new release shows its version on the splash of the hero.
 const branding = readFileSync(resolve(process.cwd(), '../src/branding.rs'), 'utf8');
-const logo = [...branding.matchAll(/^\s*r"(.*)",$/gm)].map((match) => match[1]).join('\n');
+// Only the flower of the splash: branding.rs also keeps a larger one for the About dialog.
+const art = branding.match(/pub const ASCII_LOGO: &\[&str\] = &\[\n([\s\S]*?)\n\];/)?.[1] ?? '';
+const logo = [...art.matchAll(/^\s*r"(.*)",$/gm)].map((match) => match[1]).join('\n');
 const author = branding.match(/AUTHOR: &str = "(.*)";/)?.[1];
 const version = readFileSync(resolve(process.cwd(), '../Cargo.toml'), 'utf8').match(/^version = "(.*)"$/m)?.[1];
 if (!logo || !author || !version) throw new Error('Could not read the branding from src/branding.rs and Cargo.toml');
@@ -82,17 +84,17 @@ const themeCss = [
 
 const features = [
   { keys: [['Ctrl', 'B']], title: 'Explorer and editor',
-    text: 'Browse the project tree, with an icon for every file type, and open files in tabs that scroll when there are many; drag a tab to an edge of the editor to split it side by side or stacked, each side with its own tabs. Long lines scroll sideways. Edits save themselves after two idle seconds and before you switch tabs or quit. Syntax highlighting covers more than 30 languages, from Rust and Go to SQL, Astro and Mermaid, with its own colour for keywords, types, functions, strings and numbers. Markdown is drawn as you read it: headings in their own size and colour, quotes, rules, framed code blocks, Mermaid diagrams in box-drawing characters and tables with inline formatting, with the source back under the cursor or the mouse. Images render inline on Sixel, Kitty and iTerm2 terminals.' },
+    text: 'Browse the project tree, with an icon for every file type, and open files in tabs that scroll when there are many; drag a tab to an edge of the editor to split it side by side or stacked, each side with its own tabs. Long lines scroll sideways. Select text with the mouse or Shift and the arrows, and copy it with Ctrl+C. Edits save themselves after two idle seconds and before you switch tabs or quit. Syntax highlighting covers more than 30 languages, from Rust and Go to SQL, JSP, Astro and Mermaid, and configuration files by their name, from .env and Cargo.lock to Dockerfile, with its own colour for keywords, types, functions, strings and numbers, down to the last line of long files. Markdown is drawn as you read it: headings in their own size and colour, quotes, rules, framed code blocks, Mermaid diagrams in box-drawing characters (C4, ZenUML, Kanban, Radar and Treemap too) and tables with inline formatting, with the source back under the cursor or the mouse. Images render inline on Sixel, Kitty and iTerm2 terminals, and PDF files open in a tab, one page at a time.' },
   { keys: [['Ctrl', 'J'], ['Ctrl', 'Shift', 'B']], title: 'Two terminals',
     text: 'A bottom and a right terminal, each with its own shell. The right terminal opens with Ctrl+Shift+B on Windows, Ctrl+Option+B on macOS and Ctrl+Alt+B on Linux. Scroll back with the mouse wheel or Page Up and Page Down, and drag the dividers to resize every panel.' },
   { keys: [['Ctrl', 'G']], title: 'Source Control',
-    text: 'Stage and commit, follow the commit graph and branches, read diffs and the history of a line or a file, and check the health of the repository. Pull is fast-forward only, and rebase or checkout ask before they run.' },
+    text: 'Stage and commit, follow the commit graph, and see every branch in a tree grouped by remote and folder: click one to switch to it. The Launchpad shows your branch, its upstream, how far ahead and behind it is and the files waiting to be committed. The diff numbers its lines, folds its hunks, goes side by side and moves to the next changed file. Pull is fast-forward only, and rebase or checkout ask before they run.' },
   { keys: [['Ctrl', 'D']], title: 'Database',
     text: 'Connect to SQLite, PostgreSQL and MySQL, write a query and run it with Ctrl+Enter or F5. Results show the rows, the affected count and the duration, and keep a history. Saved connections never write passwords to disk.' },
   { keys: [['Ctrl', 'P'], ['Ctrl', 'Shift', 'P']], title: 'Search',
     text: 'Find text in the open file or across the whole folder. Files listed in .gitignore stay out of the results.' },
   { keys: [['F1'], ['F2']], title: 'Help and About',
-    text: 'Every command in one list, with the keys your system types (fn+F1 on a Mac). A short tutorial on the first start, notes on what is new after each update, and in About the flower grows and a button opens the repository to contribute.' },
+    text: 'Every command in boxed sections, in the colours of your terminal and with the keys your system types (fn+F1 on a Mac). A short tutorial on the first start, notes on what is new in every version since yours after an update, and in About the flower grows in the middle and a button opens the repository to contribute.' },
 ];
 
 // The title rises word by word (Docs/development/DESIGN.md §2.5); the last three words take the accent.

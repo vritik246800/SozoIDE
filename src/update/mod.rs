@@ -24,7 +24,7 @@ mod notes;
 
 use install::Package;
 pub use install::install_and_restart;
-pub use notes::NOTES;
+pub use notes::{NOTES, Notes};
 
 use crate::branding::REPOSITORY;
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
@@ -77,12 +77,21 @@ impl Settings {
     }
 }
 
-/// What greets the user after the splash (F17, F18).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What greets the user after the splash (F17, F18): what's new comes with the version that
+/// ran before.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Welcome {
     None,
     Tutorial,
-    WhatsNew,
+    WhatsNew(String),
+}
+
+/// The notes of the versions after `seen`, up to this one, newest first.
+pub fn notes_since(seen: &str) -> Vec<&'static Notes> {
+    NOTES
+        .iter()
+        .filter(|notes| is_newer(notes.version, seen) && !is_newer(notes.version, CURRENT))
+        .collect()
 }
 
 pub struct Updater {
@@ -192,7 +201,7 @@ impl Updater {
             }
             Some(seen) if is_newer(CURRENT, seen) => {
                 count("updated");
-                Welcome::WhatsNew
+                Welcome::WhatsNew(seen.to_owned())
             }
             Some(_) => Welcome::None,
         };
@@ -389,7 +398,7 @@ mod tests {
         assert_eq!(updater.welcome(), Welcome::None);
 
         fs::write(&path, "skipped = \"9.9.9\"\nseen = \"0.0.1\"\n").unwrap();
-        assert_eq!(updater.welcome(), Welcome::WhatsNew);
+        assert_eq!(updater.welcome(), Welcome::WhatsNew("0.0.1".to_owned()));
         assert_eq!(updater.welcome(), Welcome::None);
         let mut skipping = updater_in(directory.path());
         skipping.version = "9.9.8".to_string();
@@ -418,8 +427,27 @@ mod tests {
 
     #[test]
     fn release_notes_belong_to_this_version() {
-        assert_eq!(NOTES.version, CURRENT);
-        assert!(!NOTES.new.is_empty());
+        assert_eq!(NOTES[0].version, CURRENT);
+        assert!(!NOTES[0].new.is_empty());
+        assert!(
+            NOTES
+                .windows(2)
+                .all(|pair| is_newer(pair[0].version, pair[1].version)),
+            "newest first"
+        );
+    }
+
+    #[test]
+    fn an_update_shows_the_notes_of_every_version_since_the_one_that_ran() {
+        let versions = |seen| {
+            notes_since(seen)
+                .iter()
+                .map(|notes| notes.version)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(versions("0.3.1"), [CURRENT, "0.3.3", "0.3.2"]);
+        assert_eq!(versions("0.1.4").len(), NOTES.len());
+        assert!(versions(CURRENT).is_empty());
     }
 
     #[test]

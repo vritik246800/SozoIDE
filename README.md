@@ -18,13 +18,13 @@
 
 ## Features
 
-- **Explorer and editor** — every file shows an icon for its type; open files in tabs (the tab bar scrolls when there are many) and drag a tab to an edge of the editor to split it side by side or stacked, each side with its own tabs; drag tabs back to the other side to join them again. Long lines scroll sideways. Edits save themselves after two idle seconds and before you switch tabs or quit. Syntax highlighting for more than 30 languages, from Rust and Go to SQL, Astro and Mermaid, with its own colour for keywords, types, functions, strings, numbers and comments. Markdown is drawn as you read it: headings in their own size and colour, quotes, rules, framed code blocks, Mermaid diagrams in box-drawing characters, aligned tables with inline formatting, typographic quotes, *italic*, **bold** and ==highlight== — and the source comes back under the cursor or the mouse. Images render inline on Sixel, Kitty and iTerm2 terminals.
+- **Explorer and editor** — every file shows an icon for its type; open files in tabs (the tab bar scrolls when there are many) and drag a tab to an edge of the editor to split it side by side or stacked, each side with its own tabs; drag tabs back to the other side to join them again. Long lines scroll sideways. Select text with the mouse or `Shift` and the arrows, `Ctrl+A` for everything, and copy or cut it with `Ctrl+C` and `Ctrl+X`. Edits save themselves after two idle seconds and before you switch tabs or quit. Syntax highlighting for more than 30 languages, from Rust and Go to SQL, JSP, Astro and Mermaid, and for configuration files by their name (`.env`, `Cargo.lock`, `.config`, `.properties`, `Dockerfile`, `Makefile`, `.gitignore`…), with its own colour for keywords, types, functions, strings, numbers and comments, down to the last line of long files. Markdown is drawn as you read it: headings in their own size and colour, quotes, rules, framed code blocks, Mermaid diagrams in box-drawing characters (flowcharts, sequence, class, state, C4, ZenUML, Kanban, Radar, Treemap and more), aligned tables with inline formatting, typographic quotes, *italic*, **bold** and ==highlight== — and the source comes back under the cursor or the mouse. Images render inline on Sixel, Kitty and iTerm2 terminals, and PDF files open in a tab as they are, one page at a time.
 - **Two terminals** — a bottom and a right terminal, each with its own shell, with scrollback on the mouse wheel or Page Up and Page Down. Drag the dividers to resize every panel.
-- **Source Control** — stage and commit, follow the commit graph and branches, read diffs and the history of a line or a file, and check repository health. Pull is fast-forward only; rebase and checkout ask before they run.
+- **Source Control** — stage and commit, follow the commit graph, and see every branch in a tree grouped by remote and folder: click one to switch to it. The Launchpad shows your branch, its upstream, how far ahead and behind it is, and the staged, unstaged and untracked files, each a click away from what resolves it. The diff numbers its lines, folds its hunks, goes side by side, and moves to the next or previous changed file. Pull is fast-forward only; rebase and checkout ask before they run.
 - **Database** — connect to SQLite, PostgreSQL and MySQL, run queries with `Ctrl+Enter` or `F5`, and read rows, affected counts, duration and history. Saved connections never write passwords to disk.
 - **Search** — in the open file or across the whole folder; files listed in `.gitignore` stay out of the results.
 - **Your terminal's look** — SozoIDE has no colors of its own. It draws with the 16 ANSI colors of your terminal theme, and shows each shortcut the way your system types it (`fn+F1` and `Ctrl+Option+B` on macOS, `Ctrl+Alt+B` on Linux).
-- **A guided start** — a short tutorial on the first start (skip it with `Esc`), and a note with what is new and what was fixed after each update.
+- **A guided start** — a short tutorial on the first start (skip it with `Esc`), and after an update a note with what is new and what was fixed in every version since the one you had. `F1` lists every key in boxed sections, in your terminal's colours.
 
 ## Install
 
@@ -80,6 +80,13 @@ sozo --version
 | Mouse wheel on the tabs, `‹` / `›` | Scroll the tab bar |
 | Drag a divider | Resize the Explorer and the terminals |
 | Drag a tab | To an edge of the editor: split it, each side with its own tabs; to the other side: move it there (a side without tabs closes) |
+| `Shift` + arrows, `Home`, `End`, or drag the mouse | Select text in the editor |
+| `Ctrl+A` | Select all the text |
+| `Ctrl+C` / `Ctrl+X` | Copy / cut the selection to the system clipboard |
+| `Page Down` / `→` / mouse wheel, `Page Up` / `←`, `Home` / `End` (PDF) | Next page, previous page, first and last page |
+| Click a branch (Source Control) | Switch to it, after a confirmation |
+| `n` / `p`, `[` / `]`, `v`, `s` / `u`, `o` (Diff) | Next / previous hunk, previous / next changed file, side by side, stage / unstage, open the file |
+| `Up` / `Down` or the mouse wheel (Help, What's new) | Scroll a dialog taller than the terminal |
 | `G` (in About) | Open the repository to contribute |
 
 ### Motion
@@ -134,7 +141,7 @@ npm run dev
 ## Project layout
 
 ```text
-src/          the application: app, editor, terminal, git, database, update, ui, animation
+src/          the application: app, editor (highlight, Markdown, Mermaid, PDF), terminal, git, database, update, ui, animation
 tests/        CLI, end-to-end and interaction tests in a real PTY
 packaging/    native installers for Linux, macOS and Windows
 site/         landing page (Astro), published to GitHub Pages; site/scripts captures its SozoIDE screens

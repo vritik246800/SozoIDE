@@ -1,4 +1,5 @@
 use std::{
+    io::Write,
     path::PathBuf,
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -12,7 +13,7 @@ use crate::{
     editor::{OpenFile, SearchState},
     git::controller::GitController,
     terminal::Terminal,
-    update::{UpdateState, Updater, Welcome},
+    update::{Notes, UpdateState, Updater, Welcome, notes_since},
 };
 
 mod explorer;
@@ -68,6 +69,16 @@ pub struct App {
     /// The tutorial or what's new, shown once the splash is gone (F17, F18).
     pub welcome: Welcome,
     pub tutorial_step: usize,
+    /// The notes What's new lists: every version since the one that ran before.
+    pub notes: Vec<&'static Notes>,
+    /// The first row of a dialog taller than the screen (Help, What's new).
+    pub overlay_scroll: u16,
+    /// Text copied in the editor, for `main` to hand to the terminal (OSC 52).
+    pub clipboard: Option<String>,
+    /// A mouse drag that started in the editor text selects.
+    selecting: bool,
+    /// The last time the wheel turned a PDF page: one page per gesture, not per event.
+    page_turned: Option<Instant>,
     pub split: Option<Split>,
     pub tab_bars: [TabBar; 2],
     tab_drag: Option<TabDrag>,
@@ -124,6 +135,11 @@ impl App {
             updater,
             welcome,
             tutorial_step: 0,
+            notes: Vec::new(),
+            overlay_scroll: 0,
+            clipboard: None,
+            selecting: false,
+            page_turned: None,
             split: None,
             tab_bars: [TabBar::default(); 2],
             tab_drag: None,
@@ -177,6 +193,13 @@ impl App {
         }
         self.database.tick_at(now);
         self.git.tick_at(now);
+        // The Diff tab asked for its file in the editor.
+        if let Some(path) = self.git.open_request.take() {
+            match self.open_file(path) {
+                Ok(()) => self.show_git = false,
+                Err(error) => self.status = error.to_string(),
+            }
+        }
         self.tick_update();
     }
 
@@ -195,8 +218,11 @@ impl App {
         let free = self.overlay == Overlay::None && !self.splash_visible && self.search.is_none();
         if free && self.welcome != Welcome::None {
             let overlay = match std::mem::replace(&mut self.welcome, Welcome::None) {
-                Welcome::Tutorial => Overlay::Tutorial,
-                _ => Overlay::WhatsNew,
+                Welcome::WhatsNew(seen) => {
+                    self.notes = notes_since(&seen);
+                    Overlay::WhatsNew
+                }
+                _ => Overlay::Tutorial,
             };
             self.tutorial_step = 0;
             self.open_overlay(overlay);
@@ -225,6 +251,16 @@ impl App {
             Ok(_) => format!("Opened {}", crate::branding::REPOSITORY),
             Err(error) => format!("Could not open the browser: {error}"),
         };
+    }
+
+    /// Copies `text` to the system clipboard: the tool of this system now and, from `main`,
+    /// the terminal (OSC 52), which also reaches it over SSH.
+    pub(super) fn copy(&mut self, text: String) {
+        if !cfg!(test) {
+            system_clipboard(text.clone());
+        }
+        self.status = format!("Copied {} characters", text.chars().count());
+        self.clipboard = Some(text);
     }
 
     pub fn icon(&self, name: &str) -> char {
@@ -457,6 +493,67 @@ impl App {
     }
 }
 
+/// The terminal sequence that puts `text` on the clipboard (OSC 52).
+pub fn clipboard_sequence(text: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::new();
+    for chunk in text.as_bytes().chunks(3) {
+        let bits = chunk.iter().enumerate().fold(0u32, |bits, (index, byte)| {
+            bits | u32::from(*byte) << (16 - 8 * index)
+        });
+        for index in 0..4 {
+            encoded.push(if index <= chunk.len() {
+                char::from(ALPHABET[(bits >> (18 - 6 * index) & 63) as usize])
+            } else {
+                '='
+            });
+        }
+    }
+    format!("\x1b]52;c;{encoded}\x07")
+}
+
+/// Hands `text` to the clipboard tool of this system, trying the next one when a tool is
+/// missing (Wayland, then X11, on Linux).
+fn system_clipboard(text: String) {
+    let tools: &[&[&str]] = match std::env::consts::OS {
+        "macos" => &[&["pbcopy"]],
+        "windows" => &[&["clip"]],
+        _ => &[
+            &["wl-copy"],
+            &["xclip", "-selection", "clipboard"],
+            &["xsel", "--clipboard", "--input"],
+        ],
+    };
+    // `clip` reads UTF-16 when the text starts with its byte order mark.
+    let bytes = if cfg!(windows) {
+        [0xFF, 0xFE]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect()
+    } else {
+        text.into_bytes()
+    };
+    std::thread::spawn(move || {
+        for tool in tools {
+            let Ok(mut child) = Command::new(tool[0])
+                .args(&tool[1..])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            else {
+                continue;
+            };
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(&bytes);
+            }
+            if child.wait().is_ok_and(|status| status.success()) {
+                break;
+            }
+        }
+    });
+}
+
 /// The command that opens a link in the default browser of `os`.
 fn opener(os: &str, url: &str) -> Command {
     let mut command = match os {
@@ -494,6 +591,13 @@ mod tests {
         let (windows, arguments) = program("windows");
         assert_eq!(windows, "rundll32");
         assert_eq!(arguments.last().unwrap(), "https://example.com");
+    }
+
+    #[test]
+    fn copied_text_reaches_the_terminal_in_base64() {
+        assert_eq!(clipboard_sequence("hello"), "\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(clipboard_sequence("é\n"), "\x1b]52;c;w6kK\x07");
+        assert_eq!(clipboard_sequence(""), "\x1b]52;c;\x07");
     }
 
     #[test]

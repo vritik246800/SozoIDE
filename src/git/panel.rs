@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail};
 use git2::Repository;
@@ -15,17 +15,14 @@ pub struct GitPanel {
     pub commits: Vec<CommitInfo>,
     pub branches: Vec<BranchInfo>,
     pub launchpad: LaunchpadSummary,
-    pub health: HealthInfo,
     pub diff: DiffView,
+    /// Folded files and hunks of the diff, and whether it is side by side.
+    pub diff_folds: DiffFolds,
+    pub diff_split: bool,
     pub inspected_commit: Option<CommitDetails>,
-    pub line_history: Vec<BlameLine>,
-    pub file_history: Vec<FileHistoryEntry>,
-    pub visual_file_history: Vec<VisualHistoryEntry>,
     pub status_message: String,
     pub last_error: Option<String>,
     pub last_output: Option<GitCommandOutput>,
-    line_history_path: Option<PathBuf>,
-    file_history_path: Option<PathBuf>,
 }
 
 impl GitPanel {
@@ -39,17 +36,13 @@ impl GitPanel {
             commits: Vec::new(),
             branches: Vec::new(),
             launchpad: LaunchpadSummary::default(),
-            health: HealthInfo::default(),
             diff: DiffView::default(),
+            diff_folds: DiffFolds::new(),
+            diff_split: false,
             inspected_commit: None,
-            line_history: Vec::new(),
-            file_history: Vec::new(),
-            visual_file_history: Vec::new(),
             status_message: String::new(),
             last_error: None,
             last_output: None,
-            line_history_path: None,
-            file_history_path: None,
         };
         if let Err(error) = panel.refresh() {
             panel.last_error = Some(format!("{error:#}"));
@@ -74,21 +67,14 @@ impl GitPanel {
 
     pub fn entry_count(&self) -> usize {
         match self.active_tab {
-            GitTab::Changes => {
-                self.status.staged.len() + self.status.unstaged.len() + self.status.untracked.len()
-            }
+            GitTab::Changes | GitTab::Launchpad => self.changes().count(),
             GitTab::CommitGraph => self.commits.len(),
             GitTab::Branches => self.branches.len(),
-            GitTab::Diff => self.diff.text.lines().count(),
-            GitTab::Launchpad => 0,
+            GitTab::Diff => self.diff_rows().len(),
             GitTab::Inspect => self
                 .inspected_commit
                 .as_ref()
                 .map_or(0, |details| details.files.len()),
-            GitTab::LineHistory => self.line_history.len(),
-            GitTab::FileHistory => self.file_history.len(),
-            GitTab::VisualFileHistory => self.visual_file_history.len(),
-            GitTab::Health => self.health.conflicts.len(),
         }
     }
 
@@ -105,13 +91,17 @@ impl GitPanel {
         self.select(self.selected.saturating_sub(1));
     }
 
-    pub fn selected_change(&self) -> Option<&ChangeEntry> {
+    /// Staged, then unstaged, then untracked changes: the order of Changes and Launchpad.
+    pub fn changes(&self) -> impl Iterator<Item = &ChangeEntry> {
         self.status
             .staged
             .iter()
             .chain(&self.status.unstaged)
             .chain(&self.status.untracked)
-            .nth(self.selected)
+    }
+
+    pub fn selected_change(&self) -> Option<&ChangeEntry> {
+        self.changes().nth(self.selected)
     }
 
     pub fn selected_commit(&self) -> Option<&CommitInfo> {
@@ -122,8 +112,76 @@ impl GitPanel {
         self.branches.get(self.selected)
     }
 
-    pub fn selected_file_history(&self) -> Option<&FileHistoryEntry> {
-        self.file_history.get(self.selected)
+    /// The rows of the Diff tab as they are folded and laid out now.
+    pub fn diff_rows(&self) -> Vec<DiffRow> {
+        self.diff.rows(&self.diff_folds, self.diff_split)
+    }
+
+    /// The change the diff shows, by its place in `changes`.
+    pub fn diff_change(&self) -> Option<usize> {
+        let path = self.diff.path.as_ref()?;
+        let area = match self.diff.kind {
+            DiffKind::Staged => ChangeArea::Staged,
+            DiffKind::Unstaged => ChangeArea::Unstaged,
+            DiffKind::Untracked => ChangeArea::Untracked,
+            DiffKind::None | DiffKind::Commit => return None,
+        };
+        self.changes()
+            .position(|change| change.path == *path && change.area == area)
+    }
+
+    /// Folds or unfolds the file or hunk of diff row `index`.
+    pub fn toggle_fold(&mut self, index: usize) {
+        let Some(row) = self.diff_rows().get(index).copied() else {
+            return;
+        };
+        let key = (row.file(), row.hunk());
+        if !self.diff_folds.remove(&key) {
+            self.diff_folds.insert(key);
+        }
+        // The cursor stays on the row that was folded.
+        let rows = self.diff_rows();
+        self.selected = rows
+            .iter()
+            .position(|other| {
+                (other.file(), other.hunk()) == key
+                    && matches!(other, DiffRow::File(_) | DiffRow::Hunk(..))
+            })
+            .unwrap_or(0);
+    }
+
+    /// The next (`forward`) or previous file or hunk header in the diff.
+    pub fn jump_hunk(&mut self, forward: bool) {
+        let rows = self.diff_rows();
+        let header = |index: &usize| matches!(rows[*index], DiffRow::Hunk(..) | DiffRow::File(_));
+        let target = if forward {
+            (self.selected + 1..rows.len()).find(header)
+        } else {
+            (0..self.selected).rev().find(header)
+        };
+        if let Some(target) = target {
+            self.selected = target;
+        }
+    }
+
+    /// Unified or side by side; the cursor keeps its hunk.
+    pub fn toggle_split(&mut self) {
+        let row = self.diff_rows().get(self.selected).copied();
+        self.diff_split = !self.diff_split;
+        if let Some(row) = row {
+            let key = (row.file(), row.hunk());
+            self.selected = self
+                .diff_rows()
+                .iter()
+                .position(|other| (other.file(), other.hunk()) == key)
+                .unwrap_or(0);
+        }
+    }
+
+    fn show_diff(&mut self, diff: DiffView) {
+        self.diff = diff;
+        self.diff_folds.clear();
+        self.selected = 0;
     }
 
     pub fn refresh(&mut self) -> Result<()> {
@@ -132,8 +190,6 @@ impl GitPanel {
             .inspected_commit
             .as_ref()
             .map(|details| details.commit.id.clone());
-        let line_history_path = self.line_history_path.clone();
-        let file_history_path = self.file_history_path.clone();
 
         let Some(repo) = self.open_repository()? else {
             self.clear_repository_data();
@@ -145,47 +201,35 @@ impl GitPanel {
         let status = read_status(&repo).context("Could not read working-tree status.")?;
         let commits = read_commits(&repo).context("Could not read commits.")?;
         let branches = read_branches(&repo).context("Could not read branches.")?;
-        let launchpad = read_launchpad(&repo, &status, commits.first().cloned())
+        let launchpad = read_launchpad(&repo, commits.first().cloned())
             .context("Could not read launchpad summary.")?;
-        let health = read_health(
-            &repo,
-            &status,
-            launchpad.upstream.clone(),
-            launchpad.ahead,
-            launchpad.behind,
-        )
-        .context("Could not read repository health.")?;
 
         self.repository_root = Some(repository_root);
         self.status = status;
         self.commits = commits;
         self.branches = branches;
         self.launchpad = launchpad;
-        self.health = health;
-        self.select(self.selected);
 
         if let Some(id) = inspected_id {
             self.inspected_commit = Some(read_commit_details(&repo, &id)?);
         }
-        if let Some(path) = line_history_path {
-            self.line_history = read_line_history(&repo, &path)?;
-        }
-        if let Some(path) = file_history_path {
-            let (history, visual) = read_file_history(&repo, &path)?;
-            self.file_history = history;
-            self.visual_file_history = visual;
-        }
-        match (
+        let diff = match (
             previous_diff.kind,
             previous_diff.path,
             previous_diff.commit_id,
         ) {
-            (DiffKind::Commit, _, Some(id)) => self.diff = read_commit_diff(&repo, &id)?,
+            (DiffKind::Commit, _, Some(id)) => read_commit_diff(&repo, &id)?,
             (kind, Some(path), _) if kind != DiffKind::None => {
-                self.diff = read_change_diff(&repo, &path, kind)?;
+                read_change_diff(&repo, &path, kind)?
             }
-            _ => self.diff = DiffView::default(),
+            _ => DiffView::default(),
+        };
+        // The same diff keeps its folds; another one starts unfolded.
+        if diff.files.len() != self.diff.files.len() {
+            self.diff_folds.clear();
         }
+        self.diff = diff;
+        self.select(self.selected);
         Ok(())
     }
 
@@ -195,47 +239,31 @@ impl GitPanel {
             self.status_message = "No change selected.".to_string();
             return Ok(());
         };
+        self.diff_change_entry(&change)
+    }
+
+    fn diff_change_entry(&mut self, change: &ChangeEntry) -> Result<()> {
         let kind = match change.area {
             ChangeArea::Staged => DiffKind::Staged,
             ChangeArea::Unstaged => DiffKind::Unstaged,
             ChangeArea::Untracked => DiffKind::Untracked,
         };
         let repo = self.require_repository()?;
-        self.diff = read_change_diff(&repo, &change.path, kind)?;
+        let diff = read_change_diff(&repo, &change.path, kind)?;
+        self.show_diff(diff);
         Ok(())
     }
 
     pub fn diff_commit(&mut self, commit_id: &str) -> Result<()> {
         let repo = self.require_repository()?;
-        self.diff = read_commit_diff(&repo, commit_id)?;
+        let diff = read_commit_diff(&repo, commit_id)?;
+        self.show_diff(diff);
         Ok(())
     }
 
     pub fn inspect_commit(&mut self, commit_id: &str) -> Result<()> {
         let repo = self.require_repository()?;
         self.inspected_commit = Some(read_commit_details(&repo, commit_id)?);
-        Ok(())
-    }
-
-    pub fn load_line_history(&mut self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-        validate_repo_path(path)?;
-        let repo = self.require_repository()?;
-        self.line_history = read_line_history(&repo, path)?;
-        self.line_history_path = Some(path.to_path_buf());
-        self.selected = 0;
-        Ok(())
-    }
-
-    pub fn load_file_history(&mut self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-        validate_repo_path(path)?;
-        let repo = self.require_repository()?;
-        let (history, visual) = read_file_history(&repo, path)?;
-        self.file_history = history;
-        self.visual_file_history = visual;
-        self.file_history_path = Some(path.to_path_buf());
-        self.selected = 0;
         Ok(())
     }
 
@@ -301,8 +329,14 @@ impl GitPanel {
                     self.status_message = "Repository refreshed.".to_string();
                 }
             }
-            GitAction::StageSelected => self.stage_selected_inner()?,
-            GitAction::UnstageSelected => self.unstage_selected_inner()?,
+            GitAction::StageSelected => {
+                let change = self.selected_change().cloned();
+                self.stage_change(change.ok_or_else(|| anyhow!("No change selected."))?)?;
+            }
+            GitAction::UnstageSelected => {
+                let change = self.selected_change().cloned();
+                self.unstage_change(change.ok_or_else(|| anyhow!("No change selected."))?)?;
+            }
             GitAction::StageAll => self.stage_all_inner()?,
             GitAction::Commit(message) => self.commit_inner(&message)?,
             GitAction::Fetch => {
@@ -322,7 +356,26 @@ impl GitPanel {
                 if branch.trim().is_empty() {
                     bail!("A branch name is required.");
                 }
-                self.run_git_operation(&["checkout", &branch, "--"], "Checkout completed.")?;
+                // A remote branch is checked out as the local branch that follows it.
+                let remote = self
+                    .branches
+                    .iter()
+                    .find(|other| other.is_remote && other.name == branch)
+                    .and_then(|remote| remote.name.split_once('/'))
+                    .map(|(_, local)| local.to_owned());
+                match remote {
+                    Some(local) if !self.branches.iter().any(|other| other.name == local) => self
+                        .run_git_operation(
+                        &["checkout", "--track", &branch, "--"],
+                        "Checkout completed.",
+                    )?,
+                    Some(local) => {
+                        self.run_git_operation(&["checkout", &local, "--"], "Checkout completed.")?
+                    }
+                    None => {
+                        self.run_git_operation(&["checkout", &branch, "--"], "Checkout completed.")?
+                    }
+                }
             }
             GitAction::ShowDiff => self.diff_selected()?,
             GitAction::InspectSelected => {
@@ -331,15 +384,47 @@ impl GitPanel {
                 };
                 self.inspect_commit(&commit.id)?;
             }
-            GitAction::LineHistorySelected | GitAction::FileHistorySelected => {
-                let is_line_history = matches!(action, GitAction::LineHistorySelected);
-                let Some(change) = self.selected_change().cloned() else {
-                    bail!("No file selected.");
-                };
-                if is_line_history {
-                    self.load_line_history(&change.path)?;
+            GitAction::StageDiff | GitAction::UnstageDiff => {
+                let stage = matches!(action, GitAction::StageDiff);
+                let change = self
+                    .diff_change()
+                    .and_then(|index| self.changes().nth(index).cloned())
+                    .ok_or_else(|| {
+                        anyhow!("The diff does not show a change of the working tree.")
+                    })?;
+                let path = change.path.clone();
+                if stage {
+                    self.stage_change(change)?;
                 } else {
-                    self.load_file_history(&change.path)?;
+                    self.unstage_change(change)?;
+                }
+                // The diff follows the file to where it went.
+                let areas = if stage {
+                    [ChangeArea::Staged; 2]
+                } else {
+                    [ChangeArea::Unstaged, ChangeArea::Untracked]
+                };
+                let moved = self
+                    .changes()
+                    .find(|other| other.path == path && areas.contains(&other.area))
+                    .cloned();
+                if let Some(moved) = moved {
+                    self.diff_change_entry(&moved)?;
+                }
+            }
+            GitAction::DiffNeighbour(forward) => {
+                let count = self.changes().count();
+                if count == 0 {
+                    bail!("There are no changes.");
+                }
+                let next = match self.diff_change() {
+                    Some(index) if forward => (index + 1) % count,
+                    Some(index) => (index + count - 1) % count,
+                    None => 0,
+                };
+                let change = self.changes().nth(next).cloned();
+                if let Some(change) = change {
+                    self.diff_change_entry(&change)?;
                 }
             }
         }
@@ -373,14 +458,9 @@ impl GitPanel {
         self.commits.clear();
         self.branches.clear();
         self.launchpad = LaunchpadSummary::default();
-        self.health = HealthInfo::default();
         self.diff = DiffView::default();
+        self.diff_folds.clear();
         self.inspected_commit = None;
-        self.line_history.clear();
-        self.file_history.clear();
-        self.visual_file_history.clear();
-        self.line_history_path = None;
-        self.file_history_path = None;
         self.selected = 0;
     }
 }
@@ -388,6 +468,8 @@ impl GitPanel {
 #[cfg(test)]
 mod tests {
     use std::{fs, process::Command};
+
+    use std::path::Path;
 
     use super::*;
     use git2::{IndexAddOption, ObjectType, Oid, Signature};
@@ -481,7 +563,7 @@ mod tests {
         assert!(panel.last_error.is_none(), "{:?}", panel.last_error);
         assert_eq!(panel.status.untracked.len(), 1);
         panel.diff_selected().unwrap();
-        assert!(panel.diff.text.contains("+first"));
+        assert!(added(&panel).contains(&"first".to_owned()));
 
         panel.stage_selected().unwrap();
         assert_eq!(panel.status.staged.len(), 1);
@@ -550,28 +632,7 @@ mod tests {
         assert_eq!(details.files.len(), 1);
         assert_eq!(details.files[0].additions, 1);
         panel.diff_commit(&second.to_string()).unwrap();
-        assert!(panel.diff.text.contains("+two"), "{:?}", panel.diff.text);
-    }
-
-    #[test]
-    fn line_file_and_visual_history_are_loaded() {
-        let (directory, repo) = init_repo();
-        write(directory.path(), "file.txt", "one\n");
-        commit_all(&repo, "First");
-        write(directory.path(), "file.txt", "one\ntwo\n");
-        commit_all(&repo, "Second");
-        let mut panel = GitPanel::new(directory.path());
-        panel.load_line_history("file.txt").unwrap();
-        assert_eq!(panel.line_history.len(), 2);
-        assert_eq!(panel.line_history[0].summary, "First");
-        assert_eq!(panel.line_history[1].summary, "Second");
-        panel.load_file_history("file.txt").unwrap();
-        assert_eq!(panel.file_history.len(), 2);
-        assert_eq!(panel.visual_file_history.len(), 2);
-        assert_eq!(panel.visual_file_history[0].lane, 0);
-        panel.refresh().unwrap();
-        assert_eq!(panel.line_history.len(), 2);
-        assert_eq!(panel.file_history.len(), 2);
+        assert_eq!(added(&panel), ["two"]);
     }
 
     #[test]
@@ -593,7 +654,8 @@ mod tests {
         assert!(panel.branches.iter().any(|branch| branch.name == "feature"));
         assert_eq!(panel.launchpad.current_branch.as_deref(), Some("main"));
         assert_eq!(panel.launchpad.remotes[0].name, "origin");
-        assert!(!panel.health.has_upstream);
+        assert!(panel.launchpad.upstream.is_none());
+        assert!(panel.branches.iter().all(|branch| branch.summary == "Base"));
     }
 
     #[test]
@@ -702,9 +764,9 @@ mod tests {
 
         let mut panel = GitPanel::new(&seed_path);
         panel.fetch().unwrap();
-        assert_eq!(panel.health.behind, 1);
+        assert_eq!(panel.launchpad.behind, 1);
         panel.pull().unwrap();
-        assert_eq!(panel.health.behind, 0);
+        assert_eq!(panel.launchpad.behind, 0);
         assert_eq!(
             fs::read_to_string(seed_path.join("file.txt"))
                 .unwrap()
@@ -716,9 +778,9 @@ mod tests {
         write(&seed_path, "file.txt", "local\n");
         panel.stage_all().unwrap();
         panel.commit("Local change").unwrap();
-        assert_eq!(panel.health.ahead, 1);
+        assert_eq!(panel.launchpad.ahead, 1);
         panel.push().unwrap();
-        assert_eq!(panel.health.ahead, 0);
+        assert_eq!(panel.launchpad.ahead, 0);
         git(&clone_path, &["pull", "--ff-only"]);
         assert_eq!(
             fs::read_to_string(clone_path.join("file.txt"))
@@ -736,7 +798,7 @@ mod tests {
         let mut panel = GitPanel::new(directory.path());
         assert!(panel.commit("").is_err());
         assert!(panel.last_error.is_some());
-        assert!(panel.load_file_history("../outside").is_err());
+        assert!(validate_repo_path(Path::new("../outside")).is_err());
         assert!(panel.diff_commit("not-an-oid").is_err());
     }
 
@@ -751,8 +813,136 @@ mod tests {
         assert_eq!(panel.selected_change().unwrap().path, Path::new("b.txt"));
         panel.select_previous();
         assert_eq!(panel.selected_change().unwrap().path, Path::new("a.txt"));
-        panel.change_tab_by_index(9);
-        assert_eq!(panel.active_tab, GitTab::Health);
-        assert_eq!(GitTab::ALL.map(GitTab::label)[8], "Visual File History");
+        panel.change_tab_by_index(5);
+        assert_eq!(panel.active_tab, GitTab::Inspect);
+        assert_eq!(
+            GitTab::ALL.map(GitTab::label),
+            [
+                "Changes",
+                "Commit Graph",
+                "Branches",
+                "Diff",
+                "Launchpad",
+                "Inspect"
+            ]
+        );
+    }
+
+    fn added(panel: &GitPanel) -> Vec<String> {
+        panel
+            .diff
+            .files
+            .iter()
+            .flat_map(|file| &file.hunks)
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| line.kind == DiffLineKind::Added)
+            .map(|line| line.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_diff_numbers_its_lines_folds_and_stages_its_file() {
+        let (directory, repo) = init_repo();
+        write(directory.path(), "a.txt", "one\ntwo\nthree\n");
+        write(directory.path(), "b.txt", "bee\n");
+        commit_all(&repo, "Base");
+        write(directory.path(), "a.txt", "one\n2\nthree\nfour\n");
+        write(directory.path(), "b.txt", "BEE\n");
+        let mut panel = GitPanel::new(directory.path());
+        panel.execute(GitAction::ShowDiff).unwrap();
+        let file = &panel.diff.files[0];
+        assert_eq!(file.path, Path::new("a.txt"));
+        assert_eq!(file.counts(), (2, 1));
+        let numbers = file.hunks[0]
+            .lines
+            .iter()
+            .map(|line| (line.kind, line.old, line.new))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            numbers,
+            [
+                (DiffLineKind::Context, Some(1), Some(1)),
+                (DiffLineKind::Removed, Some(2), None),
+                (DiffLineKind::Added, None, Some(2)),
+                (DiffLineKind::Context, Some(3), Some(3)),
+                (DiffLineKind::Added, None, Some(4)),
+            ]
+        );
+
+        panel.active_tab = GitTab::Diff;
+        assert_eq!(panel.entry_count(), 2 + 5);
+        panel.jump_hunk(true);
+        assert_eq!(panel.selected, 1, "the hunk header");
+        panel.toggle_fold(1);
+        assert_eq!((panel.entry_count(), panel.selected), (2, 1));
+        panel.toggle_fold(1);
+        panel.toggle_split();
+        assert_eq!(
+            panel.entry_count(),
+            2 + 4,
+            "the removed and the added line side by side"
+        );
+
+        // The next change, then staging from the diff: the diff follows the file.
+        panel.execute(GitAction::DiffNeighbour(true)).unwrap();
+        assert_eq!(panel.diff.path.as_deref(), Some(Path::new("b.txt")));
+        panel.execute(GitAction::StageDiff).unwrap();
+        assert_eq!(panel.status.staged[0].path, Path::new("b.txt"));
+        assert_eq!(panel.diff.kind, DiffKind::Staged);
+        assert_eq!(added(&panel), ["BEE"]);
+        panel.execute(GitAction::UnstageDiff).unwrap();
+        assert!(panel.status.staged.is_empty());
+        assert_eq!(panel.diff.kind, DiffKind::Unstaged);
+    }
+
+    #[test]
+    fn a_remote_branch_is_checked_out_as_a_local_one_that_follows_it() {
+        let directory = TempDir::new().unwrap();
+        let remote_path = directory.path().join("remote.git");
+        Repository::init_bare(&remote_path).unwrap();
+        let seed_path = directory.path().join("seed");
+        fs::create_dir(&seed_path).unwrap();
+        let seed = Repository::init(&seed_path).unwrap();
+        seed.set_head("refs/heads/main").unwrap();
+        seed.config()
+            .unwrap()
+            .set_str("user.name", "Test User")
+            .unwrap();
+        seed.config()
+            .unwrap()
+            .set_str("user.email", "test@example.com")
+            .unwrap();
+        write(&seed_path, "file.txt", "base\n");
+        commit_all(&seed, "Base");
+        seed.remote("origin", remote_path.to_str().unwrap())
+            .unwrap();
+        git(
+            &seed_path,
+            &["push", "origin", "main", "main:feature/remote-only"],
+        );
+        git(&seed_path, &["fetch", "origin"]);
+
+        let mut panel = GitPanel::new(&seed_path);
+        assert!(
+            panel
+                .branches
+                .iter()
+                .any(|branch| branch.name == "origin/feature/remote-only")
+        );
+        assert!(
+            !panel
+                .branches
+                .iter()
+                .any(|branch| branch.name.ends_with("/HEAD"))
+        );
+        panel.checkout("origin/feature/remote-only").unwrap();
+        assert_eq!(
+            panel.launchpad.current_branch.as_deref(),
+            Some("feature/remote-only")
+        );
+        assert_eq!(
+            panel.launchpad.upstream.as_deref(),
+            Some("origin/feature/remote-only")
+        );
     }
 }

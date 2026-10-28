@@ -23,6 +23,43 @@ pub const ASCII_LOGO: &[&str] = &[
     r"           \___.-'          '--.___/           ",
 ];
 
+/// The same flower half as big again, for the About dialog when the terminal has room for it.
+pub const ASCII_LOGO_LARGE: &[&str] = &[
+    r"                           /'--._______.--'\                           ",
+    r"                          /                 \                          ",
+    r"                         /                   \                         ",
+    r"                        /                     \                        ",
+    r"                       /                       \                       ",
+    r"                      /                         \                      ",
+    r"                     /                          /                      ",
+    r"                    /                          /                       ",
+    r"   ______-------\                             /      ---------______   ",
+    r"  |               \                o         /                      |  ",
+    r"  |                 \              |        /                       |  ",
+    r"  |                   \            |       /                        |  ",
+    r"  /                     \          |      /                         \  ",
+    r" /                        \     ''''''   /                           \ ",
+    r"/                           \.--      --.                             \",
+    r"\                    o---.__/      @     \__.---o                     /",
+    r"  \                        |  @        @  |                         /  ",
+    r"   \                       |              |                        /   ",
+    r"     \                     |              |______                /     ",
+    r"      \                    '\   @     @  /       ---------______/      ",
+    r"        \          __.-----  \          /                              ",
+    r"                --'           '--.__.--'                               ",
+    r"            '__.             /     |    \                   |          ",
+    r"         .--                /      |     \                  |          ",
+    r"         |                 o       |      o                 |          ",
+    r"         |                          |                       |          ",
+    r"         |                          |                       |          ",
+    r"         |                          |                       |          ",
+    r"         |                          |                       |          ",
+    r"         |_____                     |                  _____|          ",
+    r"               \           _.--'    |                  /               ",
+    r"                \         '          .____            /                ",
+    r"                 \_____.--                '---.______/                 ",
+];
+
 pub const NAME: &str = "SozoIDE";
 pub const AUTHOR: &str = "Vritik Valabdas";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
