@@ -11,10 +11,10 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 use crate::{
     app::{App, DropZone, Focus, Regions, SplitDirection},
     branding::ASCII_LOGO,
-    editor::{OpenFile, language_name},
+    editor::OpenFile,
 };
 
-use super::{ACTIVE, BORDER, MUTED, TEXT, key, panel_block, skip_columns};
+use super::{ACTIVE, BORDER, MUTED, TEXT, key, panel_block, select_columns, skip_columns};
 
 pub(super) fn render_explorer(frame: &mut Frame, app: &App, area: Rect) {
     let title = format!(" {} Explorer ", app.icon("custom-folder"));
@@ -281,9 +281,14 @@ fn render_drop_preview(frame: &mut Frame, regions: &Regions, zone: DropZone) {
 /// The rows of `file` on screen, cut at its horizontal scroll, with a scrollbar on the bottom
 /// border when the text is wider than the pane.
 fn render_file(frame: &mut Frame, file: &mut OpenFile, area: Rect, focused: bool) {
-    let title = format!(" {} — {} ", file.path.display(), language_name(&file.path));
+    let title = format!(" {} — {} ", file.path.display(), file.language);
     if let Some(image) = &mut file.image {
-        let block = panel_block(title, focused);
+        let mut block = panel_block(title, focused);
+        // The page of a PDF on the right of the border, where a long path does not hide it.
+        if let Some((page, pages)) = file.pdf.as_ref().map(|pdf| (pdf.page, pdf.pages())) {
+            block =
+                block.title_top(Line::from(format!(" Page {}/{pages} ", page + 1)).right_aligned());
+        }
         let inner = block.inner(area);
         frame.render_stateful_widget(StatefulImage::new().resize(Resize::Fit(None)), inner, image);
         frame.render_widget(block, area);
@@ -297,7 +302,13 @@ fn render_file(frame: &mut Frame, file: &mut OpenFile, area: Rect, focused: bool
     let (scroll, scroll_x) = (file.scroll as usize, file.scroll_x as usize);
     let lines = (scroll..(scroll + height).min(file.display_rows()))
         .map(|display| {
-            let (number, spans) = file.display_line(display, text_width + scroll_x);
+            let (number, mut spans) = file.display_line(display, text_width + scroll_x);
+            let selected = number
+                .and_then(|_| file.source_row(display))
+                .and_then(|row| file.selected_columns(row));
+            if let Some((from, to)) = selected {
+                spans = select_columns(spans, from, to);
+            }
             let number = number.map_or_else(
                 || " ".repeat(number_width),
                 |number| format!("{number:>number_width$}"),

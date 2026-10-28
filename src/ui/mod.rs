@@ -12,12 +12,12 @@ use ratatui::{
 
 use crate::app::{App, Overlay, Regions};
 
-pub(crate) use components::skip_columns;
 pub(crate) use components::{
     ACTIVE, BORDER, MUTED, TEXT, bar, busy, centered, key, panel_block, render_dialog,
     scale_length, sweep_bar,
 };
 use components::{render_handle, sweep};
+pub(crate) use components::{select_columns, skip_columns};
 use editor::{render_editor, render_explorer, render_tabs, render_terminal};
 use overlays::{
     render_about, render_help, render_search, render_splash, render_tutorial, render_update,
@@ -146,7 +146,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         render_search(frame, app, area);
     }
     match app.overlay {
-        Overlay::Help => render_help(frame, area, app.motion.overlay()),
+        Overlay::Help => render_help(frame, app, area),
         Overlay::About => render_about(frame, app, area),
         Overlay::Tutorial => render_tutorial(frame, app, area),
         Overlay::WhatsNew => render_whats_new(frame, app, area),
@@ -307,7 +307,8 @@ mod tests {
             .collect::<String>();
         assert!(content.contains("Source Control"));
         assert!(content.contains("Commit Graph"));
-        assert!(content.contains("Visual File History"));
+        assert!(content.contains("Launchpad") && content.contains("Inspect"));
+        assert!(!content.contains("Line History") && !content.contains("Health"));
 
         app.show_git = false;
         app.show_database = true;
@@ -498,8 +499,10 @@ mod tests {
         let top = (0..40)
             .find(|&y| row(&open, y).contains("Help - all commands"))
             .unwrap();
+        // The dialog's own bottom corner, under its top one: the boxes inside have theirs too.
+        let left = (0..120).find(|&x| open[(x, top)].symbol() == "╭").unwrap();
         let bottom = (top + 1..40)
-            .find(|&y| row(&open, y).contains('╰'))
+            .find(|&y| open[(left, y)].symbol() == "╰")
             .unwrap();
         let middle = (top + bottom) / 2;
         // The text is already where it will stay; only the rows near the edges are missing.
@@ -848,8 +851,9 @@ mod tests {
 
     #[test]
     fn about_grows_the_flower_and_links_the_repository() {
+        use crate::branding::{ASCII_LOGO, ASCII_LOGO_LARGE};
         let mut app = App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap();
-        let mut terminal = Terminal::new(TestBackend::new(120, 46)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 48)).unwrap();
         app.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::F(2),
             crossterm::event::KeyModifiers::NONE,
@@ -861,12 +865,51 @@ mod tests {
         app.tick_at(opened + crate::animation::BLOOM.open);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let grown = buffer_text(&terminal);
-        assert!(!growing.contains("/'-.___.-'\\") && grown.contains("/'-.___.-'\\"));
+        // There is room for the large flower: whole once grown, with the text under it.
+        let top = ASCII_LOGO_LARGE[0].trim();
+        assert!(!growing.contains(top) && grown.contains(top));
         assert!(grown.contains("Contribute on GitHub [G]"));
+        let buffer = terminal.backend().buffer();
+        let flower = (0..48).find(|&y| row(buffer, y).contains(top)).unwrap();
+        let name = (0..48)
+            .find(|&y| row(buffer, y).trim_matches([' ', '│']) == "SozoIDE")
+            .unwrap();
+        assert!(
+            grown.contains("Press Esc to close"),
+            "the whole dialog fits"
+        );
+        assert!(
+            name >= flower + ASCII_LOGO_LARGE.len() as u16,
+            "the name is under the flower"
+        );
+        // The flower sits in the middle of the dialog: as many columns on each side.
+        let cells = row(buffer, flower).chars().collect::<String>();
+        let columns = |text: &str| text.chars().count();
+        let start = columns(&cells[..cells.find(top).unwrap()]);
+        let left = columns(&cells[..cells[..cells.find(top).unwrap()].rfind('│').unwrap()]);
+        let end = start + columns(top);
+        let right = end
+            + columns(
+                cells[cells.find(top).unwrap() + top.len()..]
+                    .split('│')
+                    .next()
+                    .unwrap(),
+            );
+        assert!(
+            (start - left - 1).abs_diff(right - end) <= 1,
+            "{left} {start} {end} {right}"
+        );
         let button = app.regions.about_repository;
         assert!(button.width > 20);
         let text = row(terminal.backend().buffer(), button.y);
         assert!(text.contains("Contribute on GitHub"), "{text}");
+
+        // A smaller terminal gets the flower at its own size.
+        let mut small = Terminal::new(TestBackend::new(100, 36)).unwrap();
+        small.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&small);
+        assert!(text.contains(ASCII_LOGO[0].trim()) && !text.contains(top));
+        assert!(text.contains("Press Esc to close"));
     }
 
     #[test]
@@ -898,16 +941,18 @@ mod tests {
         settle(&mut app);
         assert_eq!(app.overlay, Overlay::None);
 
-        app.welcome = Welcome::WhatsNew;
+        // From the version before: only this version's notes, every word on screen (E19).
+        let previous = NOTES[1].version.to_owned();
+        app.welcome = Welcome::WhatsNew(previous);
         settle(&mut app);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("What's new"));
-        // Every word of every note is on screen: long notes wrap without pushing the last out (E19).
-        let words = NOTES
+        assert!(text.contains(&format!("Version {}", NOTES[0].version)));
+        let words = NOTES[0]
             .new
             .iter()
-            .chain(NOTES.fixed)
+            .chain(NOTES[0].fixed)
             .flat_map(|note| note.split_whitespace());
         for word in words {
             assert!(text.contains(word), "{word} is missing");
@@ -915,6 +960,30 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         settle(&mut app);
         assert_eq!(app.overlay, Overlay::None);
+
+        // From an old version: every version since, newest first; the oldest at the end.
+        let oldest = NOTES.last().unwrap();
+        app.welcome = Welcome::WhatsNew("0.1.4".to_owned());
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains(&format!("{} versions since the one you had", NOTES.len())));
+        assert!(!text.contains(&format!("Version {}", oldest.version)));
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains(
+                oldest
+                    .fixed
+                    .last()
+                    .unwrap()
+                    .split_whitespace()
+                    .last()
+                    .unwrap()
+            )
+        );
+        assert!(!text.contains(&format!("Version {}", NOTES[0].version)));
     }
 
     #[test]
@@ -938,6 +1007,191 @@ mod tests {
         click(&mut app, MouseEventKind::Moved, area.x + 10, area.y + 10);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(line(&terminal).contains("Some bold and"));
+    }
+
+    #[test]
+    fn source_control_draws_branches_as_a_tree_launchpad_cards_and_a_numbered_diff() {
+        use crate::git::{GitTab, controller::GitUiAction};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(root)
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            )
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Test User"]);
+        git(&["config", "user.email", "test@example.com"]);
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "First commit"]);
+        git(&["branch", "feature/login"]);
+        git(&["branch", "feature/signup"]);
+        std::fs::write(root.join("a.txt"), "one\n2\n").unwrap();
+        std::fs::write(root.join("new.txt"), "new\n").unwrap();
+        let mut app = App::new(root.to_path_buf()).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(150, 44)).unwrap();
+        app.show_git = true;
+        let show = |app: &mut App, terminal: &mut Terminal<TestBackend>, tab| {
+            app.git.panel.lock().unwrap().change_tab(tab);
+            settle(app);
+            terminal.draw(|frame| draw(frame, app)).unwrap();
+            buffer_text(terminal)
+        };
+
+        let branches = show(&mut app, &mut terminal, GitTab::Branches);
+        for part in [
+            "Local (3)",
+            "├─ feature/",
+            "│  ├─   login",
+            "│  └─   signup",
+            "└─ ● main",
+        ] {
+            assert!(branches.contains(part), "{part} in the branches");
+        }
+        assert!(branches.contains("First commit"));
+        // A click on a branch asks to switch to it.
+        let (_, area) = app
+            .git
+            .regions
+            .actions
+            .iter()
+            .find(|(action, _)| matches!(action, GitUiAction::Branch(_)))
+            .cloned()
+            .unwrap();
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: area.x + 5,
+            row: area.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(matches!(
+            app.git.mode,
+            crate::git::controller::GitMode::ConfirmCheckout(ref branch) if branch == "feature/login"
+        ));
+        app.git.action(GitUiAction::Cancel);
+
+        let launchpad = show(&mut app, &mut terminal, GitTab::Launchpad);
+        for part in [
+            "Current branch",
+            "● main",
+            "Upstream",
+            "No upstream",
+            "Ahead / Behind",
+            "↑ 0 ahead",
+            "Staged 0",
+            "Unstaged 1",
+            "Untracked 1",
+            "M a.txt",
+            "U new.txt",
+        ] {
+            assert!(launchpad.contains(part), "{part} in the launchpad");
+        }
+
+        app.git.panel.lock().unwrap().select(0);
+        app.git.action(GitUiAction::ShowDiff);
+        let diff = show(&mut app, &mut terminal, GitTab::Diff);
+        let diff = if diff.contains("a.txt  +1 −1") {
+            diff
+        } else {
+            // The diff comes from a thread; draw again once it is there.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            show(&mut app, &mut terminal, GitTab::Diff)
+        };
+        for part in [
+            "▾ M a.txt  +1 −1",
+            "▾ @@ -1,2 +1,2 @@",
+            "  1   1 │  one",
+            "  2     │- two",
+            "      2 │+ 2",
+        ] {
+            assert!(diff.contains(part), "{part} in the diff");
+        }
+        assert!(diff.contains("Side by side [v]") && diff.contains("Next file"));
+    }
+
+    #[test]
+    fn the_editor_draws_its_selection_and_pdf_pages() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::style::Modifier;
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("notes.txt"), "select me\n").unwrap();
+        std::fs::write(
+            directory.path().join("guide.pdf"),
+            crate::editor::sample_pdf(2),
+        )
+        .unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(directory.path().join("notes.txt")).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        for _ in 0..6 {
+            app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        }
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let area = app.regions.editor;
+        let buffer = terminal.backend().buffer();
+        let y = area.y + 1;
+        let line = row(buffer, y);
+        let x = line[..line.find("select me").unwrap()].chars().count() as u16;
+        let reversed = (x..x + 9)
+            .map(|x| buffer[(x, y)].modifier.contains(Modifier::REVERSED))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reversed,
+            [true, true, true, true, true, true, false, false, false]
+        );
+
+        app.open_file(directory.path().join("guide.pdf")).unwrap();
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("Page 1/2"));
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("Page 2/2"));
+    }
+
+    #[test]
+    fn help_shows_its_sections_in_boxes_and_scrolls_when_short() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        settle(&mut app);
+        let mut tall = Terminal::new(TestBackend::new(140, 60)).unwrap();
+        tall.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&tall);
+        for section in [
+            "╭─ Panels ",
+            "╭─ Editing ",
+            "╭─ PDF ",
+            "╭─ Source Control ",
+            "╭─ Application ",
+        ] {
+            assert!(text.contains(section), "{section}");
+        }
+        assert!(text.contains("Ctrl+C / Ctrl+X"));
+        // The section titles take the colour of their area, one of the terminal's.
+        let buffer = tall.backend().buffer();
+        let (x, y) = (0..60)
+            .find_map(|y| row(buffer, y).find("╭─ Panels").map(|x| (x, y)))
+            .unwrap();
+        let x = row(buffer, y)[..x].chars().count() as u16 + 3;
+        assert_eq!(buffer[(x, y)].fg, ratatui::style::Color::Cyan);
+
+        let mut short = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        short.draw(|frame| draw(frame, &mut app)).unwrap();
+        let first = buffer_text(&short);
+        assert!(first.contains("Panels") && first.contains("scroll"));
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        short.draw(|frame| draw(frame, &mut app)).unwrap();
+        let last = buffer_text(&short);
+        assert!(last.contains("Application") && !last.contains("╭─ Panels "));
     }
 
     fn settle(app: &mut App) {

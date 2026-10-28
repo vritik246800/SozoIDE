@@ -15,10 +15,7 @@ use super::{model::*, panel::GitPanel, repository::head_commit};
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl GitPanel {
-    pub(super) fn stage_selected_inner(&mut self) -> Result<()> {
-        let Some(change) = self.selected_change().cloned() else {
-            bail!("No change selected.");
-        };
+    pub(super) fn stage_change(&mut self, change: ChangeEntry) -> Result<()> {
         if change.area == ChangeArea::Staged {
             self.status_message = "Change is already staged.".to_string();
             return Ok(());
@@ -43,10 +40,7 @@ impl GitPanel {
         Ok(())
     }
 
-    pub(super) fn unstage_selected_inner(&mut self) -> Result<()> {
-        let Some(change) = self.selected_change().cloned() else {
-            bail!("No change selected.");
-        };
+    pub(super) fn unstage_change(&mut self, change: ChangeEntry) -> Result<()> {
         if change.area != ChangeArea::Staged {
             self.status_message = "Change is not staged.".to_string();
             return Ok(());
@@ -82,7 +76,12 @@ impl GitPanel {
             bail!("Commit message cannot be empty.");
         }
         self.refresh()?;
-        if !self.health.conflicts.is_empty() {
+        if self
+            .status
+            .unstaged
+            .iter()
+            .any(|change| change.status == FileStatus::Conflict)
+        {
             bail!("Resolve merge conflicts before committing.");
         }
         if self.status.staged.is_empty() {
@@ -122,7 +121,7 @@ impl GitPanel {
                 "{operation} requires a clean working tree. Commit, stash, or discard changes first."
             );
         }
-        if self.health.operation.is_some() {
+        if self.launchpad.operation.is_some() {
             bail!("Finish the Git operation already in progress before continuing.");
         }
         Ok(())

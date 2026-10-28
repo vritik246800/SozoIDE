@@ -69,6 +69,40 @@ pub(crate) fn skip_columns(spans: Vec<Span<'static>>, columns: usize) -> Vec<Spa
     kept
 }
 
+/// `spans` with the columns `from..to` in reverse video, for a selection; a selection that
+/// goes on past the text (the line end) gets spaces.
+pub(crate) fn select_columns(
+    spans: Vec<Span<'static>>,
+    from: usize,
+    to: usize,
+) -> Vec<Span<'static>> {
+    let mut selected = Vec::<Span<'static>>::new();
+    let mut column = 0;
+    let mut push = |text: &str, style: Style| match selected.last_mut() {
+        Some(last) if last.style == style => last.content.to_mut().push_str(text),
+        _ => selected.push(Span::styled(text.to_owned(), style)),
+    };
+    for span in &spans {
+        for character in span.content.chars() {
+            let style = if (from..to).contains(&column) {
+                span.style.add_modifier(Modifier::REVERSED)
+            } else {
+                span.style
+            };
+            push(character.encode_utf8(&mut [0; 4]), style);
+            column += Span::raw(character.to_string()).width();
+        }
+    }
+    if column < to {
+        let start = column.max(from);
+        push(
+            &" ".repeat(to - start),
+            Style::default().add_modifier(Modifier::REVERSED),
+        );
+    }
+    selected
+}
+
 pub(crate) fn panel_block(title: String, focused: bool) -> Block<'static> {
     Block::default()
         .title(Line::from(title))
@@ -333,5 +367,41 @@ mod tests {
         assert_eq!(text(&sweep_bar(10, Duration::ZERO)), "──────────");
         assert!(text(&sweep_bar(10, SWEEP_CYCLE / 2)).contains("━━"));
         assert_eq!(text(&busy("⠋", "Working...")), "⠋ Working...");
+    }
+
+    #[test]
+    fn selections_reverse_their_columns_and_the_line_end() {
+        let spans = vec![
+            Span::styled("fn ", Style::default().fg(Color::Magenta)),
+            Span::raw("main"),
+        ];
+        let selected = select_columns(spans.clone(), 1, 5);
+        let reversed = selected
+            .iter()
+            .filter(|span| span.style.add_modifier.contains(Modifier::REVERSED))
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(reversed, "n ma");
+        assert_eq!(
+            selected
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "fn main"
+        );
+        // Past the end of the text the selected line end is a space.
+        let past = select_columns(spans, 5, 8);
+        let text = past
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(text, "fn main ");
+        assert!(
+            past.last()
+                .unwrap()
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
     }
 }

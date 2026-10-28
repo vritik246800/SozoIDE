@@ -9,7 +9,8 @@ mod ui;
 mod update;
 
 use std::{
-    env, io,
+    env,
+    io::{self, Write},
     path::PathBuf,
     process::{Command, Stdio},
     time::Duration,
@@ -138,6 +139,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
     while !app.should_quit {
         app.tick();
         terminal.draw(|frame| ui::draw(frame, app))?;
+        // Copied text also goes to the terminal's clipboard, which works over SSH.
+        if let Some(text) = app.clipboard.take() {
+            let backend = terminal.backend_mut();
+            backend.write_all(app::clipboard_sequence(&text).as_bytes())?;
+            backend.flush()?;
+        }
         if event::poll(Duration::from_millis(16))? {
             match event::read()? {
                 Event::Key(key)

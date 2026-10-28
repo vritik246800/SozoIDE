@@ -1,9 +1,6 @@
-use std::{
-    fs,
-    path::{Component, Path, PathBuf},
-};
+use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use git2::{
     BranchType, DiffFormat, DiffOptions, ObjectType, Oid, Patch, Repository, RepositoryState, Sort,
@@ -13,7 +10,6 @@ use git2::{
 use super::model::*;
 
 const COMMIT_LIMIT: usize = 200;
-const FILE_HISTORY_LIMIT: usize = 100;
 
 pub(super) fn read_status(repo: &Repository) -> Result<WorkingTreeStatus> {
     if repo.workdir().is_none() {
@@ -156,12 +152,12 @@ pub(super) fn read_branches(repo: &Repository) -> Result<Vec<BranchInfo>> {
             .name()?
             .unwrap_or("<invalid branch name>")
             .to_string();
-        let full_name = branch
-            .get()
-            .name()
-            .unwrap_or("<invalid reference name>")
-            .to_string();
+        // `origin/HEAD` only points at another remote branch.
+        if kind == BranchType::Remote && name.ends_with("/HEAD") {
+            continue;
+        }
         let commit_id = branch.get().target().map(|id| id.to_string());
+        let commit = branch.get().peel_to_commit().ok();
         let upstream = if kind == BranchType::Local {
             branch
                 .upstream()
@@ -182,13 +178,19 @@ pub(super) fn read_branches(repo: &Repository) -> Result<Vec<BranchInfo>> {
         };
         result.push(BranchInfo {
             name,
-            full_name,
             commit_id,
             is_head: branch.is_head(),
             is_remote: kind == BranchType::Remote,
             upstream,
             ahead,
             behind,
+            summary: commit
+                .as_ref()
+                .and_then(|commit| commit.summary().map(ToString::to_string))
+                .unwrap_or_default(),
+            committed_at: commit
+                .as_ref()
+                .map(|commit| git_time_to_chrono(commit.time())),
         });
     }
     result.sort_by(|left, right| {
@@ -201,7 +203,6 @@ pub(super) fn read_branches(repo: &Repository) -> Result<Vec<BranchInfo>> {
 
 pub(super) fn read_launchpad(
     repo: &Repository,
-    status: &WorkingTreeStatus,
     last_commit: Option<CommitInfo>,
 ) -> Result<LaunchpadSummary> {
     let (current_branch, upstream, ahead, behind) = current_branch_position(repo)?;
@@ -222,35 +223,8 @@ pub(super) fn read_launchpad(
         upstream,
         ahead,
         behind,
-        staged_count: status.staged.len(),
-        unstaged_count: status.unstaged.len(),
-        untracked_count: status.untracked.len(),
         last_commit,
         remotes,
-    })
-}
-
-pub(super) fn read_health(
-    repo: &Repository,
-    status: &WorkingTreeStatus,
-    upstream: Option<String>,
-    ahead: usize,
-    behind: usize,
-) -> Result<HealthInfo> {
-    let mut conflicts: Vec<_> = status
-        .unstaged
-        .iter()
-        .filter(|change| change.status == FileStatus::Conflict)
-        .map(|change| change.path.clone())
-        .collect();
-    conflicts.sort();
-    conflicts.dedup();
-    Ok(HealthInfo {
-        is_clean: status.is_clean(),
-        has_upstream: upstream.is_some(),
-        ahead,
-        behind,
-        conflicts,
         operation: repository_operation(repo.state()).map(ToString::to_string),
     })
 }
@@ -324,12 +298,13 @@ pub(super) fn read_change_diff(repo: &Repository, path: &Path, kind: DiffKind) -
             let tree = head.as_ref().map(|commit| commit.tree()).transpose()?;
             repo.diff_tree_to_index(tree.as_ref(), None, Some(&mut options))?
         }
+        // The index against the working tree: an empty tree made every line look added (E23).
         DiffKind::Unstaged | DiffKind::Untracked => {
-            repo.diff_tree_to_workdir_with_index(None, Some(&mut options))?
+            repo.diff_index_to_workdir(None, Some(&mut options))?
         }
         DiffKind::None | DiffKind::Commit => bail!("Invalid working-tree diff type."),
     };
-    let text = diff_text(&diff)?;
+    let files = diff_files(&diff)?;
     let title = match kind {
         DiffKind::Staged => format!("Staged: {}", path.display()),
         DiffKind::Untracked => format!("Untracked: {}", path.display()),
@@ -337,7 +312,7 @@ pub(super) fn read_change_diff(repo: &Repository, path: &Path, kind: DiffKind) -
     };
     Ok(DiffView {
         title,
-        text,
+        files,
         path: Some(path.to_path_buf()),
         commit_id: None,
         kind,
@@ -352,26 +327,78 @@ pub(super) fn read_commit_diff(repo: &Repository, commit_id: &str) -> Result<Dif
     } else {
         Some(commit.parent(0)?.tree()?)
     };
-    let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)?;
+    let mut diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)?;
+    diff.find_similar(None)?;
     Ok(DiffView {
-        title: format!("Commit: {}", commit.id()),
-        text: diff_text(&diff)?,
+        title: format!("Commit {}", short_id(commit.id())),
+        files: diff_files(&diff)?,
         path: None,
         commit_id: Some(commit.id().to_string()),
         kind: DiffKind::Commit,
     })
 }
 
-pub(super) fn diff_text(diff: &git2::Diff<'_>) -> Result<String> {
-    let mut bytes = Vec::new();
-    diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
-        if matches!(line.origin(), '+' | '-' | ' ' | '\\') {
-            bytes.push(line.origin() as u8);
+/// The files of `diff`, each with its hunks and their lines with the old and new numbers.
+pub(super) fn diff_files(diff: &git2::Diff<'_>) -> Result<Vec<DiffFile>> {
+    let mut files: Vec<DiffFile> = Vec::new();
+    diff.print(DiffFormat::Patch, |delta, _hunk, line| {
+        let path = delta
+            .new_file()
+            .path()
+            .or_else(|| delta.old_file().path())
+            .unwrap_or_else(|| Path::new("<unknown>"));
+        if files.last().is_none_or(|file| file.path != path) {
+            files.push(DiffFile {
+                path: path.to_path_buf(),
+                old_path: delta
+                    .old_file()
+                    .path()
+                    .filter(|old| *old != path)
+                    .map(Path::to_path_buf),
+                status: FileStatus::from_delta(delta.status()),
+                binary: delta.flags().is_binary(),
+                hunks: Vec::new(),
+            });
         }
-        bytes.extend_from_slice(line.content());
+        let Some(file) = files.last_mut() else {
+            return true;
+        };
+        let text = String::from_utf8_lossy(line.content())
+            .trim_end_matches(['\n', '\r'])
+            .to_owned();
+        let kind = match line.origin() {
+            'H' => {
+                file.hunks.push(DiffHunk {
+                    header: text,
+                    lines: Vec::new(),
+                });
+                return true;
+            }
+            'B' => {
+                file.binary = true;
+                return true;
+            }
+            '+' => DiffLineKind::Added,
+            '-' => DiffLineKind::Removed,
+            ' ' => DiffLineKind::Context,
+            '=' | '>' | '<' => DiffLineKind::Note,
+            _ => return true,
+        };
+        if let Some(hunk) = file.hunks.last_mut() {
+            hunk.lines.push(DiffLine {
+                kind,
+                old: line.old_lineno(),
+                new: line.new_lineno(),
+                text: if kind == DiffLineKind::Note {
+                    "No newline at end of file".to_owned()
+                } else {
+                    text
+                },
+            });
+        }
         true
     })?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    Ok(files)
 }
 
 pub(super) fn read_commit_details(repo: &Repository, commit_id: &str) -> Result<CommitDetails> {
@@ -415,133 +442,6 @@ pub(super) fn read_commit_details(repo: &Repository, commit_id: &str) -> Result<
         message,
         files,
     })
-}
-
-pub(super) fn read_line_history(repo: &Repository, path: &Path) -> Result<Vec<BlameLine>> {
-    validate_repo_path(path)?;
-    let workdir = repo
-        .workdir()
-        .ok_or_else(|| anyhow!("Line history requires a non-bare Git repository."))?;
-    let content = fs::read(workdir.join(path))
-        .with_context(|| format!("Could not read {} for line history.", path.display()))?;
-    let content = String::from_utf8_lossy(&content);
-    let lines: Vec<_> = content.lines().collect();
-    let blame = repo.blame_file(path, None)?;
-    let mut result = Vec::new();
-    for hunk in blame.iter() {
-        let id = hunk.final_commit_id();
-        let commit = repo.find_commit(id).ok();
-        let info = commit.as_ref().map(commit_info);
-        let signature = hunk.final_signature();
-        for offset in 0..hunk.lines_in_hunk() {
-            let line_number = hunk.final_start_line() + offset;
-            result.push(BlameLine {
-                line_number,
-                original_line_number: hunk.orig_start_line() + offset,
-                commit_id: id.to_string(),
-                short_id: short_id(id),
-                author: info
-                    .as_ref()
-                    .map(|info| info.author.clone())
-                    .or_else(|| signature.name().map(ToString::to_string))
-                    .unwrap_or_else(|| "Unknown".to_string()),
-                summary: info
-                    .as_ref()
-                    .map(|info| info.summary.clone())
-                    .unwrap_or_default(),
-                committed_at: info.as_ref().map_or_else(
-                    || git_time_to_chrono(signature.when()),
-                    |info| info.committed_at,
-                ),
-                content: lines
-                    .get(line_number - 1)
-                    .copied()
-                    .unwrap_or("")
-                    .to_string(),
-            });
-        }
-    }
-    result.sort_by_key(|line| line.line_number);
-    Ok(result)
-}
-
-pub(super) fn read_file_history(
-    repo: &Repository,
-    path: &Path,
-) -> Result<(Vec<FileHistoryEntry>, Vec<VisualHistoryEntry>)> {
-    validate_repo_path(path)?;
-    if head_commit(repo)?.is_none() {
-        return Ok((Vec::new(), Vec::new()));
-    }
-    let mut walk = repo.revwalk()?;
-    walk.set_sorting(Sort::TIME | Sort::TOPOLOGICAL)?;
-    match walk.push_head() {
-        Ok(()) => {}
-        Err(error)
-            if error.code() == git2::ErrorCode::NotFound
-                || error.code() == git2::ErrorCode::UnbornBranch =>
-        {
-            return Ok((Vec::new(), Vec::new()));
-        }
-        Err(error) => return Err(error.into()),
-    }
-    let mut history = Vec::new();
-    for id in walk {
-        let id = match id {
-            Ok(id) => id,
-            Err(error)
-                if history.is_empty()
-                    && (error.code() == git2::ErrorCode::NotFound
-                        || error.code() == git2::ErrorCode::UnbornBranch) =>
-            {
-                break;
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let commit = repo.find_commit(id)?;
-        let tree = commit.tree()?;
-        let parent_tree = if commit.parent_count() == 0 {
-            None
-        } else {
-            Some(commit.parent(0)?.tree()?)
-        };
-        let mut diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)?;
-        diff.find_similar(None)?;
-        for delta in diff.deltas() {
-            let new_path = delta.new_file().path();
-            let old_path = delta.old_file().path();
-            if new_path != Some(path) && old_path != Some(path) {
-                continue;
-            }
-            let entry_path = new_path.or(old_path).unwrap_or(path).to_path_buf();
-            let previous_path =
-                old_path.and_then(|old| (old != entry_path).then(|| old.to_path_buf()));
-            let info = commit_info(&commit);
-            history.push(FileHistoryEntry {
-                commit: info,
-                path: entry_path,
-                old_path: previous_path,
-                status: FileStatus::from_delta(delta.status()),
-            });
-            break;
-        }
-        if history.len() >= FILE_HISTORY_LIMIT {
-            break;
-        }
-    }
-    let visual = history
-        .iter()
-        .map(|entry| VisualHistoryEntry {
-            commit_id: entry.commit.id.clone(),
-            short_id: entry.commit.short_id.clone(),
-            summary: entry.commit.summary.clone(),
-            committed_at: entry.commit.committed_at,
-            lane: 0,
-            parent_ids: entry.commit.parent_ids.clone(),
-            status: entry.status,
-        })
-        .collect();
-    Ok((history, visual))
 }
 
 pub(super) fn commit_info(commit: &git2::Commit<'_>) -> CommitInfo {
