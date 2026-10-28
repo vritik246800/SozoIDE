@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ratatui::style::Color;
 
 use super::App;
@@ -17,6 +17,84 @@ pub struct FileEntry {
     pub depth: usize,
     pub is_dir: bool,
     pub expanded: bool,
+}
+
+/// What the Explorer's right-click menu does (F01).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryAction {
+    NewFile,
+    NewFolder,
+    Rename,
+}
+
+impl EntryAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NewFile => "New File",
+            Self::NewFolder => "New Folder",
+            Self::Rename => "Rename",
+        }
+    }
+}
+
+/// The right-click menu: its entries, where it opened and the entry it acts on (the root for
+/// the empty space below the tree, which cannot be renamed).
+pub struct EntryMenu {
+    pub target: PathBuf,
+    pub actions: Vec<EntryAction>,
+    pub position: (u16, u16),
+    pub selected: usize,
+}
+
+/// The name being typed for a new file or folder, or for a rename.
+pub struct NamePrompt {
+    pub action: EntryAction,
+    pub target: PathBuf,
+    pub name: String,
+    pub error: Option<String>,
+}
+
+/// A file or folder name: no separators, not `.` or `..`, not empty.
+fn checked_name(name: &str) -> Result<&str> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("Type a name");
+    }
+    if name == "." || name == ".." || name.contains(['/', '\\']) {
+        bail!("A name cannot be . or .. or contain / or \\");
+    }
+    Ok(name)
+}
+
+/// Creates `name` inside `parent`, a folder when `folder`; never over something that exists.
+pub fn create_entry(parent: &Path, name: &str, folder: bool) -> Result<PathBuf> {
+    let path = parent.join(checked_name(name)?);
+    if path.exists() {
+        bail!("{} already exists", path.display());
+    }
+    if folder {
+        fs::create_dir(&path)
+    } else {
+        fs::File::create_new(&path).map(drop)
+    }
+    .with_context(|| format!("Could not create {}", path.display()))?;
+    Ok(path)
+}
+
+/// Renames `path` to `name` in the same folder; never over something that exists.
+pub fn rename_entry(path: &Path, name: &str) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .context("The project folder cannot be renamed")?;
+    let renamed = parent.join(checked_name(name)?);
+    if renamed == path {
+        return Ok(renamed);
+    }
+    if renamed.exists() {
+        bail!("{} already exists", renamed.display());
+    }
+    fs::rename(path, &renamed).with_context(|| format!("Could not rename {}", path.display()))?;
+    Ok(renamed)
 }
 
 impl App {
@@ -100,6 +178,113 @@ impl App {
         }
     }
 
+    /// Opens the right-click menu at `position` for the entry at `index`, or for the root.
+    pub fn open_entry_menu(&mut self, index: Option<usize>, position: (u16, u16)) {
+        let target = index
+            .and_then(|index| self.entries.get(index))
+            .map_or_else(|| self.root.clone(), |entry| entry.path.clone());
+        let mut actions = vec![EntryAction::NewFile, EntryAction::NewFolder];
+        if target != self.root {
+            actions.push(EntryAction::Rename);
+        }
+        if let Some(index) = index.filter(|index| *index < self.entries.len()) {
+            self.selected_entry = index;
+        }
+        self.entry_menu = Some(EntryMenu {
+            target,
+            actions,
+            position,
+            selected: 0,
+        });
+    }
+
+    /// Runs a menu entry: a prompt for the name, the old one when renaming.
+    pub fn choose_entry_action(&mut self, action: EntryAction) {
+        let Some(menu) = self.entry_menu.take() else {
+            return;
+        };
+        let name = if action == EntryAction::Rename {
+            menu.target
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        self.name_prompt = Some(NamePrompt {
+            action,
+            target: menu.target,
+            name,
+            error: None,
+        });
+    }
+
+    /// Creates or renames as the prompt says; on an error the prompt stays with it.
+    pub fn confirm_name(&mut self) {
+        let Some(prompt) = &mut self.name_prompt else {
+            return;
+        };
+        // New entries go inside a folder, next to a file.
+        let parent = if prompt.target.is_dir() {
+            prompt.target.clone()
+        } else {
+            prompt
+                .target
+                .parent()
+                .map_or_else(|| self.root.clone(), Path::to_path_buf)
+        };
+        let result = match prompt.action {
+            EntryAction::NewFile => create_entry(&parent, &prompt.name, false),
+            EntryAction::NewFolder => create_entry(&parent, &prompt.name, true),
+            EntryAction::Rename => rename_entry(&prompt.target, &prompt.name),
+        };
+        let path = match result {
+            Ok(path) => path,
+            Err(error) => {
+                prompt.error = Some(format!("{error:#}"));
+                return;
+            }
+        };
+        let (action, old) = (prompt.action, prompt.target.clone());
+        self.name_prompt = None;
+        if action == EntryAction::Rename {
+            self.renamed(&old, &path);
+        } else if let Some(entry) = self.entries.iter_mut().find(|entry| entry.path == parent) {
+            entry.expanded = true;
+        }
+        if let Err(error) = self.refresh_entries() {
+            self.status = error.to_string();
+        }
+        if let Some(index) = self.entries.iter().position(|entry| entry.path == path) {
+            self.selected_entry = index;
+        }
+        if action == EntryAction::NewFile
+            && let Err(error) = self.open_file(path)
+        {
+            self.status = error.to_string();
+        }
+    }
+
+    /// Follows a rename in the tree (expanded folders) and in the open tabs.
+    fn renamed(&mut self, old: &Path, new: &Path) {
+        for entry in &mut self.entries {
+            if let Ok(rest) = entry.path.strip_prefix(old) {
+                entry.path = new.join(rest);
+            }
+        }
+        for file in &mut self.open_files {
+            if let Ok(rest) = file.path.strip_prefix(old) {
+                file.path = new.join(rest);
+                file.name = file
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                file.icon = file_icon(&file.path);
+            }
+        }
+    }
+
     fn toggle_directory(&mut self, path: &Path) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.path == path) {
             entry.expanded = !entry.expanded;
@@ -107,5 +292,29 @@ impl App {
         if let Err(error) = self.refresh_entries() {
             self.status = error.to_string();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entries_are_created_and_renamed_inside_their_folder() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let file = create_entry(root, " main.rs ", false).unwrap();
+        assert_eq!(file, root.join("main.rs"));
+        assert!(file.is_file());
+        let folder = create_entry(root, "src", true).unwrap();
+        assert!(folder.is_dir());
+        for name in ["", "  ", ".", "..", "a/b", "a\\b", "main.rs"] {
+            assert!(create_entry(root, name, false).is_err(), "{name:?}");
+        }
+        let renamed = rename_entry(&file, "lib.rs").unwrap();
+        assert_eq!(renamed, root.join("lib.rs"));
+        assert!(!file.exists() && renamed.is_file());
+        assert!(rename_entry(&renamed, "src").is_err());
+        assert_eq!(rename_entry(&renamed, "lib.rs").unwrap(), renamed);
     }
 }

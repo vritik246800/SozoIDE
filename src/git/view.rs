@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use chrono::{DateTime, FixedOffset, Local};
 use ratatui::{
     Frame,
@@ -12,12 +10,12 @@ use ratatui::{
 use crate::{
     git::{
         BranchRow, ChangeArea, ChangeEntry, CommitInfo, DiffLine, DiffLineKind, DiffRow,
-        FileStatus, GitPanel, GitTab, branch_tree,
+        FileStatus, GitPanel, GitTab, LineChange, TimelineRow, branch_tree, line_changes, timeline,
     },
-    ui::{ACTIVE, BORDER, MUTED, TEXT, busy, centered, panel_block, render_dialog},
+    ui::{ACTIVE, BORDER, MUTED, TEXT, busy, centered, panel_block, render_dialog, scale_length},
 };
 
-use super::controller::{GitController, GitMode, GitUiAction};
+use super::controller::{GitController, GitMode, GitUiAction, TimelineStage};
 
 pub fn render(frame: &mut Frame, controller: &mut GitController, area: Rect) {
     controller.regions.area = area;
@@ -105,7 +103,7 @@ fn render_toolbar(frame: &mut Frame, controller: &mut GitController, panel: &Git
         ],
         GitTab::CommitGraph => &[
             ("Refresh", GitUiAction::Refresh),
-            ("Inspect [Enter]", GitUiAction::Inspect),
+            ("Inspect", GitUiAction::Inspect),
             ("Pull", GitUiAction::Pull),
             ("Push", GitUiAction::Push),
             ("Fetch", GitUiAction::Fetch),
@@ -277,97 +275,308 @@ fn change_line(change: &ChangeEntry, selected: bool) -> Line<'static> {
     .style(row_style(selected))
 }
 
+/// The colours of the timeline's lanes, from the terminal's palette (`DESIGN.md` §1.1).
+const LANE_COLOURS: [Color; 6] = [
+    Color::Cyan,
+    Color::Green,
+    Color::Magenta,
+    Color::Yellow,
+    Color::Blue,
+    Color::Red,
+];
+
+fn lane_colour(colour: usize) -> Color {
+    LANE_COLOURS[colour % LANE_COLOURS.len()]
+}
+
+/// The timeline (F06, Q36): every branch as a coloured lane of dots and lines; a commit
+/// clicked opens its files on the right, and a file its diff over the whole tab.
 fn render_graph(frame: &mut Frame, controller: &mut GitController, panel: &GitPanel, area: Rect) {
-    let mut lanes: Vec<Option<String>> = Vec::new();
-    let mut assigned = HashMap::<String, usize>::new();
+    if controller.timeline == TimelineStage::Diff {
+        render_timeline_diff(frame, controller, panel, area);
+        return;
+    }
+    let rows = timeline(&panel.commits);
     let offset = scroll_to(panel.selected, area.height.into());
-    let lines = panel
-        .commits
+    let shown = offset..(offset + usize::from(area.height)).min(rows.len());
+    let graph_width = rows[shown.clone()]
         .iter()
-        .enumerate()
-        .map(|(index, commit)| {
-            let lane = assigned
-                .remove(&commit.id)
-                .or_else(|| {
-                    lanes
-                        .iter()
-                        .position(|entry| entry == &Some(commit.id.clone()))
-                })
-                .unwrap_or_else(|| allocate_lane(&mut lanes));
-            if lane >= lanes.len() {
-                lanes.resize(lane + 1, None);
-            }
-            lanes[lane] = commit.parent_ids.first().cloned();
-            if let Some(parent) = commit.parent_ids.first() {
-                assigned.insert(parent.clone(), lane);
-            }
-            for parent in commit.parent_ids.iter().skip(1) {
-                let parent_lane = allocate_lane(&mut lanes);
-                lanes[parent_lane] = Some(parent.clone());
-                assigned.insert(parent.clone(), parent_lane);
-            }
-            let graph = if commit.parent_ids.len() > 1 {
-                format!("{}*─╮", "  ".repeat(lane))
-            } else {
-                format!("{}* ", "  ".repeat(lane))
-            };
-            commit_line(
-                controller,
-                index,
-                panel.selected,
-                offset,
-                area,
-                graph,
-                commit,
+        .map(|row| row.cells.len())
+        .max()
+        .unwrap_or(0);
+    let lines = shown
+        .map(|index| {
+            controller.regions.actions.push((
+                GitUiAction::OpenCommitFiles(index),
+                Rect::new(area.x, area.y + (index - offset) as u16, area.width, 1),
+            ));
+            timeline_line(
+                &rows[index],
+                graph_width,
+                &panel.commits[index],
+                panel.selected == index,
             )
         })
         .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), area);
-}
-
-fn allocate_lane(lanes: &mut Vec<Option<String>>) -> usize {
-    if let Some(index) = lanes.iter().position(Option::is_none) {
-        index
-    } else {
-        lanes.push(None);
-        lanes.len() - 1
+    frame.render_widget(Paragraph::new(lines), area);
+    if controller.timeline == TimelineStage::Files {
+        let width = scale_length(area.width.saturating_mul(9) / 20, controller.motion.side());
+        let side = Rect::new(area.right() - width, area.y, width, area.height);
+        render_commit_files(frame, controller, panel, side);
     }
 }
 
-fn commit_line(
-    controller: &mut GitController,
-    index: usize,
-    selected: usize,
-    offset: usize,
-    area: Rect,
-    graph: String,
+fn timeline_line(
+    row: &TimelineRow,
+    width: usize,
     commit: &CommitInfo,
+    selected: bool,
 ) -> Line<'static> {
-    if let Some(row) = index.checked_sub(offset)
-        && row < usize::from(area.height)
-    {
-        controller.regions.actions.push((
-            GitUiAction::Select(index),
-            Rect::new(area.x, area.y + row as u16, area.width, 1),
-        ));
+    let colour = row
+        .cells
+        .iter()
+        .find(|(symbol, _)| *symbol == '●')
+        .and_then(|(_, colour)| *colour)
+        .map_or(ACTIVE, lane_colour);
+    let mut spans = row
+        .cells
+        .iter()
+        .map(|(symbol, lane)| {
+            Span::styled(
+                symbol.to_string(),
+                lane.map_or(Style::default(), |lane| {
+                    Style::default().fg(lane_colour(lane))
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+    spans.push(Span::raw(
+        " ".repeat(width.saturating_sub(row.cells.len()) + 1),
+    ));
+    spans.push(Span::styled(
+        commit.short_id.clone(),
+        Style::default().fg(Color::Yellow),
+    ));
+    for label in &commit.refs {
+        let style = if label.starts_with("HEAD") {
+            Style::default().fg(colour).add_modifier(Modifier::BOLD)
+        } else if label.starts_with("tag:") {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(colour)
+        };
+        spans.push(Span::styled(format!(" ({label})"), style));
     }
-    Line::from(vec![
-        Span::styled(graph, Style::default().fg(ACTIVE)),
-        Span::styled(
-            format!(" {}", commit.short_id),
-            Style::default().fg(Color::Yellow),
-        ),
-        Span::raw(format!(" {}", commit.summary)),
-        Span::styled(
+    spans.push(Span::raw(format!(" {}", commit.summary)));
+    spans.push(Span::styled(
+        format!("  {} · {}", commit.author, ago(commit.committed_at)),
+        Style::default().fg(MUTED),
+    ));
+    Line::from(spans).style(row_style(selected))
+}
+
+/// The commit's files in a panel from the right edge, each with its status and line counts.
+fn render_commit_files(
+    frame: &mut Frame,
+    controller: &mut GitController,
+    panel: &GitPanel,
+    area: Rect,
+) {
+    if area.width < 4 {
+        return;
+    }
+    frame.render_widget(ratatui::widgets::Clear, area);
+    let commit = panel.selected_commit();
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACTIVE))
+        .title(Span::styled(
+            format!(" Commit {} ", commit.map_or("", |commit| &commit.short_id)),
+            Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let details = panel
+        .inspected_commit
+        .as_ref()
+        .filter(|details| Some(&details.commit.id) == commit.map(|commit| &commit.id));
+    let Some(details) = details else {
+        frame.render_widget(
+            Paragraph::new(busy(controller.motion.spinner(), "Loading the files...")),
+            inner,
+        );
+        return;
+    };
+    let (added, removed) = details.files.iter().fold((0, 0), |(added, removed), file| {
+        (added + file.additions, removed + file.deletions)
+    });
+    let mut lines = vec![
+        Line::from(Span::styled(
+            details.commit.summary.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
             format!(
-                "  {} · {}",
-                commit.author,
-                commit.committed_at.format("%Y-%m-%d")
+                "{} · {}",
+                details.commit.author,
+                details.commit.committed_at.format("%Y-%m-%d %H:%M")
             ),
             Style::default().fg(MUTED),
-        ),
-    ])
-    .style(row_style(selected == index))
+        )),
+        Line::from(vec![
+            Span::raw(format!(
+                "{} file{} ",
+                details.files.len(),
+                if details.files.len() == 1 { "" } else { "s" }
+            )),
+            Span::styled(format!("+{added} "), Style::default().fg(Color::Green)),
+            Span::styled(format!("−{removed}"), Style::default().fg(Color::Red)),
+        ]),
+        Line::default(),
+    ];
+    let list_top = inner.y + lines.len() as u16;
+    let room = inner.height.saturating_sub(lines.len() as u16 + 1) as usize;
+    let first = scroll_to(controller.timeline_file, room);
+    for (index, file) in details.files.iter().enumerate().skip(first).take(room) {
+        let (mark, colour) = status_mark(file.status, ChangeArea::Staged);
+        let y = list_top + (index - first) as u16;
+        controller.regions.actions.push((
+            GitUiAction::TimelineFile(index),
+            Rect::new(inner.x, y, inner.width, 1),
+        ));
+        lines.push(
+            Line::from(vec![
+                Span::styled(
+                    format!(" {mark} "),
+                    Style::default().fg(colour).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!("{} ", file.path.display())),
+                Span::styled(
+                    format!("+{} ", file.additions),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled(
+                    format!("−{}", file.deletions),
+                    Style::default().fg(Color::Red),
+                ),
+            ])
+            .style(row_style(index == controller.timeline_file)),
+        );
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+    let hint = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    frame.render_widget(
+        Paragraph::new("Enter: diff  Esc: close").style(Style::default().fg(MUTED)),
+        hint,
+    );
+}
+
+/// The diff of one file of the commit (Q38): green added, red removed, yellow modified.
+fn render_timeline_diff(
+    frame: &mut Frame,
+    controller: &mut GitController,
+    panel: &GitPanel,
+    area: Rect,
+) {
+    let [header, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
+    let file = panel
+        .inspected_commit
+        .as_ref()
+        .and_then(|details| details.files.get(controller.timeline_file));
+    let Some(file) = file else {
+        return;
+    };
+    let mut x = header.x;
+    let back = "‹ Files";
+    action_button(
+        frame,
+        controller,
+        Rect::new(x, header.y, back.chars().count() as u16 + 2, 1),
+        back,
+        GitUiAction::TimelineBack,
+        false,
+    );
+    x += back.chars().count() as u16 + 3;
+    let (mark, colour) = status_mark(file.status, ChangeArea::Staged);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{mark} "),
+                Style::default().fg(colour).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                file.path.display().to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  +{}", file.additions),
+                Style::default().fg(Color::Green),
+            ),
+            Span::styled(
+                format!(" −{}", file.deletions),
+                Style::default().fg(Color::Red),
+            ),
+            Span::styled(
+                "   [ ]: file  Up/Down: scroll  Esc: back",
+                Style::default().fg(MUTED),
+            ),
+        ])),
+        Rect::new(x, header.y, header.right().saturating_sub(x), 1),
+    );
+    let diff = panel.diff.files.iter().find(|diff| diff.path == file.path);
+    let Some(diff) = diff.filter(|diff| !diff.binary) else {
+        frame.render_widget(
+            Paragraph::new("No text changes to show.").style(Style::default().fg(MUTED)),
+            body,
+        );
+        return;
+    };
+    let digits = diff
+        .hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .flat_map(|line| line.old.into_iter().chain(line.new))
+        .max()
+        .unwrap_or(0)
+        .to_string()
+        .len();
+    let mut lines = Vec::new();
+    for hunk in &diff.hunks {
+        lines.push(Line::from(Span::styled(
+            hunk.header.trim_end().to_owned(),
+            Style::default().fg(ACTIVE),
+        )));
+        for (line, change) in hunk.lines.iter().zip(line_changes(&hunk.lines)) {
+            // A modified line shows its old text dimmed above the new one.
+            let old = line.kind == DiffLineKind::Removed;
+            let (sign, style) = match change {
+                LineChange::Added => ("+", Style::default().fg(Color::Green)),
+                LineChange::Removed => ("-", Style::default().fg(Color::Red)),
+                LineChange::Modified if old => (
+                    "-",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::DIM),
+                ),
+                LineChange::Modified => ("+", Style::default().fg(Color::Yellow)),
+                LineChange::Context => (" ", Style::default().fg(TEXT)),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{} {} ", number(line.old, digits), number(line.new, digits)),
+                    Style::default().fg(MUTED),
+                ),
+                Span::styled(format!("{sign} {}", line.text), style),
+            ]));
+        }
+    }
+    controller.timeline_scroll = controller
+        .timeline_scroll
+        .min(lines.len().saturating_sub(usize::from(body.height)));
+    frame.render_widget(
+        Paragraph::new(lines).scroll((controller.timeline_scroll as u16, 0)),
+        body,
+    );
 }
 
 /// Local branches and each remote as a tree, folders for the `/` in the names; a click on a

@@ -21,7 +21,7 @@ mod input;
 mod layout;
 mod motion;
 
-pub use explorer::FileEntry;
+pub use explorer::{EntryAction, EntryMenu, FileEntry, NamePrompt};
 use layout::{DragTarget, TabDrag, inner_size};
 pub use layout::{DropZone, Focus, Overlay, Regions, Split, SplitDirection, TabBar};
 pub(crate) use motion::AppMotion;
@@ -63,6 +63,9 @@ pub struct App {
     pub should_quit: bool,
     pub overlay: Overlay,
     pub search: Option<SearchState>,
+    /// The Explorer's right-click menu and the name it asks for (F01).
+    pub entry_menu: Option<EntryMenu>,
+    pub name_prompt: Option<NamePrompt>,
     pub splash_visible: bool,
     pub motion: AppMotion,
     pub updater: Updater,
@@ -130,6 +133,8 @@ impl App {
             should_quit: false,
             overlay: Overlay::None,
             search: None,
+            entry_menu: None,
+            name_prompt: None,
             splash_visible: splash,
             motion: AppMotion::new(now, splash),
             updater,
@@ -181,6 +186,9 @@ impl App {
         if self.search.is_some() && self.motion.search_closed() {
             self.search = None;
         }
+        if let Some(search) = &mut self.search {
+            search.poll();
+        }
         let due = self
             .open_files
             .iter()
@@ -192,6 +200,10 @@ impl App {
             self.save_file(index);
         }
         self.database.tick_at(now);
+        // Copy in the SQL tab: the app owns the clipboard.
+        if let Some(text) = self.database.copy_request.take() {
+            self.copy(text);
+        }
         self.git.tick_at(now);
         // The Diff tab asked for its file in the editor.
         if let Some(path) = self.git.open_request.take() {

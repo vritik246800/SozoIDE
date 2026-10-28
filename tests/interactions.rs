@@ -103,7 +103,7 @@ fn keyboard_mouse_tabs_and_panels_work_in_a_real_pty() {
     wait_for_output(&output, "Add Connection");
     send(b"\x1b");
     send(b"\x10");
-    wait_for_output(&output, "Find in current file");
+    wait_for_output(&output, "Find in file");
     send(b"FIRST");
     send(b"\x1b");
 

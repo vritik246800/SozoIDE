@@ -9,6 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use sqlx::AnyPool;
 
 use super::{
+    builder::{Catalog, Design, build_query, load_catalog},
     model::{
         ConnectionConfig, ConnectionForm, DatabaseTab, QueryCancellation, QueryHistoryEntry,
         QueryResult, next_char_boundary, previous_char_boundary,
@@ -32,6 +33,13 @@ pub struct DatabasePanel {
     pub status: Option<String>,
     pub tab: DatabaseTab,
     pub selection: usize,
+    /// The tables and views of the active connection, and the ones in the diagram.
+    pub catalog: Option<Catalog>,
+    pub design: Design,
+    /// Why the design makes no SQL yet, shown in the SQL tab.
+    pub builder_error: Option<String>,
+    /// The SQL was typed over: the builder no longer replaces it until rebuilt.
+    pub sql_edited: bool,
     store: ConnectionStore,
     pools: HashMap<String, AnyPool>,
     active_query: Option<QueryCancellation>,
@@ -62,6 +70,10 @@ impl DatabasePanel {
             status: None,
             tab: DatabaseTab::Connections,
             selection: 0,
+            catalog: None,
+            design: Design::default(),
+            builder_error: None,
+            sql_edited: false,
             store,
             pools: HashMap::new(),
             active_query: None,
@@ -176,12 +188,69 @@ impl DatabasePanel {
         Ok(id)
     }
 
+    /// Reads the tables and views of the active connection; a new connection starts with an
+    /// empty diagram.
+    pub async fn load_catalog(&mut self) -> Result<()> {
+        let connection = self
+            .active_config()
+            .context("No active connection")?
+            .clone();
+        let pool = self.pool_for(&connection).await?;
+        let catalog = load_catalog(&pool, connection.driver).await?;
+        self.status = Some(format!(
+            "{}: {} tables and views",
+            connection.name,
+            catalog.objects.len()
+        ));
+        self.catalog = Some(catalog);
+        self.design = Design::default();
+        self.set_query("");
+        self.sql_edited = false;
+        self.rebuild_sql();
+        Ok(())
+    }
+
+    /// The SQL of the design, unless it was typed over; `force` replaces it anyway.
+    pub fn rebuild(&mut self, force: bool) {
+        if force {
+            self.sql_edited = false;
+        }
+        self.rebuild_sql();
+    }
+
+    fn rebuild_sql(&mut self) {
+        let (Some(catalog), Some(driver)) = (
+            &self.catalog,
+            self.active_config().map(|connection| connection.driver),
+        ) else {
+            return;
+        };
+        match build_query(catalog, &self.design, driver) {
+            Ok(sql) => {
+                self.builder_error = None;
+                if !self.sql_edited {
+                    self.set_query(sql);
+                }
+            }
+            Err(error) => self.builder_error = Some(error.to_string()),
+        }
+    }
+
+    /// Changes the design and makes its SQL again.
+    pub fn change_design(&mut self, change: impl FnOnce(&mut Design) -> Result<()>) {
+        match change(&mut self.design) {
+            Ok(()) => self.rebuild_sql(),
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+
     pub fn set_query(&mut self, query: impl Into<String>) {
         self.query_text = query.into();
         self.query_cursor = self.query_text.len();
     }
 
     pub fn insert_query(&mut self, text: &str) {
+        self.sql_edited = true;
         self.clamp_query_cursor();
         self.query_text.insert_str(self.query_cursor, text);
         self.query_cursor += text.len();
@@ -193,6 +262,7 @@ impl DatabasePanel {
     }
 
     pub fn query_delete(&mut self) {
+        self.sql_edited = true;
         self.clamp_query_cursor();
         if self.query_cursor < self.query_text.len() {
             let end = next_char_boundary(&self.query_text, self.query_cursor);
@@ -208,6 +278,33 @@ impl DatabasePanel {
     pub fn query_right(&mut self) {
         self.clamp_query_cursor();
         self.query_cursor = next_char_boundary(&self.query_text, self.query_cursor);
+    }
+
+    /// The cursor to the line above or below, at the same column or the line's end.
+    pub fn query_vertical(&mut self, down: bool) {
+        self.clamp_query_cursor();
+        let before = &self.query_text[..self.query_cursor];
+        let start = before.rfind('\n').map_or(0, |index| index + 1);
+        let column = before[start..].chars().count();
+        let target = if down {
+            match self.query_text[self.query_cursor..].find('\n') {
+                Some(offset) => self.query_cursor + offset + 1,
+                None => return,
+            }
+        } else {
+            match start.checked_sub(1) {
+                Some(end) => self.query_text[..end]
+                    .rfind('\n')
+                    .map_or(0, |index| index + 1),
+                None => return,
+            }
+        };
+        let line = self.query_text[target..].split('\n').next().unwrap_or("");
+        self.query_cursor = target
+            + line
+                .char_indices()
+                .nth(column)
+                .map_or(line.len(), |(index, _)| index);
     }
 
     pub fn query_home(&mut self) {
@@ -300,7 +397,6 @@ impl DatabasePanel {
                     duration.as_millis()
                 ));
                 self.results = Some(result.clone());
-                self.tab = DatabaseTab::Results;
                 Ok(result)
             }
             Err(error) => {
@@ -335,7 +431,6 @@ impl DatabasePanel {
         result: Result<usize, String>,
     ) {
         self.history.push(QueryHistoryEntry {
-            connection_id: connection.id.clone(),
             connection_name: connection.name.clone(),
             query: query.into(),
             executed_at: SystemTime::now(),
@@ -457,7 +552,6 @@ mod tests {
         assert_eq!(empty.columns, ["id", "name"]);
         assert!(empty.rows.is_empty());
         assert_eq!(panel.history.len(), 5);
-        assert_eq!(panel.tab, DatabaseTab::Results);
         assert!(panel.error.is_none());
 
         panel.set_query("UPDATE items SET optional = 'set' WHERE id = 1");
@@ -503,6 +597,105 @@ mod tests {
             Err("Query cancelled".into())
         );
         panel.close().await;
+    }
+
+    #[tokio::test]
+    async fn the_catalog_reads_tables_views_keys_and_the_design_makes_sql() {
+        let directory = TempDir::new().unwrap();
+        let mut panel = panel(&directory);
+        let form = sqlite_form(&directory, "shop");
+        panel.add_connection(&form).await.unwrap();
+        panel.set_query(
+            "CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL);\
+             CREATE TABLE orders (id INTEGER PRIMARY KEY, \
+                 customer_id INTEGER REFERENCES customers, total REAL);\
+             CREATE VIEW big_orders AS SELECT * FROM orders WHERE total > 10;\
+             INSERT INTO customers VALUES (1, 'Ana'), (2, 'Rui');\
+             INSERT INTO orders VALUES (1, 1, 5), (2, 1, 20), (3, 2, 7);",
+        );
+        panel.execute_query().await.unwrap();
+        panel.load_catalog().await.unwrap();
+        let catalog = panel.catalog.clone().unwrap();
+        let names = catalog
+            .objects
+            .iter()
+            .map(|object| (object.name.as_str(), object.view))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                ("customers", false),
+                ("orders", false),
+                ("big_orders", true)
+            ]
+        );
+        let orders = catalog.object("orders").unwrap();
+        assert!(orders.columns[0].key && !orders.columns[1].key);
+        assert_eq!(orders.columns[2].kind, "REAL");
+        // A key to the other table's primary key names its column.
+        assert_eq!(
+            catalog.keys,
+            [crate::database::ForeignKey {
+                from: "orders".into(),
+                from_column: "customer_id".into(),
+                to: "customers".into(),
+                to_column: "id".into(),
+            }]
+        );
+
+        panel.change_design(|design| design.toggle_object("customers"));
+        panel.change_design(|design| design.toggle_object("orders"));
+        panel.change_design(|design| {
+            design.toggle_field("customers", "name");
+            design.toggle_field("orders", "total");
+            design.fields[1].total = crate::database::Total::Sum;
+            design.fields[1].sort = crate::database::Sort::Descending;
+            Ok(())
+        });
+        assert!(!panel.sql_edited && panel.builder_error.is_none());
+        assert!(
+            panel
+                .query_text
+                .starts_with("SELECT customers.name,\n       SUM(orders.total)")
+        );
+        let result = panel.execute_query().await.unwrap();
+        assert_eq!(result.columns, ["name", "sum_total"]);
+        assert_eq!(result.cell(0, 0), Some(&DatabaseValue::Text("Ana".into())));
+        assert_eq!(result.cell(0, 1), Some(&DatabaseValue::Float(25.0)));
+
+        // Typed SQL stays until Rebuild.
+        panel.insert_query(" LIMIT 1");
+        panel.change_design(|design| {
+            design.fields[1].sort = crate::database::Sort::None;
+            Ok(())
+        });
+        assert!(panel.sql_edited && panel.query_text.ends_with("LIMIT 1"));
+        panel.rebuild(true);
+        assert!(!panel.sql_edited && !panel.query_text.contains("ORDER BY"));
+        panel.close().await;
+    }
+
+    #[test]
+    fn the_sql_cursor_moves_between_lines_at_its_column() {
+        let directory = TempDir::new().unwrap();
+        let mut panel = panel(&directory);
+        panel.set_query("SELECT a\nFROM t\nWHERE x = 1");
+        panel.query_vertical(false);
+        assert_eq!(&panel.query_text[panel.query_cursor..], "\nWHERE x = 1");
+        // The column it lands on is the one it moves on with.
+        panel.query_vertical(false);
+        assert_eq!(
+            &panel.query_text[panel.query_cursor..],
+            " a\nFROM t\nWHERE x = 1"
+        );
+        panel.query_vertical(false);
+        assert_eq!(panel.query_cursor, 6);
+        panel.query_home();
+        panel.query_vertical(true);
+        assert_eq!(
+            &panel.query_text[panel.query_cursor..],
+            "FROM t\nWHERE x = 1"
+        );
     }
 
     #[tokio::test]

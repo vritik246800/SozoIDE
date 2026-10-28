@@ -10,6 +10,23 @@ pub struct Notes {
 
 pub const NOTES: &[Notes] = &[
     Notes {
+        version: "0.5.0",
+        new: &[
+            "Explorer: right-click to create a file or a folder, or to rename one; the icon follows the extension you type",
+            "Ctrl+P finds as you type in a bar under the editor: every match marked, the current one counted as 3/12 with arrows",
+            "Ctrl+Shift+P searches the folder in the background and groups the results by file with the match highlighted",
+            "Commit Graph is now a timeline of every branch in its own colour; click a commit to see its files and a file to see its diff",
+            "In that diff, added lines are green, removed red and modified yellow",
+            "Database: after connecting, tables and views on the left; draw them as a diagram with their keys and relations",
+            "Tick columns to build a query: group, count, sum, average, min, max, sort and filter, with the joins made for you",
+            "The SQL tab shows the query to edit, copy or run; the results scroll down and sideways",
+        ],
+        fixed: &[
+            "PDF files and images show at once in Kitty, without switching tabs",
+            "Queries with table functions such as pragma_table_info run in SQLite",
+        ],
+    },
+    Notes {
         version: "0.4.0",
         new: &[
             "Source Control: Branches as a tree grouped by remote and folder; click a branch to switch to it",

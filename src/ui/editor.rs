@@ -3,18 +3,24 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{
+        Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState,
+    },
 };
 use ratatui_image::{Resize, StatefulImage};
 use tui_term::widget::{Cursor, PseudoTerminal};
 
 use crate::{
-    app::{App, DropZone, Focus, Regions, SplitDirection},
+    app::{App, DropZone, EntryAction, Focus, Regions, SplitDirection},
     branding::ASCII_LOGO,
-    editor::OpenFile,
+    editor::{OpenFile, file_icon},
 };
 
-use super::{ACTIVE, BORDER, MUTED, TEXT, key, panel_block, select_columns, skip_columns};
+use super::{
+    ACTIVE, BORDER, CURRENT_MATCH, MATCH, MUTED, TEXT, key, mark_columns, panel_block,
+    select_columns, skip_columns,
+};
 
 pub(super) fn render_explorer(frame: &mut Frame, app: &App, area: Rect) {
     let title = format!(" {} Explorer ", app.icon("custom-folder"));
@@ -59,6 +65,117 @@ pub(super) fn render_explorer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(lines).block(panel_block(title, app.focus == Focus::Explorer)),
         area,
+    );
+}
+
+/// The Explorer's right-click menu at the mouse, kept on screen (F01).
+pub(super) fn render_entry_menu(frame: &mut Frame, app: &mut App, screen: Rect) {
+    app.regions.entry_menu_items.clear();
+    let Some(menu) = &app.entry_menu else {
+        return;
+    };
+    let width = 16;
+    let height = menu.actions.len() as u16 + 2;
+    let x = menu.position.0.min(screen.right().saturating_sub(width));
+    let y = menu.position.1.min(screen.bottom().saturating_sub(height));
+    let area = Rect::new(x, y, width, height).intersection(screen);
+    frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACTIVE));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    for (index, action) in menu.actions.iter().enumerate() {
+        let row = Rect::new(inner.x, inner.y + index as u16, inner.width, 1).intersection(inner);
+        let style = if index == menu.selected {
+            Style::default().fg(ACTIVE).add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default().fg(TEXT)
+        };
+        frame.render_widget(
+            Paragraph::new(format!(" {}", action.label())).style(style),
+            row,
+        );
+        app.regions.entry_menu_items.push((*action, row));
+    }
+}
+
+/// The name of a new file or folder, or of a rename: the icon follows the extension typed.
+pub(super) fn render_name_prompt(frame: &mut Frame, app: &App, screen: Rect) {
+    let Some(prompt) = &app.name_prompt else {
+        return;
+    };
+    let folder = match prompt.action {
+        EntryAction::NewFolder => true,
+        EntryAction::NewFile => false,
+        EntryAction::Rename => prompt.target.is_dir(),
+    };
+    let (icon, color) = if folder {
+        (app.icon("custom-folder"), ACTIVE)
+    } else {
+        file_icon(std::path::Path::new(&prompt.name))
+    };
+    let place = if prompt.action == EntryAction::Rename {
+        prompt.target.clone()
+    } else if prompt.target.is_dir() {
+        prompt.target.join("")
+    } else {
+        prompt.target.parent().unwrap_or(&app.root).join("")
+    };
+    let place = place
+        .strip_prefix(&app.root)
+        .unwrap_or(&place)
+        .display()
+        .to_string();
+    let width = 60.min(screen.width);
+    let area = Rect::new(
+        screen.x + (screen.width - width) / 2,
+        screen.y + screen.height.saturating_sub(7) / 2,
+        width,
+        7.min(screen.height),
+    );
+    let verb = if prompt.action == EntryAction::Rename {
+        "rename"
+    } else {
+        "create"
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            if place.is_empty() {
+                "in the project folder".to_owned()
+            } else {
+                format!(
+                    "{} {place}",
+                    if prompt.action == EntryAction::Rename {
+                        "was"
+                    } else {
+                        "in"
+                    }
+                )
+            },
+            Style::default().fg(MUTED),
+        )),
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(ACTIVE)),
+            Span::styled(format!("{icon} "), Style::default().fg(color)),
+            Span::styled(prompt.name.clone(), Style::default().fg(TEXT)),
+            Span::styled("█", Style::default().fg(ACTIVE)),
+        ]),
+        Line::from(Span::styled(
+            prompt.error.clone().unwrap_or_default(),
+            Style::default().fg(ratatui::style::Color::Red),
+        )),
+        Line::from(Span::styled(
+            format!("Enter: {verb}  Esc: cancel"),
+            Style::default().fg(MUTED),
+        )),
+    ];
+    super::render_dialog(
+        frame,
+        area,
+        1.0,
+        format!(" {} ", prompt.action.label()),
+        |frame, inner| frame.render_widget(Paragraph::new(lines), inner),
     );
 }
 
@@ -192,12 +309,16 @@ pub(super) fn render_editor(frame: &mut Frame, app: &mut App, regions: &mut Regi
             regions.editor = body;
         }
         match app.shown_tab(pane) {
-            Some(index) => render_file(
-                frame,
-                &mut app.open_files[index],
-                body,
-                focused && pane == active_pane,
-            ),
+            Some(index) => {
+                let marks = search_marks(app, index);
+                render_file(
+                    frame,
+                    &mut app.open_files[index],
+                    body,
+                    focused && pane == active_pane,
+                    &marks,
+                );
+            }
             None => render_empty(frame, focused, body),
         }
     }
@@ -278,9 +399,38 @@ fn render_drop_preview(frame: &mut Frame, regions: &Regions, zone: DropZone) {
     );
 }
 
+/// The search matches in the file of tab `index` while the search is open: row, column and
+/// length in characters, and whether it is the one the search is on.
+fn search_marks(app: &App, index: usize) -> Vec<(usize, usize, usize, bool)> {
+    let Some(search) = &app.search else {
+        return Vec::new();
+    };
+    let path = &app.open_files[index].path;
+    search
+        .matches
+        .iter()
+        .enumerate()
+        .filter(|(_, found)| &found.path == path)
+        .map(|(number, found)| {
+            (
+                found.line,
+                found.column,
+                found.length,
+                number == search.selected,
+            )
+        })
+        .collect()
+}
+
 /// The rows of `file` on screen, cut at its horizontal scroll, with a scrollbar on the bottom
-/// border when the text is wider than the pane.
-fn render_file(frame: &mut Frame, file: &mut OpenFile, area: Rect, focused: bool) {
+/// border when the text is wider than the pane, and `marks` (search matches) marked.
+fn render_file(
+    frame: &mut Frame,
+    file: &mut OpenFile,
+    area: Rect,
+    focused: bool,
+    marks: &[(usize, usize, usize, bool)],
+) {
     let title = format!(" {} — {} ", file.path.display(), file.language);
     if let Some(image) = &mut file.image {
         let mut block = panel_block(title, focused);
@@ -308,6 +458,17 @@ fn render_file(frame: &mut Frame, file: &mut OpenFile, area: Rect, focused: bool
                 .and_then(|row| file.selected_columns(row));
             if let Some((from, to)) = selected {
                 spans = select_columns(spans, from, to);
+            }
+            let row = number.and_then(|_| file.source_row(display));
+            for &(_, column, length, current) in marks.iter().filter(|mark| Some(mark.0) == row) {
+                let line = row
+                    .and_then(|row| file.lines.get(row))
+                    .map_or("", String::as_str);
+                let from = Span::raw(line.chars().take(column).collect::<String>()).width();
+                let to = from
+                    + Span::raw(line.chars().skip(column).take(length).collect::<String>()).width();
+                let style = if current { CURRENT_MATCH } else { MATCH };
+                spans = mark_columns(spans, from, to, style);
             }
             let number = number.map_or_else(
                 || " ".repeat(number_width),

@@ -636,6 +636,46 @@ mod tests {
     }
 
     #[test]
+    fn the_timeline_reads_every_branch_with_its_labels() {
+        let (directory, repo) = init_repo();
+        write(directory.path(), "file.txt", "base\n");
+        let base = commit_all(&repo, "Base");
+        repo.branch("feature/login", &repo.find_commit(base).unwrap(), false)
+            .unwrap();
+        repo.tag_lightweight("v1.0", &repo.find_object(base, None).unwrap(), false)
+            .unwrap();
+        write(directory.path(), "file.txt", "main\n");
+        let main = commit_all(&repo, "On main");
+        checkout(&repo, "feature/login");
+        write(directory.path(), "login.txt", "login\n");
+        let feature = commit_all(&repo, "Login");
+        checkout(&repo, "main");
+        let panel = GitPanel::new(directory.path());
+        // The branch not checked out is in the timeline too, newest first.
+        let ids = panel
+            .commits
+            .iter()
+            .map(|commit| commit.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&feature.to_string()) && ids.contains(&main.to_string()));
+        assert_eq!(ids[2], base.to_string());
+        let labels = |id: Oid| {
+            panel
+                .commits
+                .iter()
+                .find(|commit| commit.id == id.to_string())
+                .unwrap()
+                .refs
+                .clone()
+        };
+        assert_eq!(labels(main), ["HEAD -> main"]);
+        assert_eq!(labels(feature), ["feature/login"]);
+        assert_eq!(labels(base), ["tag: v1.0"]);
+        assert_eq!(timeline(&panel.commits).len(), 3);
+    }
+
+    #[test]
     fn branches_and_launchpad_describe_local_and_remote_references() {
         let (directory, repo) = init_repo();
         write(directory.path(), "file.txt", "base\n");

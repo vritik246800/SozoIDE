@@ -88,19 +88,30 @@ pub(crate) async fn open_pool(form: &ConnectionForm) -> Result<AnyPool> {
 pub(crate) async fn run_query(pool: &AnyPool, query: &str) -> Result<QueryResult> {
     let started = Instant::now();
     if query_returns_rows(query) {
-        let description = pool
-            .describe(query)
-            .await
-            .map_err(|error| anyhow!("Query failed: {error}"))?;
-        let columns = description
-            .columns()
-            .iter()
-            .map(|column| column.name().to_owned())
-            .collect();
         let rows = sqlx::query(query)
             .fetch_all(pool)
             .await
             .map_err(|error| anyhow!("Query failed: {error}"))?;
+        // The names come with the rows; only an empty result needs `describe`, which the
+        // SQLite driver cannot do for table-valued functions such as `pragma_table_info` (E26).
+        let columns = match rows.first() {
+            Some(row) => row
+                .columns()
+                .iter()
+                .map(|column| column.name().to_owned())
+                .collect(),
+            None => pool
+                .describe(query)
+                .await
+                .map(|description| {
+                    description
+                        .columns()
+                        .iter()
+                        .map(|column| column.name().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
         let rows = rows.iter().map(decode_row).collect::<Result<Vec<_>>>()?;
         Ok(QueryResult {
             columns,

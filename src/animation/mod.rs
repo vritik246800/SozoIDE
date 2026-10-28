@@ -136,6 +136,8 @@ pub struct InterfaceMotion<T> {
     content: Tween,
     edge: Edge,
     dialog: Tween,
+    /// A panel that slides in from the right edge (the timeline's commit files).
+    side: Tween,
     operation_started: Option<Instant>,
 }
 
@@ -147,6 +149,7 @@ impl<T: Copy + PartialOrd> InterfaceMotion<T> {
             content: Tween::new(now, 1.0, TAB),
             edge: Edge::Right,
             dialog: Tween::new(now, 0.0, DIALOG),
+            side: Tween::new(now, 0.0, DIALOG),
             operation_started: None,
         }
     }
@@ -170,6 +173,34 @@ impl<T: Copy + PartialOrd> InterfaceMotion<T> {
 
     pub fn content(&self) -> f32 {
         self.content.value(self.now)
+    }
+
+    /// New content comes in from `edge` without a tab change, like a tab would.
+    pub fn replay(&mut self, edge: Edge) {
+        self.edge = edge;
+        self.content.restart(self.now, TAB);
+    }
+
+    pub fn side(&self) -> f32 {
+        self.side.value(self.now)
+    }
+
+    pub fn open_side(&mut self, now: Instant) {
+        self.now = now;
+        self.side.set_target(1.0, now);
+    }
+
+    pub fn close_side(&mut self, now: Instant) {
+        self.now = now;
+        self.side.set_target(0.0, now);
+    }
+
+    pub fn side_closing(&self) -> bool {
+        self.side.target() == 0.0
+    }
+
+    pub fn side_closed(&self) -> bool {
+        self.side_closing() && self.side.is_finished(self.now)
     }
 
     pub fn edge(&self) -> Edge {
@@ -204,13 +235,18 @@ impl<T: Copy + PartialOrd> InterfaceMotion<T> {
     }
 
     pub fn spinner(&self) -> &'static str {
-        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let elapsed = self
-            .operation_started
-            .map(|start| self.now.saturating_duration_since(start))
-            .unwrap_or_default();
-        FRAMES[(elapsed.as_millis() / SPINNER_FRAME.as_millis()) as usize % FRAMES.len()]
+        spinner(
+            self.operation_started
+                .map(|start| self.now.saturating_duration_since(start))
+                .unwrap_or_default(),
+        )
     }
+}
+
+/// The braille spinner `elapsed` after it started.
+pub fn spinner(elapsed: Duration) -> &'static str {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    FRAMES[(elapsed.as_millis() / SPINNER_FRAME.as_millis()) as usize % FRAMES.len()]
 }
 
 /// Where a motion that loops every `period` is after `elapsed`: 0 to 1, eased in and out.
