@@ -95,10 +95,17 @@ EOF
 commit '2026-10-08T10:05:00Z' 'Print the schedule'
 
 git switch -q -c launches-table
+cat >migrations/000_crews.sql <<'EOF'
+CREATE TABLE crews (
+    name TEXT PRIMARY KEY,
+    ship TEXT NOT NULL
+);
+INSERT INTO crews VALUES ('Sozo', 'Aurora'), ('Vega', 'Lyra');
+EOF
 cat >migrations/001_launches.sql <<'EOF'
 CREATE TABLE launches (
     day INTEGER PRIMARY KEY,
-    crew TEXT NOT NULL,
+    crew TEXT NOT NULL REFERENCES crews (name),
     status TEXT NOT NULL
 );
 EOF
@@ -117,6 +124,7 @@ sed -i 's/schedule(3)/schedule(4)/' src/main.rs
 git add src/main.rs
 printf "INSERT INTO launches VALUES (21, 'Sozo', 'planned'), (28, 'Vega', 'planned');\n" >migrations/003_next_launches.sql
 
+sqlite3 orbit.db <migrations/000_crews.sql
 sqlite3 orbit.db <migrations/001_launches.sql
 sqlite3 orbit.db <migrations/002_first_launches.sql
 sqlite3 orbit.db <migrations/003_next_launches.sql
@@ -161,7 +169,11 @@ wait_for 'Staged'
 capture git-changes
 keys Tab
 wait_for 'Merge the launches table'
+# The timeline with the files of the merge slid in from the right.
+keys Enter
+wait_for 'Enter: diff'
 capture git-graph
+keys Escape
 keys C-g
 
 keys C-d
@@ -173,20 +185,35 @@ keys Tab
 keys Tab
 text 'orbit.db'
 keys Enter
-sleep 0.6
+# Connecting opens the diagram: both tables in, the crew name and the launch day ticked.
+wait_for 'Tables (2)'
+keys Space
+keys Down
+keys Space
+keys Right
 keys Enter
-keys Tab
-text 'SELECT day, crew, status FROM launches ORDER BY day;'
-keys F5
-wait_for 'Vega'
-capture db-results
-keys BTab
+keys Down
+keys Down
+keys Enter
+wait_for 'launches.crew'
 capture db-query
+# The builder: launches counted per crew, the busiest first, then run.
+keys Tab
+keys Down
+keys Right
+keys Enter
+keys Enter
+keys Right
+keys Enter
+keys Enter
+keys F5
+wait_for 'count_day'
+capture db-results
 keys C-d
 
 keys C-p
 text 'launch'
-wait_for 'results'
+wait_for '◂ 1/'
 capture search
 keys Escape
 sleep 0.4
