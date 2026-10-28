@@ -13,12 +13,15 @@ use ratatui::{
 use crate::app::{App, Overlay, Regions};
 
 pub(crate) use components::{
-    ACTIVE, BORDER, MUTED, TEXT, bar, busy, centered, key, panel_block, render_dialog,
-    scale_length, sweep_bar,
+    ACTIVE, BORDER, CURRENT_MATCH, MATCH, MUTED, TEXT, bar, busy, centered, key, panel_block,
+    render_dialog, scale_length, sweep_bar, unfold,
 };
+pub(crate) use components::{mark_columns, select_columns, skip_columns};
 use components::{render_handle, sweep};
-pub(crate) use components::{select_columns, skip_columns};
-use editor::{render_editor, render_explorer, render_tabs, render_terminal};
+use editor::{
+    render_editor, render_entry_menu, render_explorer, render_name_prompt, render_tabs,
+    render_terminal,
+};
 use overlays::{
     render_about, render_help, render_search, render_splash, render_tutorial, render_update,
     render_whats_new,
@@ -133,7 +136,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         );
     }
     let (progress, edge) = (app.motion.content(), app.motion.content_edge());
-    sweep(buffer, previous, content_area, progress, edge);
+    // Kitty receives an image once, in the first frame that draws it: a sweep over that frame
+    // would hide it until another tab is opened (E25), so images and PDFs come in whole.
+    let image = app
+        .shown_tab(app.active_pane())
+        .is_some_and(|index| app.open_files[index].image.is_some());
+    if !image {
+        sweep(buffer, previous, content_area, progress, edge);
+    }
     app.motion.remember(frame.buffer_mut());
 
     // Dialogs come last so that they dim everything else and stay out of the next transition.
@@ -145,6 +155,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.search.is_some() {
         render_search(frame, app, area);
     }
+    render_entry_menu(frame, app, area);
+    render_name_prompt(frame, app, area);
     match app.overlay {
         Overlay::Help => render_help(frame, app, area),
         Overlay::About => render_about(frame, app, area),
@@ -395,7 +407,7 @@ mod tests {
         ));
         settle(&mut app);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        assert!(buffer_text(&terminal).contains("Find in current file"));
+        assert!(buffer_text(&terminal).contains("Find in file"));
         assert!(app.regions.search_input.width > 0);
     }
 
@@ -1176,6 +1188,15 @@ mod tests {
             assert!(text.contains(section), "{section}");
         }
         assert!(text.contains("Ctrl+C / Ctrl+X"));
+        // The keys of the Explorer menu, the search counter, the timeline and the builder.
+        for keys in [
+            "Right-click",
+            "Previous / next result",
+            "Click a commit",
+            "Remove the builder row",
+        ] {
+            assert!(text.contains(keys), "{keys}");
+        }
         // The section titles take the colour of their area, one of the terminal's.
         let buffer = tall.backend().buffer();
         let (x, y) = (0..60)
@@ -1192,6 +1213,381 @@ mod tests {
         short.draw(|frame| draw(frame, &mut app)).unwrap();
         let last = buffer_text(&short);
         assert!(last.contains("Application") && !last.contains("╭─ Panels "));
+    }
+
+    #[test]
+    fn a_pdf_is_drawn_whole_in_the_first_frame_of_its_tab() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("notes.txt"), "old text\n".repeat(40)).unwrap();
+        std::fs::write(
+            directory.path().join("guide.pdf"),
+            crate::editor::sample_pdf(1),
+        )
+        .unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(directory.path().join("notes.txt")).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        app.open_file(directory.path().join("guide.pdf")).unwrap();
+        // The first frame of the tab, while a text tab would still be sweeping in.
+        app.tick_at(std::time::Instant::now());
+        assert!(app.motion.content() < 1.0);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let area = app.regions.editor;
+        let buffer = terminal.backend().buffer();
+        let rows = (area.y + 1..area.bottom() - 1)
+            .map(|y| row(buffer, y))
+            .collect::<Vec<_>>();
+        assert!(rows.iter().all(|line| !line.contains("old text")));
+    }
+
+    #[test]
+    fn the_explorer_menu_opens_at_the_mouse_and_the_prompt_shows_the_icon_of_the_name() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("a.txt"), "").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.show_explorer = true;
+        settle(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let explorer = app.regions.explorer;
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: explorer.x + 2,
+            row: explorer.y + 1,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let labels = app
+            .regions
+            .entry_menu_items
+            .iter()
+            .map(|(action, area)| (action.label(), area.y - explorer.y))
+            .collect::<Vec<_>>();
+        assert_eq!(labels, [("New File", 2), ("New Folder", 3), ("Rename", 4)]);
+        assert!(buffer_text(&terminal).contains(" New Folder"));
+
+        app.choose_entry_action(crate::app::EntryAction::NewFile);
+        app.name_paste("main.rs");
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        let (icon, _) = crate::editor::file_icon(std::path::Path::new("main.rs"));
+        assert!(text.contains(&format!("> {icon} main.rs█")), "{text}");
+        assert!(text.contains("Enter: create  Esc: cancel"));
+        assert!(app.regions.entry_menu_items.is_empty());
+    }
+
+    #[test]
+    fn searches_count_and_mark_their_matches_in_the_bar_the_dialog_and_the_editor() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("a.rs"),
+            "fn alpha() {}\nlet x = alpha();\n// ALPHA\n",
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("b.txt"), "no match\nalpha\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(directory.path().join("a.rs")).unwrap();
+        settle(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        app.search_paste("alpha");
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("◂ 2/3 ▸"), "{text}");
+        // The editor stays in view: the second match is the current one, the others marked.
+        let buffer = terminal.backend().buffer();
+        let cell = |needle: &str, nth: usize| {
+            let (y, line) = (0..buffer.area.height)
+                .map(|y| (y, row(buffer, y)))
+                .filter(|(_, line)| line.contains(needle))
+                .nth(nth)
+                .unwrap();
+            let x = line[..line.find(needle).unwrap()].chars().count() as u16;
+            buffer[(x, y)].clone()
+        };
+        assert_eq!(cell("alpha() {}", 0).bg, ratatui::style::Color::Yellow);
+        assert_eq!(cell("alpha();", 0).bg, ACTIVE);
+        assert_eq!(cell("ALPHA", 0).bg, ratatui::style::Color::Yellow);
+        // The arrows of the counter step through the results.
+        let next = app.regions.search_next;
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: next.x,
+            row: next.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.search.as_ref().unwrap().selected, 2);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        settle(&mut app);
+
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char('P'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        app.search_paste("alpha");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.search.as_ref().unwrap().searching && std::time::Instant::now() < deadline {
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("4 results in 2 files"), "{text}");
+        assert!(
+            text.contains("a.rs (3)") && text.contains("b.txt (1)"),
+            "{text}"
+        );
+        assert!(text.contains("◂ 1/4 ▸"));
+        assert!(text.contains(" ›     1  fn alpha() {}"), "{text}");
+        assert_eq!(app.regions.search_match_items.len(), 4);
+        // The term is marked in each line of the list.
+        let buffer = terminal.backend().buffer();
+        let (y, line) = (0..buffer.area.height)
+            .map(|y| (y, row(buffer, y)))
+            .find(|(_, line)| line.contains("2  alpha"))
+            .unwrap();
+        let x = line[..line.find("2  alpha").unwrap()].chars().count() as u16 + 3;
+        assert_eq!(buffer[(x, y)].bg, ratatui::style::Color::Yellow);
+    }
+
+    #[test]
+    fn the_timeline_draws_coloured_lanes_the_commit_files_and_a_coloured_diff() {
+        use crate::git::{
+            GitTab,
+            controller::{GitUiAction, TimelineStage},
+        };
+        use ratatui::style::Color;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(root)
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            )
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Test User"]);
+        git(&["config", "user.email", "test@example.com"]);
+        std::fs::write(root.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "Base"]);
+        git(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(root.join("f.txt"), "feature\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "Feature work"]);
+        git(&["checkout", "-q", "main"]);
+        std::fs::write(root.join("a.txt"), "one\n2\nthree\nfour\n").unwrap();
+        git(&["commit", "-q", "-am", "Change a"]);
+        git(&["merge", "-q", "--no-ff", "-m", "Merge feature", "feature"]);
+        let mut app = App::new(root.to_path_buf()).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(150, 40)).unwrap();
+        app.show_git = true;
+        app.git
+            .panel
+            .lock()
+            .unwrap()
+            .change_tab(GitTab::CommitGraph);
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("●─╮") && text.contains("(HEAD -> main)"),
+            "{text}"
+        );
+        assert!(text.contains("(feature) Feature work"), "{text}");
+        let at = |buffer: &ratatui::buffer::Buffer, needle: &str| {
+            (0..buffer.area.height)
+                .find_map(|y| {
+                    let line = row(buffer, y);
+                    line.find(needle)
+                        .map(|byte| (line[..byte].chars().count() as u16, y))
+                })
+                .unwrap()
+        };
+        let buffer = terminal.backend().buffer();
+        // The merge commit's lane and the feature lane have their own colours.
+        let (x, y) = at(buffer, "●─╮");
+        assert_ne!(buffer[(x, y)].fg, buffer[(x + 2, y)].fg);
+
+        // The second row (Change a): its files slide in on the right.
+        app.git.action(GitUiAction::OpenCommitFiles(1));
+        while app.git.operation || app.git.pending_commit.is_some() {
+            settle(&mut app);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains(" M a.txt +2 −1"), "{text}");
+        assert!(text.contains("Enter: diff  Esc: close"));
+        let buffer = terminal.backend().buffer();
+        let (x, y) = at(buffer, " M a.txt");
+        assert_eq!(buffer[(x + 1, y)].fg, Color::Yellow);
+
+        app.git.action(GitUiAction::TimelineFile(0));
+        assert_eq!(app.git.timeline, TimelineStage::Diff);
+        // The diff comes in from the right on the clock of the last tick, a second ahead.
+        app.tick_at(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("‹ Files") && text.contains("+ four"),
+            "{text}"
+        );
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[at(buffer, "- two")].fg, Color::Yellow);
+        assert_eq!(buffer[at(buffer, "+ 2")].fg, Color::Yellow);
+        assert_eq!(buffer[at(buffer, "+ four")].fg, Color::Green);
+    }
+
+    #[test]
+    fn the_database_workspace_draws_tables_a_diagram_the_builder_sql_and_scrolling_results() {
+        use crate::database::{
+            DatabaseTab,
+            controller::{DatabaseAction, DatabaseController, GridColumn},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.database =
+            DatabaseController::with_config_path(directory.path().join("connections.toml"))
+                .unwrap();
+        let wait = |app: &mut App| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while app.database.operation && std::time::Instant::now() < deadline {
+                app.tick();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(!app.database.operation);
+        };
+        app.database.action(DatabaseAction::AddConnection);
+        let form = app.database.form.as_mut().unwrap();
+        form.name = "Shop".into();
+        form.database = directory.path().join("shop.db").display().to_string();
+        app.database.action(DatabaseAction::SaveConnection);
+        wait(&mut app);
+        app.database.panel.blocking_lock()
+            .insert_query(
+            "CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT);\
+             CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id), total REAL);\
+             INSERT INTO customers VALUES (1, 'Ana Maria da Silva Costa'), (2, 'Rui');\
+             INSERT INTO orders VALUES (1, 1, 5), (2, 1, 20), (3, 2, 7);",
+        );
+        app.database.action(DatabaseAction::RunQuery);
+        wait(&mut app);
+        app.database.action(DatabaseAction::UseConnection);
+        wait(&mut app);
+        for action in [
+            DatabaseAction::Object(0),
+            DatabaseAction::Object(1),
+            DatabaseAction::Column(0, 1),
+            DatabaseAction::Column(1, 2),
+            DatabaseAction::Cell(1, GridColumn::Total),
+            DatabaseAction::Cell(1, GridColumn::Total),
+            DatabaseAction::Cell(1, GridColumn::Total),
+            DatabaseAction::RunQuery,
+        ] {
+            app.database.action(action);
+        }
+        wait(&mut app);
+        app.show_database = true;
+        app.database
+            .action(DatabaseAction::Tab(DatabaseTab::Diagram));
+        settle(&mut app);
+        settle(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(150, 46)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        for part in [
+            "Tables (2)",
+            "[x] customers",
+            "Views (0)",
+            "╭ customers ",
+            "╭ orders ",
+            "[ ] → customer_id  integer",
+            "[x]   total  real",
+            "orders.customer_id → customers.id",
+            "Results: 2 rows",
+            "# │ name                     │ sum_total",
+            "──┼──",
+            "1 │ Ana Maria da Silva Costa │        25",
+        ] {
+            assert!(text.contains(part), "{part}\n{text}");
+        }
+        // The two boxes are joined by a line in the gap between them.
+        let buffer = terminal.backend().buffer();
+        let (y, line) = (0..buffer.area.height)
+            .map(|y| (y, row(buffer, y)))
+            .find(|(_, line)| line.contains("* id  integer"))
+            .unwrap();
+        assert!(line.contains("│───╮  │"), "{line}");
+        assert!(row(buffer, y + 1).contains("│   ╰──│"));
+
+        // In a narrow terminal the row numbers stay and the cells move sideways.
+        app.show_explorer = false;
+        settle(&mut app);
+        let mut narrow = Terminal::new(TestBackend::new(44, 46)).unwrap();
+        app.database.result_horizontal_scroll = 1;
+        narrow.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&narrow);
+        assert!(text.contains("1  Ana Maria da Silva Costa │"), "{text}");
+        // No further than the end of the last column: 39 columns in 38.
+        app.database.result_horizontal_scroll = 500;
+        narrow.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert_eq!(app.database.result_horizontal_scroll, 1);
+        app.show_explorer = true;
+        settle(&mut app);
+
+        app.database
+            .action(DatabaseAction::Tab(DatabaseTab::Builder));
+        settle(&mut app);
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Table      Column  Show  Total"), "{text}");
+        assert!(text.contains("orders     total   [x]   Sum"), "{text}");
+        assert!(
+            app.database
+                .regions
+                .actions
+                .iter()
+                .any(|(action, _)| *action == DatabaseAction::Cell(1, GridColumn::Value))
+        );
+        // In a short terminal both rows still fit between the header and the hint.
+        let mut short = Terminal::new(TestBackend::new(150, 21)).unwrap();
+        short.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&short);
+        assert!(
+            text.contains("customers  name") && text.contains("orders     total"),
+            "{text}"
+        );
+
+        app.database.action(DatabaseAction::Tab(DatabaseTab::Sql));
+        settle(&mut app);
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        for part in [
+            "Made by the builder",
+            "SELECT customers.name,",
+            "Copy SQL",
+            "Run [",
+            "2 row(s)",
+        ] {
+            assert!(text.contains(part), "{part}\n{text}");
+        }
     }
 
     fn settle(app: &mut App) {

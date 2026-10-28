@@ -23,7 +23,7 @@ pub use highlight::{file_icon, highlight_lines, is_image_path, language_name};
 #[cfg(test)]
 pub use pdf::sample as sample_pdf;
 use pdf::{PdfDocument, is_pdf_path};
-pub use search::{SearchScope, SearchState};
+pub use search::{MAX_MATCHES, SearchMatch, SearchScope, SearchState};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_secs(2);
 

@@ -46,7 +46,7 @@ const demoKeys = [
   { key: 'tab', keys: ['Tab'], label: 'Next tab', toggle: false },
   { key: 'escape', keys: ['Esc'], label: 'Back', toggle: false },
 ];
-const panels = ['git-changes', 'git-graph', 'db-query', 'db-results'] as const;
+const panels = ['git-changes', 'git-graph', 'db-query', 'db-results', 'search'] as const;
 
 const repo = 'https://github.com/vritik246800/SozoIDE';
 const latest = `${repo}/releases/latest`;
@@ -84,15 +84,15 @@ const themeCss = [
 
 const features = [
   { keys: [['Ctrl', 'B']], title: 'Explorer and editor',
-    text: 'Browse the project tree, with an icon for every file type, and open files in tabs that scroll when there are many; drag a tab to an edge of the editor to split it side by side or stacked, each side with its own tabs. Long lines scroll sideways. Select text with the mouse or Shift and the arrows, and copy it with Ctrl+C. Edits save themselves after two idle seconds and before you switch tabs or quit. Syntax highlighting covers more than 30 languages, from Rust and Go to SQL, JSP, Astro and Mermaid, and configuration files by their name, from .env and Cargo.lock to Dockerfile, with its own colour for keywords, types, functions, strings and numbers, down to the last line of long files. Markdown is drawn as you read it: headings in their own size and colour, quotes, rules, framed code blocks, Mermaid diagrams in box-drawing characters (C4, ZenUML, Kanban, Radar and Treemap too) and tables with inline formatting, with the source back under the cursor or the mouse. Images render inline on Sixel, Kitty and iTerm2 terminals, and PDF files open in a tab, one page at a time.' },
+    text: 'Browse the project tree, with an icon for every file type; right-click to create a file or a folder, or to rename one. Open files in tabs that scroll when there are many; drag a tab to an edge of the editor to split it side by side or stacked, each side with its own tabs. Long lines scroll sideways. Select text with the mouse or Shift and the arrows, and copy it with Ctrl+C. Edits save themselves after two idle seconds and before you switch tabs or quit. Syntax highlighting covers more than 30 languages, from Rust and Go to SQL, JSP, Astro and Mermaid, and configuration files by their name, from .env and Cargo.lock to Dockerfile, with its own colour for keywords, types, functions, strings and numbers, down to the last line of long files. Markdown is drawn as you read it: headings in their own size and colour, quotes, rules, framed code blocks, Mermaid diagrams in box-drawing characters (C4, ZenUML, Kanban, Radar and Treemap too) and tables with inline formatting, with the source back under the cursor or the mouse. Images render inline on Sixel, Kitty and iTerm2 terminals, and PDF files open in a tab, one page at a time.' },
   { keys: [['Ctrl', 'J'], ['Ctrl', 'Shift', 'B']], title: 'Two terminals',
     text: 'A bottom and a right terminal, each with its own shell. The right terminal opens with Ctrl+Shift+B on Windows, Ctrl+Option+B on macOS and Ctrl+Alt+B on Linux. Scroll back with the mouse wheel or Page Up and Page Down, and drag the dividers to resize every panel.' },
   { keys: [['Ctrl', 'G']], title: 'Source Control',
-    text: 'Stage and commit, follow the commit graph, and see every branch in a tree grouped by remote and folder: click one to switch to it. The Launchpad shows your branch, its upstream, how far ahead and behind it is and the files waiting to be committed. The diff numbers its lines, folds its hunks, goes side by side and moves to the next changed file. Pull is fast-forward only, and rebase or checkout ask before they run.' },
+    text: 'Stage and commit, and scroll back through a timeline of every branch, each in its own colour: click a commit to see its files, and a file to see what was added in green, removed in red and modified in yellow. See every branch in a tree grouped by remote and folder: click one to switch to it. The Launchpad shows your branch, its upstream, how far ahead and behind it is and the files waiting to be committed. The diff numbers its lines, folds its hunks, goes side by side and moves to the next changed file. Pull is fast-forward only, and rebase or checkout ask before they run.' },
   { keys: [['Ctrl', 'D']], title: 'Database',
-    text: 'Connect to SQLite, PostgreSQL and MySQL, write a query and run it with Ctrl+Enter or F5. Results show the rows, the affected count and the duration, and keep a history. Saved connections never write passwords to disk.' },
+    text: 'Connect to SQLite, PostgreSQL and MySQL and the tables and views appear on the left. Draw them as a diagram with their keys and relations, tick columns to build a query that groups, counts, sums, sorts and filters, and get the SELECT with its joins, ready to edit, copy or run with Ctrl+Enter or F5. The rows come out below and scroll both ways. Saved connections never write passwords to disk.' },
   { keys: [['Ctrl', 'P'], ['Ctrl', 'Shift', 'P']], title: 'Search',
-    text: 'Find text in the open file or across the whole folder. Files listed in .gitignore stay out of the results.' },
+    text: 'Find as you type: in the open file every match is marked and counted, 3/12, with arrows to the next; across the whole folder the search runs in the background and groups the results by file. Files listed in .gitignore stay out of the results.' },
   { keys: [['F1'], ['F2']], title: 'Help and About',
     text: 'Every command in boxed sections, in the colours of your terminal and with the keys your system types (fn+F1 on a Mac). A short tutorial on the first start, notes on what is new in every version since yours after an update, and in About the flower grows in the middle and a button opens the repository to contribute.' },
 ];
@@ -145,7 +145,6 @@ const title = 'Code, shells, Git and SQL in one terminal window.'
       <nav aria-label="Main">
         <a href="#features">Features</a>
         <a href="#download">Download</a>
-        <a href={repo}>GitHub</a>
       </nav>
     </header>
 
@@ -164,7 +163,6 @@ const title = 'Code, shells, Git and SQL in one terminal window.'
           <a class="button" href={latest} data-download={download('')}>
             Download<span class="for" data-for="macos"> for macOS</span><span class="for" data-for="windows"> for Windows</span><span class="for" data-for="linux"> for Linux</span>
           </a>
-          <a class="quiet" href={repo}>Source on GitHub</a>
         </div>
         <p class="note">Free and open source under Apache-2.0, for Windows, macOS and Linux.</p>
 
@@ -509,10 +507,6 @@ cargo build --release
       [data-os='windows'] [data-for='windows'],
       [data-os='linux'] [data-for='linux'] {
         display: inline;
-      }
-
-      .quiet {
-        color: var(--fg);
       }
 
       .note {

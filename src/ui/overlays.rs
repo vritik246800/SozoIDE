@@ -7,15 +7,16 @@ use ratatui::{
 };
 
 use crate::{
+    animation::spinner,
     app::{App, AppMotion, TUTORIAL_STEPS},
     branding::{self, ASCII_LOGO, ASCII_LOGO_LARGE},
-    editor::SearchScope,
+    editor::{MAX_MATCHES, SearchMatch, SearchScope, file_icon},
     update::{NOTES, UpdateState},
 };
 
 use super::{
-    ACTIVE, BORDER, MUTED, TEXT, bar, centered, components::key_for, render_dialog, scale_length,
-    sweep_bar,
+    ACTIVE, BORDER, MATCH, MUTED, TEXT, bar, centered, components::key_for, key, panel_block,
+    render_dialog, scale_length, sweep_bar, unfold,
 };
 
 /// The splash prints line by line, its bar sweeps while SozoIDE starts, and then the IDE is
@@ -58,94 +59,255 @@ pub(super) fn render_splash(frame: &mut Frame, area: Rect, motion: &AppMotion) {
     );
 }
 
+/// The search (F05): Ctrl+P is a bar over the bottom of the editor, which stays in view with
+/// every match marked; Ctrl+Shift+P a dialog with the results grouped by file.
 pub(super) fn render_search(frame: &mut Frame, app: &mut App, area: Rect) {
     let Some(search) = &app.search else {
         return;
     };
-    let scope = match search.scope {
-        SearchScope::CurrentFile => "Find in current file [Ctrl+P]",
-        SearchScope::Workspace => "Find in workspace [Ctrl+Shift+P]",
-    };
     let progress = app.motion.search();
+    if search.scope == SearchScope::CurrentFile {
+        // Over the editor, or over the screen when a panel hides it.
+        let editor = if app.regions.editor_body.is_empty() {
+            area
+        } else {
+            app.regions.editor_body
+        };
+        // At the bottom right, away from the match, which scrolls to near the top.
+        let (width, height) = (52.min(editor.width), 3.min(editor.height));
+        let bar = Rect::new(
+            editor.right() - width,
+            editor.bottom() - height,
+            width,
+            height,
+        );
+        let visible = unfold(bar, progress);
+        if visible.is_empty() {
+            return;
+        }
+        frame.render_widget(Clear, visible);
+        let block = panel_block(format!(" Find in file [{}] ", key("Ctrl+P")), true);
+        let inner = block.inner(bar).intersection(visible);
+        frame.render_widget(block, visible);
+        app.regions.search_match_items.clear();
+        app.regions.search_results = Rect::default();
+        search_header(frame, app, inner);
+        return;
+    }
     render_dialog(
         frame,
         centered(area, 84, 70),
         progress,
-        format!(" {scope} "),
+        format!(" Find in workspace [{}] ", key("Ctrl+Shift+P")),
         |frame, inner| render_search_results(frame, app, inner),
     );
 }
 
+/// The query on the left; on the right the spinner while the workspace is searched and the
+/// counter `◂ 3/12 ▸`, whose arrows choose the previous and the next result.
+fn search_header(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.regions.search_input = area;
+    app.regions.search_previous = Rect::default();
+    app.regions.search_next = Rect::default();
+    let Some(search) = &app.search else {
+        return;
+    };
+    let total = search.matches.len();
+    let counter = if total == 0 {
+        if search.query.is_empty() {
+            String::new()
+        } else {
+            "No results".to_owned()
+        }
+    } else {
+        format!(
+            "{}/{}{}",
+            search.selected + 1,
+            total,
+            if total >= MAX_MATCHES { "+" } else { "" }
+        )
+    };
+    let spinner = if search.searching {
+        format!("{} ", spinner(app.motion.elapsed()))
+    } else {
+        String::new()
+    };
+    let arrows = total > 0;
+    let right = spinner.chars().count() as u16
+        + counter.chars().count() as u16
+        + if arrows { 4 } else { 0 };
+    let right = right.min(area.width);
+    let [query, counter_area] =
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(right + 1)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("> ", Style::default().fg(ACTIVE)),
+            Span::styled(search.query.clone(), Style::default().fg(TEXT)),
+            Span::styled("█", Style::default().fg(ACTIVE)),
+        ])),
+        query,
+    );
+    let mut spans = vec![Span::styled(spinner, Style::default().fg(ACTIVE))];
+    let x = counter_area.x + 1 + spans[0].content.chars().count() as u16;
+    if arrows {
+        spans.push(Span::styled("◂ ", Style::default().fg(ACTIVE)));
+        app.regions.search_previous = Rect::new(x, counter_area.y, 2, 1);
+    }
+    let count_style = if total == 0 { MUTED } else { TEXT };
+    spans.push(Span::styled(
+        counter.clone(),
+        Style::default().fg(count_style),
+    ));
+    if arrows {
+        spans.push(Span::styled(" ▸", Style::default().fg(ACTIVE)));
+        let next = x + 2 + counter.chars().count() as u16;
+        app.regions.search_next = Rect::new(next, counter_area.y, 2, 1);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Right),
+        counter_area,
+    );
+}
+
+/// The rows of the workspace results: a header for each file, then its matches.
+enum ResultRow {
+    File(usize, usize),
+    Match(usize),
+}
+
 fn render_search_results(frame: &mut Frame, app: &mut App, inner: Rect) {
-    if inner.height < 2 {
+    if inner.height < 4 {
         return;
     }
+    let sections = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    search_header(frame, app, sections[0]);
     let root = app.root.clone();
     let Some(search) = &mut app.search else {
         return;
     };
-    let sections = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(3),
-        Constraint::Length(1),
-    ])
-    .split(inner);
-    app.regions.search_input = sections[0];
-    app.regions.search_results = sections[1];
+    let summary = match (search.matches.len(), search.files()) {
+        (0, _) if search.searching => "Searching...".to_owned(),
+        (0, _) => String::new(),
+        (results, files) => format!(
+            "{results}{} result{} in {files} file{}",
+            if results >= MAX_MATCHES { "+" } else { "" },
+            if results == 1 { "" } else { "s" },
+            if files == 1 { "" } else { "s" },
+        ),
+    };
     frame.render_widget(
-        Paragraph::new(format!("> {}", search.query)).style(Style::default().fg(TEXT)),
-        sections[0],
+        Paragraph::new(summary).style(Style::default().fg(MUTED)),
+        sections[1],
     );
-    let height = sections[1].height as usize;
+    let mut rows = Vec::new();
+    for (index, found) in search.matches.iter().enumerate() {
+        if index == 0 || search.matches[index - 1].path != found.path {
+            let count = search.matches[index..]
+                .iter()
+                .take_while(|other| other.path == found.path)
+                .count();
+            rows.push(ResultRow::File(index, count));
+        }
+        rows.push(ResultRow::Match(index));
+    }
+    let list = sections[2];
+    app.regions.search_results = list;
+    let height = list.height as usize;
     let selected = search.selected;
-    if selected >= search.scroll + height {
-        search.scroll = selected + 1 - height;
-    } else if selected < search.scroll {
-        search.scroll = selected;
+    let selected_row = rows
+        .iter()
+        .position(|row| matches!(row, ResultRow::Match(index) if *index == selected))
+        .unwrap_or(0);
+    // The file of the selected match stays in view above it when it fits.
+    let wanted = selected_row.saturating_sub(1);
+    if wanted < search.scroll {
+        search.scroll = wanted;
+    } else if selected_row >= search.scroll + height {
+        search.scroll = selected_row + 1 - height;
     }
     app.regions.search_match_items.clear();
-    let lines = search
-        .matches
+    let width = list.width as usize;
+    let lines = rows
         .iter()
         .enumerate()
         .skip(search.scroll)
         .take(height)
-        .map(|(index, found)| {
-            let row = sections[1].y + (index - search.scroll) as u16;
-            app.regions
-                .search_match_items
-                .push((index, Rect::new(sections[1].x, row, sections[1].width, 1)));
-            let path = found
-                .path
-                .strip_prefix(&root)
-                .unwrap_or(&found.path)
-                .display();
-            let style = if index == selected {
-                Style::default().fg(ACTIVE).add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default().fg(TEXT)
-            };
-            Line::from(Span::styled(
-                format!(
-                    "{}:{}:{}  {}",
-                    path,
-                    found.line + 1,
-                    found.column + 1,
-                    found.text
-                ),
-                style,
-            ))
+        .map(|(row, entry)| match entry {
+            ResultRow::File(first, count) => {
+                let path = &search.matches[*first].path;
+                let (icon, color) = file_icon(path);
+                let shown = path.strip_prefix(&root).unwrap_or(path).display();
+                Line::from(vec![
+                    Span::styled(format!("{icon} "), Style::default().fg(color)),
+                    Span::styled(
+                        shown.to_string(),
+                        Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!(" ({count})"), Style::default().fg(MUTED)),
+                ])
+            }
+            ResultRow::Match(index) => {
+                let y = list.y + (row - search.scroll) as u16;
+                app.regions
+                    .search_match_items
+                    .push((*index, Rect::new(list.x, y, list.width, 1)));
+                match_line(&search.matches[*index], *index == selected, width)
+            }
         })
         .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines), sections[1]);
+    frame.render_widget(Paragraph::new(lines), list);
     frame.render_widget(
-        Paragraph::new(format!(
-            "{} results  |  Up/Down: navigate  Enter: open  Esc: close",
-            search.matches.len()
-        ))
-        .style(Style::default().fg(MUTED)),
-        sections[2],
+        Paragraph::new("Up/Down or ◂/▸: results  Enter: open  Esc: close")
+            .style(Style::default().fg(MUTED)),
+        sections[3],
     );
+}
+
+/// A result: its line number, then the line around the match with the match marked; the
+/// selected one has a `›` and the colour of the focus.
+pub(super) fn match_line(found: &SearchMatch, selected: bool, width: usize) -> Line<'static> {
+    let characters = found.text.chars().collect::<Vec<_>>();
+    let number = format!("{:>5}  ", found.line + 1);
+    let room = width.saturating_sub(number.chars().count() + 2);
+    // Leading spaces go, and a match far to the right keeps some text before it.
+    let indent = characters
+        .iter()
+        .take_while(|character| character.is_whitespace())
+        .count();
+    let start = indent
+        .max(found.column.saturating_sub(room / 3))
+        .min(found.column);
+    let cut = |from: usize, to: usize| {
+        characters[from.min(characters.len())..to.min(characters.len())]
+            .iter()
+            .collect::<String>()
+    };
+    let end = found.column + found.length;
+    let text_style = if selected {
+        Style::default().fg(ACTIVE)
+    } else {
+        Style::default().fg(TEXT)
+    };
+    let mut spans = vec![
+        Span::styled(
+            if selected { " › " } else { "   " },
+            Style::default().fg(ACTIVE),
+        ),
+        Span::styled(number, Style::default().fg(MUTED)),
+    ];
+    if start > indent {
+        spans.push(Span::styled("…", Style::default().fg(MUTED)));
+    }
+    spans.push(Span::styled(cut(start, found.column), text_style));
+    spans.push(Span::styled(cut(found.column, end), MATCH));
+    spans.push(Span::styled(cut(end, start + room), text_style));
+    Line::from(spans)
 }
 
 /// One area of the Help: its title and colour, and its keys with what they do. An empty key
@@ -197,6 +359,7 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             color: Color::Blue,
             keys: vec![
                 ("Enter", "Open a file or a folder"),
+                ("Right-click", "New file or folder, rename (Explorer)"),
                 ("Ctrl+W", "Close the tab"),
                 ("Wheel on the tabs", "Scroll the tabs, or click < and >"),
                 ("Drag a tab", "To an editor edge: split the editor"),
@@ -237,6 +400,8 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             keys: vec![
                 ("Ctrl+P", "Find in the file"),
                 ("Ctrl+Shift+P", "Find in the workspace"),
+                ("Up/Down or < >", "Previous / next result"),
+                ("Enter", "Open the result, selected"),
                 ("Esc", "Close a dialog or a panel"),
             ],
         },
@@ -271,7 +436,9 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             color: Color::Magenta,
             keys: vec![
                 ("Tab", "Next tab: Changes, Graph, Branches..."),
-                ("Enter", "Diff, inspect, or switch branch"),
+                ("Enter", "Diff, commit files, or switch branch"),
+                ("Click a commit", "Its files; Enter on one: its diff"),
+                ("Esc", "Back from the diff, the files"),
                 ("Click a branch", "Switch to it, after asking"),
                 ("s / u / c", "Stage, unstage, commit"),
                 ("n / p", "Next / previous hunk in the Diff"),
@@ -284,7 +451,14 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             title: "Database",
             color: Color::LightBlue,
             keys: vec![
-                ("Ctrl+D", "Connections, query and results"),
+                ("Ctrl+D", "Connections, then tables and views"),
+                ("Enter / Space", "Add a table, tick a column, change"),
+                ("", "a cell of the builder"),
+                (
+                    if mac { "fn+F6" } else { "F6" },
+                    "Tables, tab, results: next part",
+                ),
+                ("Delete", "Remove the builder row"),
                 (
                     if mac {
                         "Ctrl+Enter/fn+F5"
@@ -293,6 +467,7 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
                     },
                     "Run the query",
                 ),
+                ("Shift+wheel", "Scroll the results sideways"),
             ],
         },
         HelpSection {

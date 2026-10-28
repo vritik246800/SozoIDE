@@ -120,7 +120,11 @@ pub struct Regions {
     pub search_input: Rect,
     pub search_results: Rect,
     pub search_match_items: Vec<(usize, Rect)>,
+    /// The `◂` and `▸` of the search counter.
+    pub search_previous: Rect,
+    pub search_next: Rect,
     pub tab_items: Vec<(usize, Rect, Rect)>,
+    pub entry_menu_items: Vec<(super::EntryAction, Rect)>,
 }
 
 pub(super) fn inner_size(area: Rect) -> (u16, u16) {

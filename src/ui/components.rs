@@ -15,6 +15,10 @@ pub(crate) const ACTIVE: Color = Color::Cyan;
 pub(crate) const TEXT: Color = Color::Reset;
 pub(crate) const MUTED: Color = Color::DarkGray;
 pub(crate) const BORDER: Color = Color::DarkGray;
+/// A search match: the terminal's yellow behind its black, readable in light and dark themes.
+pub(crate) const MATCH: Style = Style::new().fg(Color::Black).bg(Color::Yellow);
+/// The match the search is on.
+pub(crate) const CURRENT_MATCH: Style = Style::new().fg(Color::Black).bg(ACTIVE);
 
 /// A shortcut as this system types it (`UX.md` §1): on macOS the function keys need `fn` and
 /// the right terminal is Ctrl+Option+B, because Ctrl+Shift+B arrives as Ctrl+B (E11); on Linux
@@ -76,31 +80,58 @@ pub(crate) fn select_columns(
     from: usize,
     to: usize,
 ) -> Vec<Span<'static>> {
-    let mut selected = Vec::<Span<'static>>::new();
-    let mut column = 0;
-    let mut push = |text: &str, style: Style| match selected.last_mut() {
-        Some(last) if last.style == style => last.content.to_mut().push_str(text),
-        _ => selected.push(Span::styled(text.to_owned(), style)),
-    };
-    for span in &spans {
-        for character in span.content.chars() {
-            let style = if (from..to).contains(&column) {
-                span.style.add_modifier(Modifier::REVERSED)
-            } else {
-                span.style
-            };
-            push(character.encode_utf8(&mut [0; 4]), style);
-            column += Span::raw(character.to_string()).width();
-        }
-    }
+    let (mut selected, column) = restyle_columns(&spans, from, to, |style| {
+        style.add_modifier(Modifier::REVERSED)
+    });
     if column < to {
         let start = column.max(from);
-        push(
+        push_span(
+            &mut selected,
             &" ".repeat(to - start),
             Style::default().add_modifier(Modifier::REVERSED),
         );
     }
     selected
+}
+
+/// `spans` with the columns `from..to` in `style`, for a search match.
+pub(crate) fn mark_columns(
+    spans: Vec<Span<'static>>,
+    from: usize,
+    to: usize,
+    style: Style,
+) -> Vec<Span<'static>> {
+    restyle_columns(&spans, from, to, |own| own.patch(style)).0
+}
+
+/// `spans` with `change` on the style of the columns `from..to`, and the width of the text.
+fn restyle_columns(
+    spans: &[Span<'static>],
+    from: usize,
+    to: usize,
+    change: impl Fn(Style) -> Style,
+) -> (Vec<Span<'static>>, usize) {
+    let mut restyled = Vec::<Span<'static>>::new();
+    let mut column = 0;
+    for span in spans {
+        for character in span.content.chars() {
+            let style = if (from..to).contains(&column) {
+                change(span.style)
+            } else {
+                span.style
+            };
+            push_span(&mut restyled, character.encode_utf8(&mut [0; 4]), style);
+            column += Span::raw(character.to_string()).width();
+        }
+    }
+    (restyled, column)
+}
+
+fn push_span(spans: &mut Vec<Span<'static>>, text: &str, style: Style) {
+    match spans.last_mut() {
+        Some(last) if last.style == style => last.content.to_mut().push_str(text),
+        _ => spans.push(Span::styled(text.to_owned(), style)),
+    }
 }
 
 pub(crate) fn panel_block(title: String, focused: bool) -> Block<'static> {

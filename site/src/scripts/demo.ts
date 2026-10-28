@@ -13,10 +13,10 @@ const ROW = 1.18; // em: the line height of a screen row
 const names: Record<string, string> = {
   editor: 'the editor with src/lib.rs and cargo test in the bottom terminal',
   'git-changes': 'Source Control, Changes tab: one staged, one modified and one new file',
-  'git-graph': 'Source Control, Commit Graph tab: seven commits and a merged branch',
-  'db-query': 'Database, Query tab: a SELECT on the launches table of a SQLite file',
-  'db-results': 'Database, Results tab: four launches in a table',
-  search: 'Find in current file, seven matches of “launch”',
+  'git-graph': 'Source Control, Commit Graph tab: a timeline of two branches, with the files of the merge',
+  'db-query': 'Database, Diagram tab: the crews and launches tables of a SQLite file and their relation',
+  'db-results': 'Database, Builder tab: launches counted per crew, and the results below',
+  search: 'Find in the file: every match of “launch” marked, the first one current',
   help: 'Help with every command',
 };
 
@@ -108,6 +108,15 @@ function start(demo: HTMLElement) {
     });
   }
 
+  // Straight to `next`, as the TUI draws the search bar and its marks.
+  function show(next: HTMLElement) {
+    finish();
+    if (shown === next) return;
+    next.hidden = false;
+    shown.hidden = true;
+    shown = next;
+  }
+
   function openDialog(name: Dialog) {
     state.dialog = name;
     const dialog = screen(name);
@@ -128,8 +137,11 @@ function start(demo: HTMLElement) {
   const actions: Record<Key, (back?: boolean) => void> = {
     git: () => toggle('git'),
     database: () => toggle('database'),
+    // The search bar leaves the editor in view with every match marked: a screen of its own.
     search: () => {
-      if (!state.dialog) openDialog('search');
+      if (state.dialog || state.workspace !== 'editor') return;
+      state.dialog = 'search';
+      show(screen('search'));
     },
     help: () => {
       if (state.dialog === 'help') closeDialog();
@@ -144,7 +156,10 @@ function start(demo: HTMLElement) {
       swap(screen(list[next]), next > index ? 'right' : 'left');
     },
     escape: () => {
-      if (state.dialog) closeDialog();
+      if (state.dialog === 'search') {
+        state.dialog = null;
+        show(screen(current()));
+      } else if (state.dialog) closeDialog();
       else if (state.workspace !== 'editor') toggle(state.workspace);
     },
   };
@@ -166,7 +181,8 @@ function start(demo: HTMLElement) {
       const idle =
         (key === 'tab' && (state.workspace === 'editor' || state.dialog !== null)) ||
         (key === 'escape' && state.workspace === 'editor' && !state.dialog) ||
-        ((key === 'git' || key === 'database' || key === 'search') && state.dialog !== null);
+        ((key === 'git' || key === 'database' || key === 'search') && state.dialog !== null) ||
+        (key === 'search' && state.workspace !== 'editor');
       button.setAttribute('aria-disabled', String(idle));
     }
     status.textContent = `SozoIDE showing ${names[state.dialog ?? current()]}.`;

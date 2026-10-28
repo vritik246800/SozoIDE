@@ -32,6 +32,14 @@ impl App {
             self.dismiss_splash();
             return;
         }
+        if self.name_prompt.is_some() {
+            self.handle_name_key(key.code);
+            return;
+        }
+        if self.entry_menu.is_some() {
+            self.handle_menu_key(key.code);
+            return;
+        }
         if self.search.is_some() && !self.motion.search_closing() {
             self.handle_search_key(key);
             return;
@@ -172,53 +180,111 @@ impl App {
         if self.motion.search_closing() {
             return;
         }
+        let active = self.active_tab.and_then(|index| self.open_files.get(index));
+        let Some(search) = &mut self.search else {
+            return;
+        };
         match key.code {
             KeyCode::Esc => self.close_search(),
-            KeyCode::Up => {
-                if let Some(search) = &mut self.search {
-                    search.select_previous();
-                }
-            }
-            KeyCode::Down => {
-                if let Some(search) = &mut self.search {
-                    search.select_next();
-                }
-            }
+            KeyCode::Up => search.select_previous(),
+            KeyCode::Down => search.select_next(),
             KeyCode::Enter => {
-                let selected = self
-                    .search
-                    .as_ref()
-                    .and_then(SearchState::selected_match)
-                    .cloned();
-                if let Some(found) = selected {
-                    if let Err(error) = self.open_file(found.path) {
-                        self.status = error.to_string();
-                    } else if let Some(active) = self.active_tab {
-                        // The cursor goes to the match, which sits a few lines below the top.
-                        let file = &mut self.open_files[active];
-                        file.move_cursor_to(found.line, found.column);
-                        file.scroll = file.display_row(found.line).saturating_sub(3) as u16;
-                        file.follow_cursor = false;
-                    }
+                if let Some(found) = search.selected_match().cloned() {
+                    self.show_match(&found);
                     self.close_search();
                 }
+                return;
             }
+            KeyCode::Backspace => search.backspace(&self.root, active),
+            KeyCode::Char(character) if !ctrl => search.push(character, &self.root, active),
+            _ => {}
+        }
+        self.preview_match();
+    }
+
+    /// Ctrl+P keeps the editor in view: it scrolls to the match chosen as the query and the
+    /// arrows change it.
+    pub(super) fn preview_match(&mut self) {
+        let Some(search) = &self.search else {
+            return;
+        };
+        if search.scope != SearchScope::CurrentFile {
+            return;
+        }
+        if let (Some(found), Some(active)) = (search.selected_match(), self.active_tab) {
+            let file = &mut self.open_files[active];
+            file.scroll = file.display_row(found.line).saturating_sub(3) as u16;
+            file.follow_cursor = false;
+        }
+    }
+
+    /// Opens the file of `found` with the match selected a few lines below the top.
+    fn show_match(&mut self, found: &crate::editor::SearchMatch) {
+        if let Err(error) = self.open_file(found.path.clone()) {
+            self.status = error.to_string();
+        } else if let Some(active) = self.active_tab {
+            let file = &mut self.open_files[active];
+            file.move_cursor_to(found.line, found.column + found.length);
+            file.anchor = Some((found.line, found.column));
+            file.scroll = file.display_row(found.line).saturating_sub(3) as u16;
+            file.follow_cursor = false;
+        }
+    }
+
+    /// The `◂`/`▸` of the search: the previous or the next result.
+    pub(super) fn step_match(&mut self, forward: bool) {
+        if let Some(search) = &mut self.search {
+            if forward {
+                search.select_next();
+            } else {
+                search.select_previous();
+            }
+        }
+        self.preview_match();
+    }
+
+    /// The Explorer's name prompt: typing, Enter creates or renames, Esc cancels.
+    fn handle_name_key(&mut self, code: KeyCode) {
+        let Some(prompt) = &mut self.name_prompt else {
+            return;
+        };
+        match code {
+            KeyCode::Esc => self.name_prompt = None,
+            KeyCode::Enter => self.confirm_name(),
             KeyCode::Backspace => {
-                if let Some(search) = &mut self.search {
-                    search.backspace(
-                        &self.root,
-                        self.active_tab.and_then(|index| self.open_files.get(index)),
-                    );
-                }
+                prompt.name.pop();
+                prompt.error = None;
             }
-            KeyCode::Char(character) if !ctrl => {
-                if let Some(search) = &mut self.search {
-                    search.push(
-                        character,
-                        &self.root,
-                        self.active_tab.and_then(|index| self.open_files.get(index)),
-                    );
-                }
+            KeyCode::Char(character) => {
+                prompt.name.push(character);
+                prompt.error = None;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn name_paste(&mut self, text: &str) {
+        if let Some(prompt) = &mut self.name_prompt {
+            prompt
+                .name
+                .extend(text.chars().filter(|character| !character.is_control()));
+            prompt.error = None;
+        }
+    }
+
+    /// The Explorer's right-click menu: arrows choose, Enter runs, Esc closes.
+    fn handle_menu_key(&mut self, code: KeyCode) {
+        let Some(menu) = &mut self.entry_menu else {
+            return;
+        };
+        let count = menu.actions.len();
+        match code {
+            KeyCode::Esc => self.entry_menu = None,
+            KeyCode::Up => menu.selected = (menu.selected + count - 1) % count,
+            KeyCode::Down => menu.selected = (menu.selected + 1) % count,
+            KeyCode::Enter => {
+                let action = menu.actions[menu.selected];
+                self.choose_entry_action(action);
             }
             _ => {}
         }
@@ -228,15 +294,11 @@ impl App {
         if self.motion.search_closing() {
             return;
         }
-        for character in text.chars().filter(|character| !character.is_control()) {
-            if let Some(search) = &mut self.search {
-                search.push(
-                    character,
-                    &self.root,
-                    self.active_tab.and_then(|index| self.open_files.get(index)),
-                );
-            }
+        let active = self.active_tab.and_then(|index| self.open_files.get(index));
+        if let Some(search) = &mut self.search {
+            search.push_str(text, &self.root, active);
         }
+        self.preview_match();
     }
 
     /// Esc, F1 and F2 close every dialog; the tutorial pages with Enter and the arrows, About
@@ -428,6 +490,22 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 self.selecting = false;
+                if self.name_prompt.is_some() {
+                    return;
+                }
+                if self.entry_menu.is_some() {
+                    let action = self
+                        .regions
+                        .entry_menu_items
+                        .iter()
+                        .find(|(_, area)| contains(*area, point))
+                        .map(|(action, _)| *action);
+                    match action {
+                        Some(action) => self.choose_entry_action(action),
+                        None => self.entry_menu = None,
+                    }
+                    return;
+                }
                 if !contains(self.regions.editor, point) {
                     self.flush_active_file();
                 }
@@ -453,6 +531,14 @@ impl App {
                 }
                 if self.search.is_some() {
                     if self.motion.search_closing() {
+                        return;
+                    }
+                    if contains(self.regions.search_previous, point) {
+                        self.step_match(false);
+                        return;
+                    }
+                    if contains(self.regions.search_next, point) {
+                        self.step_match(true);
                         return;
                     }
                     if let Some((index, _)) = self
@@ -579,6 +665,20 @@ impl App {
                     }
                 }
             }
+            MouseEventKind::Down(crossterm::event::MouseButton::Right) => {
+                let explorer = self.regions.explorer;
+                let free = self.overlay == Overlay::None
+                    && self.search.is_none()
+                    && self.name_prompt.is_none()
+                    && !self.splash_visible;
+                if free && self.show_explorer && contains(explorer, point) && point.1 > explorer.y {
+                    self.focus = Focus::Explorer;
+                    let index = self.explorer_scroll + usize::from(point.1 - explorer.y - 1);
+                    self.open_entry_menu((index < self.entries.len()).then_some(index), point);
+                } else {
+                    self.entry_menu = None;
+                }
+            }
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) if self.selecting => {
                 let area = self.regions.pane_bodies[self.active_pane()];
                 if let Some(file) = self
@@ -668,8 +768,8 @@ impl App {
         }
         if let Some(pane) = (0..2).find(|pane| contains(self.regions.tab_bars[*pane], point)) {
             self.scroll_tabs(pane, !up);
-        } else if self.show_database && contains(self.database.regions.content, point) {
-            self.database.scroll(up);
+        } else if self.show_database && contains(self.database.regions.area, point) {
+            self.database.scroll(point, up, sideways);
         } else if self.show_git && contains(self.git.regions.content, point) {
             self.git.scroll(up);
         } else if contains(self.regions.explorer, point) {
@@ -781,6 +881,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::app::EntryAction;
 
     fn test_app() -> App {
         App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap()
@@ -980,6 +1081,117 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         });
+    }
+
+    #[test]
+    fn the_search_follows_its_match_in_the_editor_and_enter_selects_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("long.txt");
+        let text = (0..60)
+            .map(|line| {
+                if line % 20 == 5 {
+                    format!("line {line} Needle")
+                } else {
+                    format!("line {line}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, text).unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path.clone()).unwrap();
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        app.search_paste("needle");
+        let active = app.active_tab.unwrap();
+        assert_eq!(app.search.as_ref().unwrap().matches.len(), 3);
+        assert_eq!(app.open_files[active].scroll, 2);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.open_files[active].scroll, 22);
+        app.step_match(true);
+        assert_eq!(app.open_files[active].scroll, 42);
+        app.step_match(true);
+        assert_eq!(app.open_files[active].scroll, 2);
+        app.step_match(false);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let file = &app.open_files[active];
+        assert_eq!(file.anchor, Some((45, 8)));
+        assert_eq!((file.cursor_row, file.cursor_column), (45, 14));
+        assert_eq!(file.selected_text().as_deref(), Some("Needle"));
+    }
+
+    #[test]
+    fn right_clicks_in_the_explorer_create_and_rename_files_and_folders() {
+        use crossterm::event::MouseButton;
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("src")).unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.show_explorer = true;
+        app.regions.explorer = Rect::new(0, 0, 30, 20);
+        // Below the tree: the root, which cannot be renamed.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 10);
+        let menu = app.entry_menu.as_ref().unwrap();
+        assert_eq!(menu.target, directory.path());
+        assert_eq!(menu.actions, [EntryAction::NewFile, EntryAction::NewFolder]);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.entry_menu.is_none());
+
+        // On the src folder: a new file goes inside it, opens and is selected.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 1);
+        assert_eq!(app.entry_menu.as_ref().unwrap().actions.len(), 3);
+        app.regions.entry_menu_items = vec![(EntryAction::NewFile, Rect::new(3, 2, 14, 1))];
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 5, 2);
+        assert!(app.entry_menu.is_none());
+        for character in "main.rs".chars() {
+            press(&mut app, KeyCode::Char(character), KeyModifiers::NONE);
+        }
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let created = directory.path().join("src/main.rs");
+        assert!(created.is_file());
+        assert!(app.name_prompt.is_none());
+        assert_eq!(app.entries[app.selected_entry].path, created);
+        assert_eq!(app.open_files[app.active_tab.unwrap()].path, created);
+
+        // A name that exists keeps the prompt open with the error.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 1);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            app.name_prompt.as_ref().unwrap().action,
+            EntryAction::NewFolder
+        );
+        app.name_paste("main.rs");
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.name_prompt.as_ref().unwrap().error.is_some());
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.name_prompt.is_none());
+
+        // Renaming the open file follows it in its tab.
+        let row = app
+            .entries
+            .iter()
+            .position(|entry| entry.path == created)
+            .unwrap();
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Right),
+            3,
+            row as u16 + 1,
+        );
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.name_prompt.as_ref().unwrap().name, "main.rs");
+        for _ in 0.."main.rs".len() {
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+        }
+        app.name_paste("lib.rs");
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let renamed = directory.path().join("src/lib.rs");
+        assert!(renamed.is_file() && !created.exists());
+        let tab = &app.open_files[app.active_tab.unwrap()];
+        assert_eq!(
+            (tab.path.as_path(), tab.name.as_str()),
+            (renamed.as_path(), "lib.rs")
+        );
     }
 
     #[test]

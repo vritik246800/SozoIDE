@@ -9,7 +9,8 @@ use git2::{
 
 use super::model::*;
 
-const COMMIT_LIMIT: usize = 200;
+/// Enough history to scroll back through months of work across every branch.
+const COMMIT_LIMIT: usize = 1000;
 
 pub(super) fn read_status(repo: &Repository) -> Result<WorkingTreeStatus> {
     if repo.workdir().is_none() {
@@ -120,6 +121,10 @@ pub(super) fn read_commits(repo: &Repository) -> Result<Vec<CommitInfo>> {
         }
         Err(error) => return Err(error.into()),
     }
+    // The timeline shows every branch, local and remote, not only the one checked out.
+    walk.push_glob("refs/heads/*")?;
+    walk.push_glob("refs/remotes/*")?;
+    let labels = ref_labels(repo)?;
     let mut commits = Vec::new();
     for id in walk.take(COMMIT_LIMIT) {
         let id = match id {
@@ -134,9 +139,52 @@ pub(super) fn read_commits(repo: &Repository) -> Result<Vec<CommitInfo>> {
             Err(error) => return Err(error.into()),
         };
         let commit = repo.find_commit(id)?;
-        commits.push(commit_info(&commit));
+        let mut info = commit_info(&commit);
+        info.refs = labels.get(&id).cloned().unwrap_or_default();
+        commits.push(info);
     }
     Ok(commits)
+}
+
+/// The branches and tags at each commit: `HEAD -> main` for the one checked out, remotes as
+/// `origin/main`, tags as `tag: v1.0`.
+fn ref_labels(repo: &Repository) -> Result<std::collections::HashMap<Oid, Vec<String>>> {
+    let mut labels = std::collections::HashMap::<Oid, Vec<String>>::new();
+    let head = repo
+        .head()
+        .ok()
+        .filter(|head| head.is_branch())
+        .and_then(|head| head.shorthand().map(ToString::to_string));
+    for reference in repo.references()? {
+        let reference = reference?;
+        let (Some(name), Ok(commit)) = (reference.shorthand(), reference.peel_to_commit()) else {
+            continue;
+        };
+        let label = if reference.is_tag() {
+            format!("tag: {name}")
+        } else if reference.is_remote() && name.ends_with("/HEAD") {
+            continue;
+        } else if reference.is_branch() && head.as_deref() == Some(name) {
+            format!("HEAD -> {name}")
+        } else if reference.is_branch() || reference.is_remote() {
+            name.to_string()
+        } else {
+            continue;
+        };
+        labels.entry(commit.id()).or_default().push(label);
+    }
+    // The checked-out branch first, then local, remote and tags in name order.
+    for names in labels.values_mut() {
+        names.sort_by_key(|name| {
+            (
+                !name.starts_with("HEAD"),
+                name.starts_with("tag:"),
+                name.contains('/'),
+                name.clone(),
+            )
+        });
+    }
+    Ok(labels)
 }
 
 pub(super) fn read_branches(repo: &Repository) -> Result<Vec<BranchInfo>> {
@@ -454,6 +502,7 @@ pub(super) fn commit_info(commit: &git2::Commit<'_>) -> CommitInfo {
         author: signature.name().unwrap_or("Unknown").to_string(),
         author_email: signature.email().unwrap_or("").to_string(),
         committed_at: git_time_to_chrono(commit.time()),
+        refs: Vec::new(),
     }
 }
 

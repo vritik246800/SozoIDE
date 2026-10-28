@@ -133,6 +133,171 @@ pub struct CommitInfo {
     pub author: String,
     pub author_email: String,
     pub committed_at: DateTime<FixedOffset>,
+    /// Branches and tags that point here (timeline labels).
+    pub refs: Vec<String>,
+}
+
+/// One row of the timeline graph (F06): two cells per lane, each a symbol and the colour
+/// number of its lane (`None` for a blank cell).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TimelineRow {
+    pub cells: Vec<(char, Option<usize>)>,
+}
+
+impl TimelineRow {
+    #[cfg(test)]
+    pub fn text(&self) -> String {
+        self.cells
+            .iter()
+            .map(|(symbol, _)| symbol)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+}
+
+/// The graph of `commits` (newest first, each after its children): one lane per line of work
+/// with its own colour; `●` a commit, `│` a lane passing by, `╮`/`╭` a merge bringing a parent
+/// in from a lane, `╯`/`╰` a lane that started at this commit ending in it.
+pub fn timeline(commits: &[CommitInfo]) -> Vec<TimelineRow> {
+    // Each lane waits for a commit and keeps its colour.
+    let mut lanes: Vec<Option<(String, usize)>> = Vec::new();
+    let mut colours = 0;
+    let mut rows = Vec::with_capacity(commits.len());
+    for commit in commits {
+        let before = lanes
+            .iter()
+            .map(|lane| lane.as_ref().map(|(_, colour)| *colour))
+            .collect::<Vec<_>>();
+        let waiting = lanes
+            .iter()
+            .enumerate()
+            .filter(|(_, lane)| lane.as_ref().is_some_and(|(id, _)| *id == commit.id))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let (lane, colour) = match waiting.first() {
+            Some(&index) => (index, before[index].unwrap_or(0)),
+            None => {
+                colours += 1;
+                (free_lane(&mut lanes), colours - 1)
+            }
+        };
+        // Lanes that waited for this commit too end in it.
+        let closing = waiting[waiting.len().min(1)..]
+            .iter()
+            .map(|&index| (index, before[index].unwrap_or(0)))
+            .collect::<Vec<_>>();
+        for &(index, _) in &closing {
+            lanes[index] = None;
+        }
+        lanes[lane] = commit
+            .parent_ids
+            .first()
+            .map(|parent| (parent.clone(), colour));
+        let mut opening = Vec::new();
+        for parent in commit.parent_ids.iter().skip(1) {
+            let existing = lanes
+                .iter()
+                .position(|other| other.as_ref().is_some_and(|(id, _)| id == parent));
+            match existing {
+                Some(index) => opening.push((index, lanes[index].as_ref().map_or(0, |(_, c)| *c))),
+                None => {
+                    let index = free_lane(&mut lanes);
+                    lanes[index] = Some((parent.clone(), colours));
+                    opening.push((index, colours));
+                    colours += 1;
+                }
+            }
+        }
+
+        let width = lanes.len().max(before.len());
+        let mut cells = vec![(' ', None); width * 2];
+        for (index, colour) in before.iter().enumerate() {
+            if let Some(colour) = colour
+                && index != lane
+                && !closing.iter().any(|(closed, _)| *closed == index)
+            {
+                cells[index * 2] = ('│', Some(*colour));
+            }
+        }
+        let mut connect = |to: usize, colour: usize, symbol: char| {
+            let (from, to_cell) = (lane * 2, to * 2);
+            for cell in &mut cells[from.min(to_cell) + 1..from.max(to_cell)] {
+                // Crossing a lane, or passing a nearer lane that ends or starts here.
+                *cell = match *cell {
+                    ('│', passing) => ('┼', passing),
+                    ('╯' | '╰', own) => ('┴', own),
+                    ('╮' | '╭', own) => ('┬', own),
+                    _ => ('─', Some(colour)),
+                };
+            }
+            cells[to_cell] = (symbol, Some(colour));
+        };
+        for &(index, colour) in &closing {
+            connect(index, colour, if index > lane { '╯' } else { '╰' });
+        }
+        for &(index, colour) in &opening {
+            let passing = before.get(index).copied().flatten().is_some();
+            let symbol = match (index > lane, passing) {
+                (true, true) => '┤',
+                (true, false) => '╮',
+                (false, true) => '├',
+                (false, false) => '╭',
+            };
+            connect(index, colour, symbol);
+        }
+        cells[lane * 2] = ('●', Some(colour));
+        while lanes.last().is_some_and(Option::is_none) {
+            lanes.pop();
+        }
+        rows.push(TimelineRow { cells });
+    }
+    rows
+}
+
+fn free_lane(lanes: &mut Vec<Option<(String, usize)>>) -> usize {
+    lanes.iter().position(Option::is_none).unwrap_or_else(|| {
+        lanes.push(None);
+        lanes.len() - 1
+    })
+}
+
+/// How a diff line changed, for the timeline's colours (Q38): a run of removed lines followed
+/// by added ones is a modification, line by line; the rest were added or removed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineChange {
+    Context,
+    Added,
+    Removed,
+    Modified,
+}
+
+pub fn line_changes(lines: &[DiffLine]) -> Vec<LineChange> {
+    let mut changes = lines
+        .iter()
+        .map(|line| match line.kind {
+            DiffLineKind::Added => LineChange::Added,
+            DiffLineKind::Removed => LineChange::Removed,
+            DiffLineKind::Context | DiffLineKind::Note => LineChange::Context,
+        })
+        .collect::<Vec<_>>();
+    let mut index = 0;
+    while index < lines.len() {
+        let removed = lines[index..]
+            .iter()
+            .take_while(|line| line.kind == DiffLineKind::Removed)
+            .count();
+        let added = lines[index + removed..]
+            .iter()
+            .take_while(|line| line.kind == DiffLineKind::Added)
+            .count();
+        let paired = removed.min(added);
+        for offset in (0..paired).chain(removed..removed + paired) {
+            changes[index + offset] = LineChange::Modified;
+        }
+        index += (removed + added).max(1);
+    }
+    changes
 }
 
 #[derive(Clone, Debug)]
@@ -529,6 +694,91 @@ mod tests {
                 "├ main #3",
                 "└ release",
                 "  └ 1.0 #4",
+            ]
+        );
+    }
+
+    fn commit(id: &str, parents: &[&str]) -> CommitInfo {
+        CommitInfo {
+            id: id.to_owned(),
+            short_id: id.to_owned(),
+            parent_ids: parents.iter().map(|parent| (*parent).to_owned()).collect(),
+            summary: String::new(),
+            author: String::new(),
+            author_email: String::new(),
+            committed_at: DateTime::parse_from_rfc3339("2026-10-28T10:00:00+00:00").unwrap(),
+            refs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_timeline_draws_lanes_merges_and_branch_colours() {
+        // main: A - B - C - M, feature: B - F - G merged into M; hotfix: H from C, not merged.
+        let commits = [
+            commit("H", &["C"]),
+            commit("M", &["C", "G"]),
+            commit("G", &["F"]),
+            commit("C", &["B"]),
+            commit("F", &["B"]),
+            commit("B", &["A"]),
+            commit("A", &[]),
+        ];
+        let rows = timeline(&commits);
+        let text = rows.iter().map(TimelineRow::text).collect::<Vec<_>>();
+        assert_eq!(
+            text,
+            ["●", "│ ●─╮", "│ │ ●", "●─╯ │", "│   ●", "●───╯", "●"]
+        );
+        let colours = |row: usize| {
+            rows[row]
+                .cells
+                .iter()
+                .filter(|(symbol, _)| *symbol != ' ')
+                .map(|(_, colour)| colour.unwrap())
+                .collect::<Vec<_>>()
+        };
+        // Each line of work has its colour: hotfix 0, main 1, feature 2; a commit two lanes
+        // wait for takes the first one's.
+        assert_eq!(colours(1), [0, 1, 2, 2]);
+        assert_eq!(colours(3), [0, 1, 1, 2]);
+        assert_eq!(colours(5), [0, 2, 2, 2, 2]);
+        // A merge into a lane already passing by joins it.
+        let rows = timeline(&[
+            commit("M", &["X", "Y"]),
+            commit("N", &["Y"]),
+            commit("X", &["Y"]),
+            commit("Y", &[]),
+        ]);
+        let text = rows.iter().map(TimelineRow::text).collect::<Vec<_>>();
+        assert_eq!(text, ["●─╮", "│ │ ●", "● │ │", "●─┴─╯"]);
+    }
+
+    #[test]
+    fn removed_lines_followed_by_added_ones_are_modified() {
+        let line = |kind| DiffLine {
+            kind,
+            old: None,
+            new: None,
+            text: String::new(),
+        };
+        use DiffLineKind::{Added, Context, Removed};
+        use LineChange as C;
+        let lines = [
+            Context, Removed, Removed, Added, Context, Added, Removed, Removed, Added,
+        ]
+        .map(line);
+        assert_eq!(
+            line_changes(&lines),
+            [
+                C::Context,
+                C::Modified,
+                C::Removed,
+                C::Modified,
+                C::Context,
+                C::Added,
+                C::Modified,
+                C::Removed,
+                C::Modified,
             ]
         );
     }

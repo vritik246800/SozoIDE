@@ -153,6 +153,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                     app.handle_key(key);
                 }
                 Event::Mouse(mouse) => app.handle_mouse(mouse),
+                Event::Paste(text) if app.name_prompt.is_some() => app.name_paste(&text),
                 Event::Paste(text) if app.search.is_some() && !app.motion.search_closing() => {
                     app.search_paste(&text);
                 }

@@ -460,37 +460,37 @@ impl ConnectionForm {
     }
 }
 
+/// Connections, then the workspace of the active connection (Q37): its diagram, the builder
+/// grid and the SQL they make.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd)]
 pub enum DatabaseTab {
     #[default]
     Connections,
-    Query,
-    Results,
+    Diagram,
+    Builder,
+    Sql,
 }
 
 impl DatabaseTab {
+    pub const ALL: [Self; 4] = [Self::Connections, Self::Diagram, Self::Builder, Self::Sql];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Connections => "Connections",
-            Self::Query => "Query",
-            Self::Results => "Results",
+            Self::Diagram => "Diagram",
+            Self::Builder => "Builder",
+            Self::Sql => "SQL",
         }
     }
 
     pub fn next(self) -> Self {
-        match self {
-            Self::Connections => Self::Query,
-            Self::Query => Self::Results,
-            Self::Results => Self::Connections,
-        }
+        let index = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
     }
 
     pub fn previous(self) -> Self {
-        match self {
-            Self::Connections => Self::Results,
-            Self::Query => Self::Connections,
-            Self::Results => Self::Query,
-        }
+        let index = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 }
 
@@ -531,10 +531,7 @@ pub struct QueryResult {
 }
 
 impl QueryResult {
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-    }
-
+    #[cfg(test)]
     pub fn cell(&self, row: usize, column: usize) -> Option<&DatabaseValue> {
         self.rows.get(row)?.get(column)
     }
@@ -542,7 +539,6 @@ impl QueryResult {
 
 #[derive(Clone, Debug)]
 pub struct QueryHistoryEntry {
-    pub connection_id: String,
     pub connection_name: String,
     pub query: String,
     pub executed_at: SystemTime,

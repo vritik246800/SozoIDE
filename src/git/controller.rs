@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
 use crate::{
-    animation::InterfaceMotion,
+    animation::{Edge, InterfaceMotion},
     git::{DiffRow, GitAction, GitPanel, GitTab},
 };
 
@@ -20,6 +20,15 @@ pub enum GitMode {
     Rebase(String),
     ConfirmRebase(String),
     ConfirmCheckout(String),
+}
+
+/// Where the timeline is (F06): the graph, the files of a commit in the panel that slides in
+/// from the right, or the diff of one of those files over the whole tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimelineStage {
+    Graph,
+    Files,
+    Diff,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +62,12 @@ pub enum GitUiAction {
     UnstageDiff,
     /// Opens the file of the diff in the editor.
     OpenFile,
+    /// A commit clicked in the timeline: its files slide in.
+    OpenCommitFiles(usize),
+    /// A file of that commit: its diff.
+    TimelineFile(usize),
+    /// Back from the diff to the files, or from the files to the graph.
+    TimelineBack,
     Submit,
     Cancel,
 }
@@ -72,6 +87,12 @@ pub struct GitController {
     pub operation: bool,
     /// A file the Diff tab asked to open in the editor; the app opens it.
     pub open_request: Option<PathBuf>,
+    pub timeline: TimelineStage,
+    /// The file chosen among the commit's and the first row of its diff.
+    pub timeline_file: usize,
+    pub timeline_scroll: usize,
+    /// The commit whose files were asked for while Git was busy; loaded once it is free.
+    pub pending_commit: Option<usize>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -84,6 +105,10 @@ impl GitController {
             motion: InterfaceMotion::new(Instant::now(), GitTab::Changes),
             operation: false,
             open_request: None,
+            timeline: TimelineStage::Graph,
+            timeline_file: 0,
+            timeline_scroll: 0,
+            pending_commit: None,
             task: None,
         }
     }
@@ -104,6 +129,25 @@ impl GitController {
         self.motion.tick(now, self.operation);
         if let Ok(panel) = self.panel.try_lock() {
             self.motion.sync_tab(panel.active_tab);
+            if panel.active_tab != GitTab::CommitGraph {
+                self.timeline = TimelineStage::Graph;
+            }
+        }
+        if self.timeline == TimelineStage::Files && self.motion.side_closed() {
+            self.timeline = TimelineStage::Graph;
+        }
+        if !self.operation
+            && let Some(index) = self.pending_commit
+        {
+            let selected = self
+                .panel
+                .try_lock()
+                .map(|mut panel| panel.select(index))
+                .is_ok();
+            if selected {
+                self.pending_commit = None;
+                self.spawn(GitAction::InspectSelected, None);
+            }
         }
         if self.mode != GitMode::None && self.motion.dialog_closed() {
             self.mode = GitMode::None;
@@ -132,6 +176,10 @@ impl GitController {
                 }
                 _ => {}
             }
+            return true;
+        }
+        if self.timeline != TimelineStage::Graph {
+            self.timeline_key(key.code);
             return true;
         }
         if key.code == KeyCode::Esc {
@@ -180,7 +228,7 @@ impl GitController {
                 }
                 KeyCode::Enter => match tab {
                     GitTab::Changes | GitTab::Launchpad => Some(GitUiAction::ShowDiff),
-                    GitTab::CommitGraph => Some(GitUiAction::Inspect),
+                    GitTab::CommitGraph => Some(GitUiAction::OpenCommitFiles(panel.selected)),
                     GitTab::Branches => Some(GitUiAction::Checkout),
                     GitTab::Diff => Some(GitUiAction::DiffRow(panel.selected)),
                     GitTab::Inspect => None,
@@ -206,6 +254,58 @@ impl GitController {
             self.action(action);
         }
         true
+    }
+
+    /// The files panel: arrows choose, Enter shows the diff, Esc closes. The diff: arrows and
+    /// pages scroll, `[`/`]` change file, Esc or Left go back to the files.
+    fn timeline_key(&mut self, code: KeyCode) {
+        let files = self.commit_files();
+        match (self.timeline, code) {
+            (TimelineStage::Files, KeyCode::Up) => {
+                self.timeline_file = self.timeline_file.saturating_sub(1);
+            }
+            (TimelineStage::Files, KeyCode::Down) => {
+                self.timeline_file = (self.timeline_file + 1).min(files.saturating_sub(1));
+            }
+            (TimelineStage::Files, KeyCode::Enter | KeyCode::Right) if files > 0 => {
+                self.action(GitUiAction::TimelineFile(self.timeline_file));
+            }
+            (_, KeyCode::Esc) | (TimelineStage::Diff, KeyCode::Left | KeyCode::Backspace) => {
+                self.action(GitUiAction::TimelineBack);
+            }
+            (TimelineStage::Diff, KeyCode::Up) => self.scroll_diff(-1),
+            (TimelineStage::Diff, KeyCode::Down) => self.scroll_diff(1),
+            (TimelineStage::Diff, KeyCode::PageUp) => self.scroll_diff(-20),
+            (TimelineStage::Diff, KeyCode::PageDown) => self.scroll_diff(20),
+            (TimelineStage::Diff, KeyCode::Home) => self.timeline_scroll = 0,
+            (TimelineStage::Diff, KeyCode::Char(side @ ('[' | ']'))) if files > 0 => {
+                let file = if side == ']' {
+                    (self.timeline_file + 1) % files
+                } else {
+                    (self.timeline_file + files - 1) % files
+                };
+                self.action(GitUiAction::TimelineFile(file));
+            }
+            _ => {}
+        }
+    }
+
+    /// The files of the commit loaded for the timeline, 0 while it loads.
+    fn commit_files(&self) -> usize {
+        self.panel
+            .try_lock()
+            .ok()
+            .and_then(|panel| {
+                panel
+                    .inspected_commit
+                    .as_ref()
+                    .map(|details| details.files.len())
+            })
+            .unwrap_or(0)
+    }
+
+    fn scroll_diff(&mut self, rows: isize) {
+        self.timeline_scroll = self.timeline_scroll.saturating_add_signed(rows);
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -234,6 +334,17 @@ impl GitController {
     }
 
     pub fn scroll(&mut self, up: bool) {
+        match self.timeline {
+            TimelineStage::Files => {
+                self.timeline_key(if up { KeyCode::Up } else { KeyCode::Down });
+                return;
+            }
+            TimelineStage::Diff => {
+                self.scroll_diff(if up { -3 } else { 3 });
+                return;
+            }
+            TimelineStage::Graph => {}
+        }
         if let Ok(mut panel) = self.panel.try_lock() {
             if up {
                 panel.select_previous();
@@ -292,6 +403,31 @@ impl GitController {
                     Some(panel.repository_root.as_ref()?.join(&file.path))
                 });
             }
+            GitUiAction::OpenCommitFiles(index) => {
+                local(self, &|panel| panel.select(index));
+                self.timeline = TimelineStage::Files;
+                self.timeline_file = 0;
+                self.motion.open_side(Instant::now());
+                // Loaded by the next tick, after any operation that holds the panel.
+                self.pending_commit = Some(index);
+                self.tick_at(Instant::now());
+            }
+            GitUiAction::TimelineFile(index) => {
+                self.timeline_file = index;
+                self.timeline_scroll = 0;
+                if self.timeline != TimelineStage::Diff {
+                    self.timeline = TimelineStage::Diff;
+                    self.motion.replay(Edge::Right);
+                }
+            }
+            GitUiAction::TimelineBack => match self.timeline {
+                TimelineStage::Diff => {
+                    self.timeline = TimelineStage::Files;
+                    self.motion.replay(Edge::Left);
+                }
+                TimelineStage::Files => self.motion.close_side(Instant::now()),
+                TimelineStage::Graph => {}
+            },
             GitUiAction::Branch(index) => {
                 local(self, &|panel| panel.select(index));
                 self.action(GitUiAction::Checkout);
@@ -358,7 +494,12 @@ impl GitController {
                 && result.is_ok()
                 && let Some(commit) = panel.selected_commit().cloned()
             {
+                let selected = panel.selected;
                 let _ = panel.diff_commit(&commit.id);
+                // The timeline stays on its commit (another tab starts at its top anyway).
+                if tab.is_none() {
+                    panel.selected = selected;
+                }
             }
             if let Some(tab) = tab {
                 panel.change_tab(tab);
@@ -423,6 +564,58 @@ mod tests {
             .unwrap()
             .status;
         assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn the_timeline_opens_a_commit_then_a_file_and_goes_back_with_esc() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.name", "Test User"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "Base"]);
+        std::fs::write(root.join("a.txt"), "uno\n").unwrap();
+        std::fs::write(root.join("b.txt"), "two\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "Second"]);
+        let mut controller = GitController::new(root.to_path_buf());
+        controller.action(GitUiAction::Tab(GitTab::CommitGraph));
+        let press = |controller: &mut GitController, code| {
+            controller.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+        };
+        press(&mut controller, KeyCode::Enter);
+        assert_eq!(controller.timeline, TimelineStage::Files);
+        finish(&mut controller);
+        let files = controller
+            .panel
+            .lock()
+            .unwrap()
+            .inspected_commit
+            .clone()
+            .unwrap();
+        assert_eq!(files.message, "Second\n");
+        assert_eq!(files.files.len(), 2);
+        press(&mut controller, KeyCode::Down);
+        press(&mut controller, KeyCode::Down);
+        assert_eq!(controller.timeline_file, 1);
+        press(&mut controller, KeyCode::Enter);
+        assert_eq!(controller.timeline, TimelineStage::Diff);
+        assert_eq!(controller.motion.edge(), Edge::Right);
+        press(&mut controller, KeyCode::Char('['));
+        assert_eq!(controller.timeline_file, 0);
+        press(&mut controller, KeyCode::PageDown);
+        assert_eq!(controller.timeline_scroll, 20);
+        // Esc goes back a step at a time and keeps the panel open until the graph.
+        assert!(press(&mut controller, KeyCode::Esc));
+        assert_eq!(controller.timeline, TimelineStage::Files);
+        assert_eq!(controller.motion.edge(), Edge::Left);
+        assert!(press(&mut controller, KeyCode::Esc));
+        assert!(controller.motion.side_closing());
+        controller.tick_at(Instant::now() + DIALOG.close);
+        assert_eq!(controller.timeline, TimelineStage::Graph);
+        assert!(!press(&mut controller, KeyCode::Esc));
     }
 
     #[test]
