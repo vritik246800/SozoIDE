@@ -150,24 +150,30 @@ mod tests {
     fn each_language_runs_with_its_tool_and_projects_run_whole() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        std::fs::create_dir_all(root.join("app/src")).unwrap();
-        std::fs::write(root.join("app/Cargo.toml"), "").unwrap();
+        // Paths joined as the code joins them: `\\` between the parts on Windows.
+        let app = root.join("app");
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::write(app.join("Cargo.toml"), "").unwrap();
         let scratch = PathBuf::from("/tmp/sozo run");
         let all = |_: &str| true;
-        let run = |file: &str, has: &dyn Fn(&str) -> bool| {
-            command(&root.join(file), root, "linux", has, &scratch)
-        };
+        let run =
+            |file: &Path, has: &dyn Fn(&str) -> bool| command(file, root, "linux", has, &scratch);
         let cargo = format!(
             "cargo run --manifest-path '{}'",
-            root.join("app/Cargo.toml").display()
+            app.join("Cargo.toml").display()
         );
-        assert_eq!(run("app/src/main.rs", &all).unwrap(), cargo);
-        let single = run("tool.rs", &all).unwrap();
+        assert_eq!(run(&app.join("src").join("main.rs"), &all).unwrap(), cargo);
+        let single = run(&root.join("tool.rs"), &all).unwrap();
         assert!(
             single.starts_with("mkdir -p '/tmp/sozo run' && rustc '"),
             "{single}"
         );
-        assert!(single.ends_with("-o '/tmp/sozo run/tool' && '/tmp/sozo run/tool'"));
+        let program = scratch.join("tool").display().to_string();
+        assert!(
+            single.ends_with(&format!("-o '{program}' && '{program}'")),
+            "{single}"
+        );
+        let run = |file: &str, has: &dyn Fn(&str) -> bool| run(&root.join(file), has);
         assert!(run("main.py", &all).unwrap().starts_with("python3 '"));
         assert!(
             run("main.c", &|tool| tool == "clang")
