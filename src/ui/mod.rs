@@ -1196,6 +1196,8 @@ mod tests {
             "Remove the builder row",
             "Undo the last edit",
             "New, rename, delete",
+            "Cut, copy, paste (Explorer)",
+            "Cut, copy, paste the text",
         ] {
             assert!(text.contains(keys), "{keys}");
         }
@@ -1245,6 +1247,35 @@ mod tests {
     }
 
     #[test]
+    fn the_editor_menu_opens_at_the_mouse_in_the_text() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("a.txt"), "alpha\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(directory.path().join("a.txt")).unwrap();
+        settle(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let body = app.regions.pane_bodies[0];
+        let (column, row) = (body.x + 10, body.y + 3);
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let items = app
+            .regions
+            .entry_menu_items
+            .iter()
+            .map(|(action, area)| (action.label(), area.x, area.y))
+            .collect::<Vec<_>>();
+        assert_eq!(items, [("Paste", column + 1, row + 1)]);
+        assert!(buffer_text(&terminal).contains(" Paste"));
+    }
+
+    #[test]
     fn the_explorer_menu_opens_at_the_mouse_and_the_prompt_shows_the_icon_of_the_name() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let directory = tempfile::tempdir().unwrap();
@@ -1273,8 +1304,10 @@ mod tests {
             [
                 ("New File", 2),
                 ("New Folder", 3),
-                ("Rename", 4),
-                ("Delete", 5)
+                ("Cut", 4),
+                ("Copy", 5),
+                ("Rename", 6),
+                ("Delete", 7)
             ]
         );
         assert!(buffer_text(&terminal).contains(" New Folder"));

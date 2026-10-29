@@ -1,8 +1,8 @@
 use std::{
     cmp::Ordering,
     fs,
-    path::PathBuf,
-    time::{Duration, Instant},
+    path::{Path, PathBuf},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{Context, Result};
@@ -19,6 +19,7 @@ mod mermaid;
 mod pdf;
 mod search;
 
+use highlight::FileHighlight;
 pub use highlight::{file_icon, highlight_lines, is_image_path, language_name};
 #[cfg(test)]
 pub use pdf::sample as sample_pdf;
@@ -44,6 +45,8 @@ enum Change {
     Type,
     Erase,
     Cut,
+    Paste,
+    Reload,
 }
 
 pub struct OpenFile {
@@ -54,6 +57,7 @@ pub struct OpenFile {
     pub language: &'static str,
     pub lines: Vec<String>,
     pub highlighted: Vec<Vec<Span<'static>>>,
+    highlight: FileHighlight,
     markdown: Option<MarkdownDocument>,
     /// Rows on screen; a Mermaid diagram can take more rows than its source.
     rows: Vec<Row>,
@@ -82,6 +86,9 @@ pub struct OpenFile {
     history: Vec<Snapshot>,
     last_change: Option<(Change, Instant)>,
     last_edit: Option<Instant>,
+    /// The file on disk when it was read or saved: its modification time and size, to see
+    /// another program change it.
+    disk: Option<(SystemTime, u64)>,
 }
 
 impl OpenFile {
@@ -115,6 +122,7 @@ impl OpenFile {
                 language,
                 lines: Vec::new(),
                 highlighted: Vec::new(),
+                highlight: FileHighlight::default(),
                 markdown: None,
                 rows: Vec::new(),
                 image: Some(picker.new_resize_protocol(image)),
@@ -133,21 +141,14 @@ impl OpenFile {
                 history: Vec::new(),
                 last_change: None,
                 last_edit: None,
+                disk: None,
             });
         }
 
-        let bytes =
-            fs::read(&path).with_context(|| format!("Could not open {}", path.display()))?;
-        if bytes.contains(&0) {
-            anyhow::bail!("{} is a binary file", path.display());
-        }
-        let text = String::from_utf8_lossy(&bytes);
-        let trailing_newline = text.ends_with('\n');
-        let mut lines = text.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
-        if lines.is_empty() {
-            lines.push(String::new());
-        }
-        let highlighted = highlight_lines(&path, &lines);
+        let disk = on_disk(&path);
+        let (lines, trailing_newline) = read_lines(&path)?;
+        let mut highlight = FileHighlight::default();
+        let highlighted = highlight.update(&path, &lines);
         let language = language_name(&path, &lines[0]);
         let mut file = Self {
             path,
@@ -156,6 +157,7 @@ impl OpenFile {
             language,
             lines,
             highlighted,
+            highlight,
             markdown: None,
             rows: Vec::new(),
             image: None,
@@ -174,6 +176,7 @@ impl OpenFile {
             history: Vec::new(),
             last_change: None,
             last_edit: None,
+            disk,
         };
         file.layout();
         Ok(file)
@@ -314,6 +317,38 @@ impl OpenFile {
             .with_context(|| format!("Could not save {}", self.path.display()))?;
         self.dirty = false;
         self.last_edit = None;
+        self.disk = on_disk(&self.path);
+        Ok(())
+    }
+
+    /// Another program changed the file since it was read or saved (a text file still there).
+    pub fn changed_on_disk(&self) -> bool {
+        self.image.is_none() && on_disk(&self.path).is_some_and(|disk| Some(disk) != self.disk)
+    }
+
+    /// Another program changed the file while it has edits not saved: they stay, and are
+    /// saved over it (Q40).
+    pub fn keep_edits(&mut self) {
+        self.disk = on_disk(&self.path);
+    }
+
+    /// Reads the file again, keeping the cursor and the scroll; Ctrl+Z brings back the text
+    /// before.
+    pub fn reload(&mut self) -> Result<()> {
+        let disk = on_disk(&self.path);
+        let (lines, trailing_newline) = read_lines(&self.path)?;
+        self.last_change = None;
+        self.remember(Change::Reload);
+        self.lines = lines;
+        self.trailing_newline = trailing_newline;
+        self.anchor = None;
+        self.dirty = false;
+        self.last_edit = None;
+        self.disk = disk;
+        self.clamp_cursor();
+        self.follow_cursor = false;
+        self.highlighted = self.highlight.update(&self.path, &self.lines);
+        self.layout();
         Ok(())
     }
 
@@ -462,6 +497,31 @@ impl OpenFile {
     pub fn insert(&mut self, character: char) {
         self.remember(Change::Type);
         self.remove_selection();
+        self.put(character);
+        self.changed();
+    }
+
+    /// Pastes `text` over the selection as one edit: one step of undo, highlighted once.
+    pub fn insert_str(&mut self, text: &str) {
+        let characters = text
+            .chars()
+            .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
+            .collect::<Vec<_>>();
+        if characters.is_empty() && self.selection().is_none() {
+            return;
+        }
+        // A paste is a step of its own, never part of the edit before it.
+        self.last_change = None;
+        self.remember(Change::Paste);
+        self.remove_selection();
+        for character in characters {
+            self.put(character);
+        }
+        self.changed();
+    }
+
+    /// Puts one character at the cursor, without the bookkeeping of an edit.
+    fn put(&mut self, character: char) {
         if character == '\n' {
             let index = self.byte_index(self.cursor_column);
             let tail = self.current_line_mut().split_off(index);
@@ -474,7 +534,6 @@ impl OpenFile {
             self.current_line_mut().insert(index, character);
             self.cursor_column += 1;
         }
-        self.changed();
     }
 
     pub fn backspace(&mut self) {
@@ -567,7 +626,7 @@ impl OpenFile {
         self.follow_cursor = true;
         self.dirty = true;
         self.last_edit = Some(Instant::now());
-        self.highlighted = highlight_lines(&self.path, &self.lines);
+        self.highlighted = self.highlight.update(&self.path, &self.lines);
         self.layout();
     }
 
@@ -605,6 +664,26 @@ impl OpenFile {
         self.cursor_row = self.cursor_row.min(self.lines.len().saturating_sub(1));
         self.cursor_column = self.cursor_column.min(self.current_line().chars().count());
     }
+}
+
+/// The modification time and the size of a file, none when it cannot be read.
+fn on_disk(path: &Path) -> Option<(SystemTime, u64)> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
+/// The lines of a text file and whether it ends with a newline.
+fn read_lines(path: &Path) -> Result<(Vec<String>, bool)> {
+    let bytes = fs::read(path).with_context(|| format!("Could not open {}", path.display()))?;
+    if bytes.contains(&0) {
+        anyhow::bail!("{} is a binary file", path.display());
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    Ok((lines, text.ends_with('\n')))
 }
 
 /// The byte where character `column` of `line` starts, or its end.
@@ -659,6 +738,45 @@ mod tests {
         file.insert('?');
         assert!(file.undo());
         assert_eq!(file.lines, ["one!"]);
+    }
+
+    #[test]
+    fn a_paste_is_one_edit_and_a_file_changed_on_disk_reads_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.md");
+        fs::write(&path, "one\ntwo\n").unwrap();
+        let mut file = OpenFile::load(path.clone(), &mut Picker::halfblocks()).unwrap();
+        file.move_cursor_to(0, 3);
+        file.insert('!');
+        file.insert_str(" pasted\r\nline\u{7}");
+        assert_eq!(file.lines, ["one! pasted", "line", "two"]);
+        assert_eq!(file.highlighted.len(), 3);
+        assert!(file.undo());
+        assert_eq!(file.lines, ["one!", "two"], "the paste alone goes back");
+        file.save().unwrap();
+        assert!(!file.changed_on_disk(), "its own save is not a change");
+
+        // Another program writes the file: it reads again with the cursor where it was.
+        file.move_cursor_to(1, 2);
+        fs::write(&path, "uno\ndos\ntres\n").unwrap();
+        assert!(file.changed_on_disk());
+        file.reload().unwrap();
+        assert_eq!(file.lines, ["uno", "dos", "tres"]);
+        assert_eq!((file.cursor_row, file.cursor_column), (1, 2));
+        assert!(!file.dirty && !file.changed_on_disk());
+        assert_eq!(file.display_rows(), 3);
+        assert!(file.undo());
+        assert_eq!(
+            file.lines,
+            ["one!", "two"],
+            "Ctrl+Z brings back the text before"
+        );
+
+        // Edits not saved stay when the file changes under them.
+        fs::write(&path, "changed again\n").unwrap();
+        file.keep_edits();
+        assert!(!file.changed_on_disk());
+        assert_eq!(file.lines, ["one!", "two"]);
     }
 
     #[test]

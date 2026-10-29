@@ -391,7 +391,11 @@ impl App {
     }
 
     fn handle_explorer_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
+            KeyCode::Char('c' | 'C') if ctrl => self.hold_selected_entry(false),
+            KeyCode::Char('x' | 'X') if ctrl => self.hold_selected_entry(true),
+            KeyCode::Char('v' | 'V') if ctrl => self.paste_selected_entry(),
             KeyCode::Up => self.selected_entry = self.selected_entry.saturating_sub(1),
             KeyCode::Down => {
                 self.selected_entry =
@@ -436,6 +440,10 @@ impl App {
             if !file.undo() {
                 self.status = "Nothing to undo".into();
             }
+            return;
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('v' | 'V')) {
+            self.paste_clipboard();
             return;
         }
         let mut copied = None;
@@ -688,6 +696,17 @@ impl App {
                     self.focus = Focus::Explorer;
                     let index = self.explorer_scroll + usize::from(point.1 - explorer.y - 1);
                     self.open_entry_menu((index < self.entries.len()).then_some(index), point);
+                } else if free
+                    && let Some(index) = self
+                        .pane_at(point)
+                        .filter(|index| self.open_files[*index].image.is_none())
+                {
+                    if Some(index) != self.active_tab {
+                        self.flush_active_file();
+                        self.select_tab(index);
+                    }
+                    self.focus = Focus::Editor;
+                    self.open_editor_menu(point);
                 } else {
                     self.entry_menu = None;
                 }
@@ -1145,7 +1164,7 @@ mod tests {
         app.show_explorer = true;
         app.regions.explorer = Rect::new(0, 0, 30, 20);
         app.open_file(folder.join("a.md")).unwrap();
-        app.insert_editor_character('!');
+        app.editor_paste("!");
         // The project folder has no Delete.
         mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 10);
         assert!(
@@ -1234,7 +1253,7 @@ mod tests {
 
         // On the src folder: a new file goes inside it, opens and is selected.
         mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 1);
-        assert_eq!(app.entry_menu.as_ref().unwrap().actions.len(), 4);
+        assert_eq!(app.entry_menu.as_ref().unwrap().actions.len(), 6);
         app.regions.entry_menu_items = vec![(EntryAction::NewFile, Rect::new(3, 2, 14, 1))];
         mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 5, 2);
         assert!(app.entry_menu.is_none());
@@ -1290,6 +1309,161 @@ mod tests {
         assert_eq!(
             (tab.path.as_path(), tab.name.as_str()),
             (renamed.as_path(), "lib.rs")
+        );
+    }
+
+    #[test]
+    fn the_explorer_cuts_copies_and_pastes_with_keys_and_the_menu() {
+        use crossterm::event::MouseButton;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::create_dir(root.join("docs")).unwrap();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        let mut app = App::new(root.to_path_buf()).unwrap();
+        app.regions.explorer = Rect::new(0, 0, 30, 20);
+        let select = |app: &mut App, name: &str| {
+            app.focus = Focus::Explorer;
+            app.selected_entry = app
+                .entries
+                .iter()
+                .position(|entry| entry.path == root.join(name))
+                .unwrap();
+        };
+        // Nothing kept: Paste is not in the menu and Ctrl+V says what to do.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 1);
+        assert!(
+            !app.entry_menu
+                .as_ref()
+                .unwrap()
+                .actions
+                .contains(&EntryAction::Paste)
+        );
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        select(&mut app, "a.txt");
+        press(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert!(app.status.contains("first"));
+
+        // Ctrl+C, Ctrl+V next to the file: a copy with a free name, selected.
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        press(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert!(root.join("a copy.txt").is_file());
+        assert_eq!(
+            app.entries[app.selected_entry].path,
+            root.join("a copy.txt")
+        );
+        // The menu of a folder pastes into it, which opens.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 1);
+        let menu = app.entry_menu.as_ref().unwrap();
+        assert_eq!(menu.target, root.join("docs"));
+        assert_eq!(
+            menu.actions,
+            [
+                EntryAction::NewFile,
+                EntryAction::NewFolder,
+                EntryAction::Cut,
+                EntryAction::Copy,
+                EntryAction::Paste,
+                EntryAction::Rename,
+                EntryAction::Delete
+            ]
+        );
+        app.choose_entry_action(EntryAction::Paste);
+        assert!(root.join("docs/a.txt").is_file());
+        assert!(
+            app.entries
+                .iter()
+                .any(|entry| entry.path == root.join("docs/a.txt"))
+        );
+
+        // Ctrl+X moves once, and the open tab follows; never over a file there.
+        app.open_file(root.join("a copy.txt")).unwrap();
+        select(&mut app, "a.txt");
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
+        select(&mut app, "docs");
+        press(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert!(app.status.contains("already exists") && root.join("a.txt").is_file());
+        select(&mut app, "a copy.txt");
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
+        select(&mut app, "docs");
+        press(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert!(root.join("docs/a copy.txt").is_file() && !root.join("a copy.txt").exists());
+        assert_eq!(app.open_files[0].path, root.join("docs/a copy.txt"));
+        assert!(app.file_clipboard.is_none(), "a move is done once");
+    }
+
+    #[test]
+    fn the_editor_menu_and_ctrl_v_cut_copy_and_paste_text() {
+        use crossterm::event::MouseButton;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.txt");
+        std::fs::write(&path, "alpha beta\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path).unwrap();
+        app.regions.editor_body = Rect::new(30, 2, 60, 20);
+        app.regions.pane_bodies[0] = app.regions.editor_body;
+        let right_click = |app: &mut App| {
+            mouse(app, MouseEventKind::Down(MouseButton::Right), 40, 4);
+            let menu = app.entry_menu.as_ref().unwrap();
+            assert!(menu.editor);
+            menu.actions.clone()
+        };
+        // Without a selection there is only Paste, and nothing to paste yet.
+        assert_eq!(right_click(&mut app), [EntryAction::Paste]);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.status, "The clipboard is empty");
+        for _ in 0..5 {
+            press(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
+        }
+        assert_eq!(
+            right_click(&mut app),
+            [EntryAction::Cut, EntryAction::Copy, EntryAction::Paste]
+        );
+        app.choose_entry_action(EntryAction::Copy);
+        assert_eq!(app.clipboard.take().as_deref(), Some("alpha"));
+        press(&mut app, KeyCode::End, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert_eq!(app.active_file().unwrap().lines, ["alpha betaalpha"]);
+        press(&mut app, KeyCode::Home, KeyModifiers::SHIFT);
+        right_click(&mut app);
+        app.choose_entry_action(EntryAction::Cut);
+        assert_eq!(app.active_file().unwrap().lines, [""]);
+        right_click(&mut app);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.active_file().unwrap().lines, ["alpha betaalpha"]);
+        press(&mut app, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(
+            app.active_file().unwrap().lines,
+            [""],
+            "a paste undoes at once"
+        );
+    }
+
+    #[test]
+    fn changes_by_other_programs_reach_the_open_tabs_and_the_explorer() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        std::fs::write(root.join("b.txt"), "two\n").unwrap();
+        let mut app = App::new(root.to_path_buf()).unwrap();
+        app.open_file(root.join("a.txt")).unwrap();
+        app.open_file(root.join("b.txt")).unwrap();
+        app.editor_paste("!");
+        std::fs::write(root.join("a.txt"), "uno\n").unwrap();
+        std::fs::write(root.join("b.txt"), "dos dos\n").unwrap();
+        std::fs::write(root.join("c.txt"), "").unwrap();
+        let now = Instant::now();
+        app.tick_at(now);
+        assert_eq!(app.open_files[0].lines, ["one"], "compared once a second");
+        // Before the autosave of the edit in b.txt (2 s).
+        app.tick_at(now + Duration::from_millis(1500));
+        assert_eq!(app.open_files[0].lines, ["uno"]);
+        assert_eq!(app.open_files[1].lines, ["!two"]);
+        assert!(app.open_files[1].dirty);
+        assert_eq!(app.status, "b.txt changed on disk: your edits are kept");
+        assert!(
+            app.entries
+                .iter()
+                .any(|entry| entry.path == root.join("c.txt"))
         );
     }
 

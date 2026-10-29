@@ -360,6 +360,7 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             keys: vec![
                 ("Enter", "Open a file or a folder"),
                 ("Right-click", "New, rename, delete (Explorer)"),
+                ("Ctrl+X/C/V", "Cut, copy, paste (Explorer)"),
                 ("Ctrl+W", "Close the tab"),
                 ("Wheel on the tabs", "Scroll the tabs, or click < and >"),
                 ("Drag a tab", "To an editor edge: split the editor"),
@@ -383,6 +384,8 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
                 ("Ctrl+A", "Select all"),
                 ("Ctrl+Z", "Undo the last edit"),
                 ("Ctrl+C / Ctrl+X", "Copy / cut the selection"),
+                ("Ctrl+V", "Paste"),
+                ("Right-click", "Cut, copy, paste the text"),
                 (
                     if mac {
                         "Delete/fn+Delete"

@@ -5,12 +5,11 @@ use ratatui::{
     text::Span,
 };
 use syntect::{
-    easy::HighlightLines,
     highlighting::{
-        Color as ThemeColor, FontStyle, ScopeSelectors, StyleModifier, Theme, ThemeItem,
-        ThemeSettings,
+        Color as ThemeColor, FontStyle, HighlightIterator, HighlightState, Highlighter,
+        ScopeSelectors, StyleModifier, Theme, ThemeItem, ThemeSettings,
     },
-    parsing::{SyntaxReference, SyntaxSet},
+    parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet},
 };
 
 use super::markdown::{is_markdown_path, mermaid_lines};
@@ -365,44 +364,120 @@ fn alias(extension: &str) -> &str {
 }
 
 pub fn highlight_lines(path: &Path, lines: &[String]) -> Vec<Vec<Span<'static>>> {
-    if is_mermaid_path(path) {
-        return lines
+    FileHighlight::default().update(path, lines)
+}
+
+/// The highlight of a file kept between edits (F02): the syntax state at the start of each
+/// line lets an edit colour again only from its first changed line until the state is the one
+/// there was before. Colouring the whole file on every key took 0.3 s on a 500-line Markdown
+/// file (ERRORS.md E28).
+#[derive(Default)]
+pub struct FileHighlight {
+    syntax: String,
+    /// The lines last highlighted, their spans and the state at the start of each (and at the
+    /// end).
+    source: Vec<String>,
+    spans: Vec<Vec<Span<'static>>>,
+    states: Vec<(ParseState, HighlightState)>,
+}
+
+impl FileHighlight {
+    /// The spans of every line of `lines`, highlighting only what changed since the last call.
+    pub fn update(&mut self, path: &Path, lines: &[String]) -> Vec<Vec<Span<'static>>> {
+        if is_mermaid_path(path) {
+            return lines
+                .iter()
+                .map(|line| highlight_mermaid_line(line))
+                .collect();
+        }
+        let syntax = syntax_for(path, lines.first().map_or("", String::as_str));
+        if self.syntax != syntax.name {
+            *self = Self {
+                syntax: syntax.name.clone(),
+                ..Self::default()
+            };
+        }
+        let highlighter = Highlighter::new(&THEME);
+        let (old, new) = (self.source.len(), lines.len());
+        // The lines before the first change keep their spans; a common end can be reused once
+        // the state reaches it as it was.
+        let first = self
+            .source
             .iter()
-            .map(|line| highlight_mermaid_line(line))
-            .collect();
-    }
-    let syntax = syntax_for(path, lines.first().map_or("", String::as_str));
-    let mermaid = if is_markdown_path(path) {
-        mermaid_lines(lines)
-    } else {
-        Vec::new()
-    };
-    let mut highlighter = HighlightLines::new(syntax, &THEME);
-    lines
-        .iter()
-        .enumerate()
-        .map(|(index, line)| {
-            // The syntaxes end line comments, and other scopes, at the newline: without it the
-            // rest of the file stayed a comment after the first `//` or `#` (E22).
-            let line_with_newline = format!("{line}\n");
-            let highlighted = highlighter
-                .highlight_line(&line_with_newline, &SYNTAXES)
-                .map(|regions| {
-                    regions
-                        .into_iter()
-                        .filter_map(|(style, text)| {
-                            let text = text.strip_suffix('\n').unwrap_or(text);
-                            (!text.is_empty())
-                                .then(|| Span::styled(text.to_owned(), span_style(style)))
-                        })
-                        .collect()
-                })
-                .unwrap_or_else(|_| vec![Span::raw(line.clone())]);
-            if mermaid.get(index).copied().unwrap_or(false) {
-                highlight_mermaid_line(line)
-            } else {
-                highlighted
+            .zip(lines)
+            .take_while(|(old, new)| old == new)
+            .count();
+        let common_end = self
+            .source
+            .iter()
+            .rev()
+            .zip(lines.iter().rev())
+            .take(old.min(new) - first)
+            .take_while(|(old, new)| old == new)
+            .count();
+        let mut old_states = self.states.split_off(first.min(self.states.len()));
+        let mut old_spans = self.spans.split_off(first.min(self.spans.len()));
+        let mut state = old_states.first().cloned().unwrap_or_else(|| {
+            (
+                ParseState::new(syntax),
+                HighlightState::new(&highlighter, ScopeStack::new()),
+            )
+        });
+        let mut reused = false;
+        for (index, line) in lines.iter().enumerate().skip(first) {
+            if index >= new - common_end {
+                // Line `index` is old line `index + old - new`, unchanged.
+                let from = index + old - new - first;
+                if old_states.get(from) == Some(&state) {
+                    self.states.extend(old_states.drain(from..));
+                    self.spans.extend(old_spans.drain(from..));
+                    reused = true;
+                    break;
+                }
             }
+            self.states.push(state.clone());
+            self.spans
+                .push(highlight_line(line, &mut state, &highlighter));
+        }
+        if !reused {
+            self.states.push(state);
+        }
+        self.source = lines.to_vec();
+        let mermaid = if is_markdown_path(path) {
+            mermaid_lines(lines)
+        } else {
+            Vec::new()
+        };
+        self.spans
+            .iter()
+            .enumerate()
+            .map(|(index, spans)| {
+                if mermaid.get(index).copied().unwrap_or(false) {
+                    highlight_mermaid_line(&lines[index])
+                } else {
+                    spans.clone()
+                }
+            })
+            .collect()
+    }
+}
+
+/// The spans of one line, from the state at its start, which becomes the state at its end.
+fn highlight_line(
+    line: &str,
+    (parse, highlight): &mut (ParseState, HighlightState),
+    highlighter: &Highlighter,
+) -> Vec<Span<'static>> {
+    // The syntaxes end line comments, and other scopes, at the newline: without it the rest of
+    // the file stayed a comment after the first `//` or `#` (E22).
+    let line_with_newline = format!("{line}\n");
+    let Ok(operations) = parse.parse_line(&line_with_newline, &SYNTAXES) else {
+        return vec![Span::raw(line.to_owned())];
+    };
+    HighlightIterator::new(highlight, &operations, &line_with_newline, highlighter)
+        .filter_map(|(style, text)| {
+            let text = text.strip_suffix('\n').unwrap_or(text);
+            (!text.is_empty()).then(|| Span::styled(text.to_owned(), span_style(style)))
         })
         .collect()
 }
@@ -687,6 +762,40 @@ pub fn nearest_ansi(red: u8, green: u8, blue: u8) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_edit_highlights_again_only_from_the_change_like_the_whole_file() {
+        let path = Path::new("main.rs");
+        let mut lines = (0..40)
+            .map(|index| format!("let value_{index} = \"{index}\"; // note"))
+            .collect::<Vec<_>>();
+        let mut file = FileHighlight::default();
+        assert_eq!(file.update(path, &lines), highlight_lines(path, &lines));
+        // A line far below the edit keeps its spans: marked here, it is not coloured again.
+        file.spans[30] = vec![Span::raw("kept")];
+        lines[2].push_str(" x");
+        assert_eq!(file.update(path, &lines)[30], [Span::raw("kept")]);
+        file.spans[30] = highlight_lines(path, &lines[30..31]).remove(0);
+        // Inserting, removing and opening a comment that runs to the end of the file give the
+        // highlight of the whole file again.
+        let edits: [fn(&mut Vec<String>); 4] = [
+            |lines| lines.insert(5, "fn inserted() {}".into()),
+            |lines| drop(lines.remove(10)),
+            |lines| lines[20].insert_str(0, "/*"),
+            |lines| lines[20].replace_range(0..2, ""),
+        ];
+        for edit in edits {
+            edit(&mut lines);
+            assert_eq!(file.update(path, &lines), highlight_lines(path, &lines));
+            assert_eq!(file.states.len(), lines.len() + 1);
+        }
+        let commented = {
+            let mut commented = lines.clone();
+            commented[20].insert_str(0, "/*");
+            highlight_lines(path, &commented)
+        };
+        assert_ne!(commented[39], highlight_lines(path, &lines)[39]);
+    }
 
     #[test]
     fn recognizes_every_requested_language() {

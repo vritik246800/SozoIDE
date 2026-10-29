@@ -108,7 +108,7 @@ pub(super) fn render_name_prompt(frame: &mut Frame, app: &App, screen: Rect) {
     let folder = match prompt.action {
         EntryAction::NewFolder => true,
         EntryAction::NewFile => false,
-        EntryAction::Rename | EntryAction::Delete => prompt.target.is_dir(),
+        _ => prompt.target.is_dir(),
     };
     let (icon, color) = if folder {
         (app.icon("custom-folder"), ACTIVE)

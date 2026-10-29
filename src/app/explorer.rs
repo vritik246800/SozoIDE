@@ -26,6 +26,10 @@ pub enum EntryAction {
     NewFolder,
     Rename,
     Delete,
+    /// The clipboard: files and folders in the Explorer, text in the editor.
+    Cut,
+    Copy,
+    Paste,
 }
 
 impl EntryAction {
@@ -35,6 +39,9 @@ impl EntryAction {
             Self::NewFolder => "New Folder",
             Self::Rename => "Rename",
             Self::Delete => "Delete",
+            Self::Cut => "Cut",
+            Self::Copy => "Copy",
+            Self::Paste => "Paste",
         }
     }
 }
@@ -46,6 +53,8 @@ pub struct EntryMenu {
     pub actions: Vec<EntryAction>,
     pub position: (u16, u16),
     pub selected: usize,
+    /// Opened in the editor text: Cut, Copy and Paste act on the text (F02).
+    pub editor: bool,
 }
 
 /// The name being typed for a new file or folder, or for a rename.
@@ -112,6 +121,72 @@ pub fn delete_entry(root: &Path, path: &Path) -> Result<()> {
     .with_context(|| format!("Could not delete {}", path.display()))
 }
 
+/// Copies a file, or a folder with everything in it, into `folder`; next to itself it takes a
+/// free name: `name copy.rs`, `name copy 2.rs`...
+pub fn copy_entry(path: &Path, folder: &Path) -> Result<PathBuf> {
+    if folder.starts_with(path) {
+        bail!("A folder cannot be copied into itself");
+    }
+    let name = path.file_name().context("Nothing to copy")?;
+    let mut target = folder.join(name);
+    let mut copies = 1;
+    while target.exists() {
+        target = folder.join(copy_name(path, copies));
+        copies += 1;
+    }
+    copy_tree(path, &target).with_context(|| format!("Could not copy {}", path.display()))?;
+    Ok(target)
+}
+
+/// `main copy.rs`, `main copy 2.rs`; a folder or a name without an extension ends with it.
+fn copy_name(path: &Path, copies: usize) -> String {
+    let suffix = match copies {
+        1 => " copy".to_owned(),
+        copies => format!(" copy {copies}"),
+    };
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    match (path.is_dir(), path.file_stem(), path.extension()) {
+        (false, Some(stem), Some(extension)) => format!(
+            "{}{suffix}.{}",
+            stem.to_string_lossy(),
+            extension.to_string_lossy()
+        ),
+        _ => format!("{name}{suffix}"),
+    }
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    if !fs::symlink_metadata(from)?.is_dir() {
+        return fs::copy(from, to).map(drop);
+    }
+    fs::create_dir(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+/// Moves a file or a folder into `folder`; never the project, over something that exists or
+/// into itself.
+pub fn move_entry(root: &Path, path: &Path, folder: &Path) -> Result<PathBuf> {
+    if path == root || !path.starts_with(root) {
+        bail!("Only files and folders inside the project can be moved");
+    }
+    if folder.starts_with(path) {
+        bail!("A folder cannot be moved into itself");
+    }
+    let target = folder.join(path.file_name().context("Nothing to move")?);
+    if target == path {
+        return Ok(target);
+    }
+    if target.exists() {
+        bail!("{} already exists", target.display());
+    }
+    fs::rename(path, &target).with_context(|| format!("Could not move {}", path.display()))?;
+    Ok(target)
+}
+
 impl App {
     pub fn refresh_entries(&mut self) -> Result<()> {
         let selected_path = self
@@ -134,6 +209,7 @@ impl App {
         self.selected_entry = self
             .selected_entry
             .min(self.entries.len().saturating_sub(1));
+        self.folders = self.folder_times();
         Ok(())
     }
 
@@ -200,6 +276,12 @@ impl App {
             .map_or_else(|| self.root.clone(), |entry| entry.path.clone());
         let mut actions = vec![EntryAction::NewFile, EntryAction::NewFolder];
         if target != self.root {
+            actions.extend([EntryAction::Cut, EntryAction::Copy]);
+        }
+        if self.file_clipboard.is_some() {
+            actions.push(EntryAction::Paste);
+        }
+        if target != self.root {
             actions.extend([EntryAction::Rename, EntryAction::Delete]);
         }
         if let Some(index) = index.filter(|index| *index < self.entries.len()) {
@@ -210,14 +292,26 @@ impl App {
             actions,
             position,
             selected: 0,
+            editor: false,
         });
     }
 
-    /// Runs a menu entry: a prompt for the name, the old one when renaming.
+    /// Runs a menu entry: the clipboard at once, otherwise a prompt for the name (the old one
+    /// when renaming).
     pub fn choose_entry_action(&mut self, action: EntryAction) {
         let Some(menu) = self.entry_menu.take() else {
             return;
         };
+        if menu.editor {
+            return self.editor_action(action);
+        }
+        match action {
+            EntryAction::Cut | EntryAction::Copy => {
+                return self.hold_entry(menu.target, action == EntryAction::Cut);
+            }
+            EntryAction::Paste => return self.paste_entry(&menu.target),
+            _ => {}
+        }
         let name = if action == EntryAction::Rename {
             menu.target
                 .file_name()
@@ -259,7 +353,7 @@ impl App {
         let result = match prompt.action {
             EntryAction::NewFile => create_entry(&parent, &prompt.name, false),
             EntryAction::NewFolder => create_entry(&parent, &prompt.name, true),
-            EntryAction::Rename | EntryAction::Delete => rename_entry(&prompt.target, &prompt.name),
+            _ => rename_entry(&prompt.target, &prompt.name),
         };
         let path = match result {
             Ok(path) => path,
@@ -286,6 +380,80 @@ impl App {
         {
             self.status = error.to_string();
         }
+    }
+
+    /// Ctrl+C or Ctrl+X in the Explorer: the selected file or folder.
+    pub(super) fn hold_selected_entry(&mut self, cut: bool) {
+        if let Some(entry) = self.entries.get(self.selected_entry) {
+            self.hold_entry(entry.path.clone(), cut);
+        }
+    }
+
+    /// Keeps `path` to copy or move with Paste.
+    fn hold_entry(&mut self, path: PathBuf, cut: bool) {
+        let name = path.strip_prefix(&self.root).unwrap_or(&path).display();
+        self.status = if cut {
+            format!("Cut {name}: Paste moves it")
+        } else {
+            format!("Copied {name}")
+        };
+        self.file_clipboard = Some((path, cut));
+    }
+
+    /// Ctrl+V in the Explorer: into the selected folder, or next to the selected file.
+    pub(super) fn paste_selected_entry(&mut self) {
+        let target = self
+            .entries
+            .get(self.selected_entry)
+            .map_or_else(|| self.root.clone(), |entry| entry.path.clone());
+        self.paste_entry(&target);
+    }
+
+    /// Copies or moves what Copy or Cut kept into `target`, a folder, or next to a file.
+    fn paste_entry(&mut self, target: &Path) {
+        let Some((path, cut)) = self.file_clipboard.clone() else {
+            self.status = "Copy or cut a file or folder first".into();
+            return;
+        };
+        let folder = if target.is_dir() {
+            target.to_path_buf()
+        } else {
+            target
+                .parent()
+                .map_or_else(|| self.root.clone(), Path::to_path_buf)
+        };
+        let result = if cut {
+            move_entry(&self.root, &path, &folder)
+        } else {
+            copy_entry(&path, &folder)
+        };
+        let pasted = match result {
+            Ok(pasted) => pasted,
+            Err(error) => {
+                self.status = format!("{error:#}");
+                return;
+            }
+        };
+        if cut {
+            // A move is done once; its tabs follow it.
+            self.file_clipboard = None;
+            self.renamed(&path, &pasted);
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.path == folder) {
+            entry.expanded = true;
+        }
+        if let Err(error) = self.refresh_entries() {
+            self.status = error.to_string();
+            return;
+        }
+        if let Some(index) = self.entries.iter().position(|entry| entry.path == pasted) {
+            self.selected_entry = index;
+        }
+        self.status = format!(
+            "{} {}",
+            if cut { "Moved to" } else { "Pasted" },
+            pasted.strip_prefix(&self.root).unwrap_or(&pasted).display()
+        );
     }
 
     /// After a delete: the tabs of what was deleted close without saving it back.
@@ -366,5 +534,37 @@ mod tests {
         assert!(delete_entry(root, root).is_err());
         assert!(delete_entry(root, &root.join("missing")).is_err());
         assert_eq!(rename_entry(&renamed, "lib.rs").unwrap(), renamed);
+    }
+
+    #[test]
+    fn entries_are_copied_with_a_free_name_and_moved_never_over_others() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let src = create_entry(root, "src", true).unwrap();
+        fs::create_dir(src.join("inner")).unwrap();
+        fs::write(src.join("inner/a.rs"), "a").unwrap();
+        let file = root.join("main.rs");
+        fs::write(&file, "fn main() {}").unwrap();
+        // Next to itself a copy takes a free name; a folder comes with what it has.
+        assert_eq!(copy_entry(&file, root).unwrap(), root.join("main copy.rs"));
+        assert_eq!(
+            copy_entry(&file, root).unwrap(),
+            root.join("main copy 2.rs")
+        );
+        let copied = copy_entry(&src, root).unwrap();
+        assert_eq!(copied, root.join("src copy"));
+        assert_eq!(fs::read_to_string(copied.join("inner/a.rs")).unwrap(), "a");
+        assert!(copy_entry(&src, &src.join("inner")).is_err());
+        let into = copy_entry(&file, &src).unwrap();
+        assert_eq!(fs::read_to_string(into).unwrap(), "fn main() {}");
+
+        // A move goes into a folder, never over something there, into itself or the project.
+        assert!(move_entry(root, &file, &src).is_err(), "src/main.rs exists");
+        let moved = move_entry(root, &root.join("main copy.rs"), &src).unwrap();
+        assert_eq!(moved, src.join("main copy.rs"));
+        assert!(!root.join("main copy.rs").exists() && moved.is_file());
+        assert!(move_entry(root, &src, &src.join("inner")).is_err());
+        assert!(move_entry(root, root, &src).is_err());
+        assert_eq!(move_entry(root, &moved, &src).unwrap(), moved);
     }
 }

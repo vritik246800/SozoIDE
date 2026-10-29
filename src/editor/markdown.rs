@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{cell::RefCell, collections::HashMap, path::Path};
 
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -431,9 +431,27 @@ impl MarkdownDocument {
     }
 }
 
+thread_local! {
+    /// The diagrams drawn, by their Mermaid text.
+    static DRAWN: RefCell<HashMap<String, Option<Vec<String>>>> = RefCell::default();
+}
+
 /// A Mermaid block drawn with box characters (`editor::mermaid`); `None` keeps the code frame.
+/// Each key parses the Markdown again: a diagram whose text did not change is not drawn again.
 fn render_diagram(body: &[String]) -> Option<Vec<String>> {
-    super::mermaid::render(&body.join("\n"))
+    let source = body.join("\n");
+    DRAWN.with_borrow_mut(|drawn| {
+        if let Some(diagram) = drawn.get(&source) {
+            return diagram.clone();
+        }
+        // ponytail: forgets everything when full; an LRU if many diagrams are edited at once.
+        if drawn.len() >= 64 {
+            drawn.clear();
+        }
+        let diagram = super::mermaid::render(&source);
+        drawn.insert(source, diagram.clone());
+        diagram
+    })
 }
 
 /// A diagram line: box drawing and arrows in the accent colour, labels in the text colour.
@@ -970,6 +988,22 @@ fn fence_marker(line: &str) -> Option<(&str, char, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_diagram_is_drawn_again_only_when_its_text_changes() {
+        let lines = ["```mermaid", "graph TD", "  Kept --> Drawn", "```"]
+            .map(String::from)
+            .to_vec();
+        let source = "graph TD\n  Kept --> Drawn";
+        DRAWN.with_borrow_mut(|drawn| drawn.remove(source));
+        let first = MarkdownDocument::parse(&lines);
+        assert!(DRAWN.with_borrow(|drawn| drawn.contains_key(source)));
+        // What the memory holds is what is drawn.
+        DRAWN.with_borrow_mut(|drawn| drawn.insert(source.into(), Some(vec!["memo".into()])));
+        let again = MarkdownDocument::parse(&lines);
+        assert!(first.fences[0].diagram.is_some());
+        assert_eq!(again.fences[0].diagram, Some(vec!["memo".to_owned()]));
+    }
 
     fn text(spans: &[Span]) -> String {
         spans.iter().map(|span| span.content.as_ref()).collect()
