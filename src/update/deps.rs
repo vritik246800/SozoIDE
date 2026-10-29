@@ -17,7 +17,7 @@ pub fn missing() -> Vec<&'static str> {
     TOOLS.into_iter().filter(|tool| !on_path(tool)).collect()
 }
 
-fn on_path(tool: &str) -> bool {
+pub fn on_path(tool: &str) -> bool {
     env::var_os("PATH").is_some_and(|paths| found_in(&paths, tool))
 }
 

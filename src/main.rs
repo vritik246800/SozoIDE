@@ -5,6 +5,7 @@ mod database;
 mod editor;
 mod git;
 mod media;
+mod run;
 mod terminal;
 mod ui;
 mod update;

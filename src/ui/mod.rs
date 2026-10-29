@@ -1210,6 +1210,7 @@ mod tests {
             "Undo the last edit",
             "New, rename, delete",
             "Turn the model",
+            "Run the file or its project",
             "Pause or play a video",
             "Cut, copy, paste (Explorer)",
             "Cut, copy, paste the text",

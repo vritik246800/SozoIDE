@@ -396,6 +396,16 @@ impl App {
             KeyCode::Char('c' | 'C') if ctrl => self.hold_selected_entry(false),
             KeyCode::Char('x' | 'X') if ctrl => self.hold_selected_entry(true),
             KeyCode::Char('v' | 'V') if ctrl => self.paste_selected_entry(),
+            KeyCode::Char('r' | 'R') if ctrl => {
+                if let Some(entry) = self
+                    .entries
+                    .get(self.selected_entry)
+                    .filter(|entry| !entry.is_dir)
+                {
+                    let path = entry.path.clone();
+                    self.run_file(path);
+                }
+            }
             KeyCode::Up => self.selected_entry = self.selected_entry.saturating_sub(1),
             KeyCode::Down => {
                 self.selected_entry =
@@ -415,6 +425,10 @@ impl App {
         if ctrl && matches!(key.code, KeyCode::Char('w' | 'W')) {
             self.close_tab(active);
             return;
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('r' | 'R')) {
+            let path = self.open_files[active].path.clone();
+            return self.run_file(path);
         }
         let file = &mut self.open_files[active];
         if let Some(media) = &mut file.media {
@@ -1591,6 +1605,45 @@ mod tests {
         app.tick_at(Instant::now());
         assert_eq!(app.status, "Installed ffmpeg");
         assert!(app.dependencies.is_none());
+    }
+
+    #[test]
+    fn ctrl_r_runs_the_file_in_the_bottom_terminal_and_stays_with_the_shell_there() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = if cfg!(windows) {
+            "hello.bat"
+        } else {
+            "hello.sh"
+        };
+        std::fs::write(directory.path().join(script), "echo hello\n").unwrap();
+        std::fs::write(directory.path().join("notes.md"), "# notes\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(directory.path().join("notes.md")).unwrap();
+        app.editor_paste("unsaved");
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert_eq!(app.status, "SozoIDE does not know how to run .md files");
+        assert!(!app.show_bottom_terminal);
+        assert!(!app.open_files[0].dirty, "Ctrl+R saves first");
+
+        app.open_file(directory.path().join(script)).unwrap();
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert!(app.status.starts_with("Running"), "{}", app.status);
+        assert!(app.show_bottom_terminal && app.focus == Focus::BottomTerminal);
+        // In the terminal Ctrl+R belongs to the shell (history search).
+        app.status.clear();
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert!(app.status.is_empty());
+
+        // The Explorer runs the selected file.
+        app.focus = Focus::Explorer;
+        app.show_bottom_terminal = false;
+        app.selected_entry = app
+            .entries
+            .iter()
+            .position(|entry| entry.path.ends_with(script))
+            .unwrap();
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert!(app.show_bottom_terminal && app.status.starts_with("Running"));
     }
 
     #[test]

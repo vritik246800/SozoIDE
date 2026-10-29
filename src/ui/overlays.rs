@@ -362,6 +362,7 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
                 ("Right-click", "New, rename, delete (Explorer)"),
                 ("Ctrl+X/C/V", "Cut, copy, paste (Explorer)"),
                 ("Ctrl+W", "Close the tab"),
+                ("Ctrl+R", "Run the file or its project"),
                 ("Wheel on the tabs", "Scroll the tabs, or click < and >"),
                 ("Drag a tab", "To an editor edge: split the editor"),
                 ("", "To the other pane: move it there"),

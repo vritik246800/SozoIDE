@@ -363,6 +363,29 @@ impl App {
         self.clipboard = Some(text);
     }
 
+    /// Ctrl+R (F25): saves everything and types the command that runs `file` into the bottom
+    /// terminal, which opens and takes the focus.
+    pub(super) fn run_file(&mut self, file: PathBuf) {
+        self.flush_all_files();
+        let scratch = std::env::temp_dir().join("sozo-run");
+        let command = crate::run::command(
+            &file,
+            &self.root,
+            std::env::consts::OS,
+            crate::update::deps::on_path,
+            &scratch,
+        );
+        match command {
+            Ok(line) => {
+                self.show_bottom_terminal = true;
+                self.focus = Focus::BottomTerminal;
+                self.bottom_terminal.send_text(&format!("{line}\r"));
+                self.status = format!("Running {}", file.display());
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
     /// Ctrl+V and Paste in the editor: the system clipboard, or the last text copied here.
     pub(super) fn paste_clipboard(&mut self) {
         let text = if cfg!(test) {
