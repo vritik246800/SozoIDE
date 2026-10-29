@@ -106,6 +106,7 @@ pub struct Regions {
     pub update_install: Rect,
     pub update_skip: Rect,
     pub about_repository: Rect,
+    pub about_update: Rect,
     pub dialog_next: Rect,
     pub dialog_skip: Rect,
     /// Both editor panes together; `editor` is the text area of the active pane.

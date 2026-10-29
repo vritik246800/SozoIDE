@@ -537,6 +537,7 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
                 (key("F1"), "Help"),
                 (key("F2"), "About"),
                 ("G (in About)", "Open the repository to contribute"),
+                ("U (in About)", "Check for updates now"),
                 ("Ctrl+Q", "Quit"),
             ],
         },
@@ -727,7 +728,17 @@ fn bloom(art: &[&str], progress: f32) -> Vec<String> {
 /// what SozoIDE is under it.
 pub(super) fn render_about(frame: &mut Frame, app: &mut App, area: Rect) {
     let button = " Contribute on GitHub [G] ";
+    let update = " Check for updates [U] ";
     let tagline = "A terminal-native integrated development environment";
+    let button_style = Style::default()
+        .fg(ACTIVE)
+        .add_modifier(Modifier::BOLD | Modifier::REVERSED);
+    // What the last check found, in place of the hint: the dialog keeps its size.
+    let last = app
+        .updater
+        .checked
+        .clone()
+        .unwrap_or_else(|| "Press Esc to close".to_string());
     let mut info = vec![
         Line::from(""),
         Line::from(Span::styled(
@@ -738,17 +749,9 @@ pub(super) fn render_about(frame: &mut Frame, app: &mut App, area: Rect) {
         Line::from(format!("Created by {}", branding::AUTHOR)),
         Line::from(tagline),
         Line::from(""),
-        Line::from(Span::styled(
-            button,
-            Style::default()
-                .fg(ACTIVE)
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press Esc to close",
-            Style::default().fg(MUTED),
-        )),
+        Line::from(Span::styled(button, button_style)),
+        Line::from(Span::styled(update, button_style)),
+        Line::from(Span::styled(last, Style::default().fg(MUTED))),
     ];
     // The dialog takes a row over the flower, the borders and a spare row, and keeps one row
     // free above and below it.
@@ -779,17 +782,16 @@ pub(super) fn render_about(frame: &mut Frame, app: &mut App, area: Rect) {
         " About SozoIDE ".to_string(),
         |frame, inner| {
             frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
-            let width = (button.len() as u16).min(inner.width);
-            app.regions.about_repository = if button_row < inner.height {
-                Rect::new(
-                    inner.x + (inner.width - width) / 2,
-                    inner.y + button_row,
-                    width,
-                    1,
-                )
-            } else {
-                Rect::default()
+            let centred = |label: &str, row: u16| {
+                let width = (label.len() as u16).min(inner.width);
+                if row < inner.height {
+                    Rect::new(inner.x + (inner.width - width) / 2, inner.y + row, width, 1)
+                } else {
+                    Rect::default()
+                }
             };
+            app.regions.about_repository = centred(button, button_row);
+            app.regions.about_update = centred(update, button_row + 1);
         },
     );
 }

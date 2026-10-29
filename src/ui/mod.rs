@@ -981,6 +981,19 @@ mod tests {
         assert!(button.width > 20);
         let text = row(terminal.backend().buffer(), button.y);
         assert!(text.contains("Contribute on GitHub"), "{text}");
+        // The update button under it, and what the last check found under that.
+        let update = app.regions.about_update;
+        assert_eq!(update.y, button.y + 1);
+        let text = row(terminal.backend().buffer(), update.y);
+        assert!(text.contains("Check for updates [U]"), "{text}");
+        app.updater.checked = Some("You have the latest version (0.7.0)".to_string());
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = row(terminal.backend().buffer(), update.y + 1);
+        assert!(
+            text.contains("You have the latest version (0.7.0)"),
+            "{text}"
+        );
+        app.updater.checked = None;
 
         // A smaller terminal gets the flower at its own size.
         let mut small = Terminal::new(TestBackend::new(100, 36)).unwrap();

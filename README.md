@@ -193,6 +193,7 @@ sozo --version
 | `n` / `p`, `[` / `]`, `v`, `s` / `u`, `o` (Diff) | Next / previous hunk, previous / next changed file, side by side, stage / unstage, open the file |
 | `Up` / `Down` or the mouse wheel (Help, What's new) | Scroll a dialog taller than the terminal |
 | `G` (in About) | Open the repository to contribute |
+| `U` (in About) | Check for updates now, also a version you skipped |
 
 ### Motion
 

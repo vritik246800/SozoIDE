@@ -329,6 +329,8 @@ impl App {
                 self.close_overlay()
             }
             (Overlay::About, KeyCode::Char('g' | 'G')) => self.open_repository(),
+            // A check from About also offers a version skipped before (F16).
+            (Overlay::About, KeyCode::Char('u' | 'U')) => self.updater.check_now(),
             (_, KeyCode::Esc | KeyCode::F(1) | KeyCode::F(2)) => self.close_overlay(),
             (Overlay::Help | Overlay::WhatsNew, code) => {
                 // The dialog clamps the scroll when it draws.
@@ -704,6 +706,8 @@ impl App {
                     let regions = &self.regions;
                     let key = if contains(regions.about_repository, point) {
                         Some(KeyCode::Char('g'))
+                    } else if contains(regions.about_update, point) {
+                        Some(KeyCode::Char('u'))
                     } else if contains(regions.dialog_next, point) {
                         Some(KeyCode::Enter)
                     } else if contains(regions.dialog_skip, point) {
@@ -2175,6 +2179,38 @@ mod tests {
         let mut app = test_app();
         app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn about_checks_for_updates_and_opens_the_notice_in_its_place() {
+        use crate::update::Updater;
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        press(&mut app, KeyCode::F(2), KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::About);
+        app.regions.about_update = Rect::new(40, 20, 23, 1);
+        mouse(
+            &mut app,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            45,
+            20,
+        );
+        assert_eq!(
+            app.updater.checked.as_deref(),
+            Some("Checking for updates...")
+        );
+        app.updater.checked = None;
+        press(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
+        assert_eq!(
+            app.updater.checked.as_deref(),
+            Some("Checking for updates...")
+        );
+        assert_eq!(app.overlay, Overlay::About, "About stays while it checks");
+
+        // The answer: a newer version, also one skipped before, takes About's place.
+        app.updater = Updater::offering("99.0.0", directory.path().join("update.toml"));
+        app.tick();
+        assert_eq!(app.overlay, Overlay::Update);
     }
 
     #[test]
