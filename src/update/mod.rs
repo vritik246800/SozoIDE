@@ -448,7 +448,7 @@ mod tests {
         };
         assert_eq!(
             versions("0.3.1"),
-            [CURRENT, "0.5.0", "0.4.0", "0.3.3", "0.3.2"]
+            [CURRENT, "0.6.0", "0.5.0", "0.4.0", "0.3.3", "0.3.2"]
         );
         assert_eq!(versions("0.1.4").len(), NOTES.len());
         assert!(versions(CURRENT).is_empty());

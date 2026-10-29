@@ -54,7 +54,7 @@ gsap.matchMedia().add('(prefers-reduced-motion: no-preference)', () => {
     .timeline({ defaults: { ease: 'expo.out' } })
     .from(words, { y: '0.4em', autoAlpha: 0, duration: 0.7, stagger: 0.05 }, 0)
     .to(words, { ...decode, stagger: 0.05 }, 0)
-    .from(['.lede', '.actions', '.note'], { y: 16, autoAlpha: 0, duration: 0.7, stagger: 0.1 }, 0.25)
+    .from(['.tagline', '.lede', '.actions', '.note'], { y: 16, autoAlpha: 0, duration: 0.7, stagger: 0.1 }, 0.25)
     .from('.window', { y: 16, autoAlpha: 0, duration: 0.8 }, 0.45)
     .add(boot(), 0.45)
     .from(['.try', ...gsap.utils.toArray('.theme-list button')], { y: 16, autoAlpha: 0, duration: 0.6, stagger: 0.06 }, 2.6);

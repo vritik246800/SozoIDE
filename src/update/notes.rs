@@ -10,6 +10,24 @@ pub struct Notes {
 
 pub const NOTES: &[Notes] = &[
     Notes {
+        version: "0.7.0",
+        new: &[
+            "IntelliSense from language servers (rust-analyzer, clangd, pyright, jdtls, typescript-language-server, gopls): problems underlined, Ctrl+Space suggests, F12 goes to the definition",
+            "Ctrl+R saves and runs the file, or its Cargo or Go project, in the bottom terminal",
+            "Debug Rust, C, C++, Python and Go: F9 sets a breakpoint, F5 starts or continues, F10 and F11 step, Shift+F5 stops; the stack, the variables and the output show beside the editor",
+            "3D models (.glb, .gltf) open in a tab: arrows turn and tilt, + and - or the wheel zoom, a drag turns them",
+            "Pictures, animated GIFs and videos are drawn in half blocks in their own colours; videos play through ffmpeg and Space pauses",
+            "Explorer: cut, copy and paste files and folders with a right-click or Ctrl+X, Ctrl+C and Ctrl+V",
+            "Editor: right-click to cut, copy or paste; Ctrl+V pastes from the system clipboard",
+            "Files and folders changed by other programs show up by themselves",
+            "git, curl, ffmpeg, the language servers and the debuggers are installed in the background when they are missing",
+        ],
+        fixed: &[
+            "Typing in long files, Markdown above all, no longer lags",
+            "The footer shows what just happened, and the problem on the cursor's line",
+        ],
+    },
+    Notes {
         version: "0.6.0",
         new: &[
             "Explorer: right-click a file or a folder and choose Delete; it asks first and says it cannot be undone",

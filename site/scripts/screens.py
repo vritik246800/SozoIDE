@@ -15,15 +15,15 @@ from pathlib import Path
 
 COLUMNS, ROWS = 132, 34
 ROOT, SHOWN = "/home/dev/code/orbit", "~/code/orbit"
-SCREENS = ["editor", "git-changes", "git-graph", "db-query", "db-results", "search"]
+SCREENS = ["editor", "git-changes", "git-graph", "db-query", "db-results", "search", "run", "intellisense"]
 DIALOGS = {"help": "Help - all commands"}
 FORBIDDEN = re.compile(r"/home/|/Users/|(?i:vritik|valabdas)")
-SGR = re.compile(r"\x1b\[([0-9;]*)m")
+SGR = re.compile(r"\x1b\[([0-9;:]*)m")
 
 
 def cells(line):
     """The cells of one captured row as (character, classes)."""
-    style = {"fg": None, "b": False, "d": False, "r": False}
+    style = {"fg": None, "b": False, "d": False, "r": False, "u": False}
     out = []
     position = 0
     for match in [*SGR.finditer(line), None]:
@@ -36,11 +36,18 @@ def cells(line):
         if not match:
             break
         position = match.end()
-        codes = [int(code) if code else 0 for code in match.group(1).split(";")]
+        # Underline colours come as 58:5:N (colons): the underline itself is enough.
+        codes = [int(code) if code else 0 for code in match.group(1).split(";") if ":" not in code]
         while codes:
             code = codes.pop(0)
             if code == 0:
-                style = {"fg": None, "b": False, "d": False, "r": False}
+                style = {"fg": None, "b": False, "d": False, "r": False, "u": False}
+            elif code == 4:
+                style["u"] = True
+            elif code == 24:
+                style["u"] = False
+            elif code == 58:
+                codes = codes[2:] if codes[:1] == [5] else codes[4:]
             elif code in (38, 48):
                 kind = codes.pop(0)
                 if kind != 5:
@@ -71,7 +78,7 @@ def cells(line):
 
 def classes(style):
     names = [f"f{style['fg']}"] if style["fg"] is not None else []
-    names += [name for name in ("b", "d", "r") if style[name]]
+    names += [name for name in ("b", "d", "r", "u") if style[name]]
     return " ".join(names)
 
 
