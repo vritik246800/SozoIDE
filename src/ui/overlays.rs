@@ -952,16 +952,15 @@ pub(super) fn render_whats_new(frame: &mut Frame, app: &mut App, area: Rect) {
             lines.extend(items.iter().map(|item| Line::from(format!("    - {item}"))));
         }
     }
-    // Long notes wrap: count the rows they take inside the borders, with one to spare for
-    // words that wrap early.
-    let inner = usize::from(80.min(area.width.saturating_sub(4)).saturating_sub(2)).max(1);
-    let rows = lines
-        .iter()
-        .map(|line| match line.width() {
-            width if width <= inner => 1,
-            width => width.div_ceil(inner) + 1,
-        })
-        .sum::<usize>() as u16;
+    // Long notes wrap: the rows they take inside the borders, counted as the paragraph wraps
+    // them (an estimate scrolled past the end once the notes grew, E32).
+    let inner = 80
+        .min(area.width.saturating_sub(4))
+        .saturating_sub(2)
+        .max(1);
+    let rows = Paragraph::new(lines.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(inner) as u16;
     let dialog = dialog_area(area, 80, rows + 4);
     let visible = dialog.height.saturating_sub(4);
     let most = rows.saturating_sub(visible);

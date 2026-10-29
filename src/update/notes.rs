@@ -10,6 +10,18 @@ pub struct Notes {
 
 pub const NOTES: &[Notes] = &[
     Notes {
+        version: "0.7.1",
+        new: &[
+            "PDF: a page with only text shows its text, to select, copy and search with Ctrl+P; a page with a picture or a drawing shows whole as a small picture",
+            "Videos play with sound (ffplay) and in your terminal's picture protocol when it has one; a bar under the video shows the time and has buttons",
+            "Video keys: Space plays or pauses, S stops, arrows seek 5 s (30 s with Shift), - and + change the volume, M mutes, [ and ] change the speed, F fills the screen, Esc leaves it",
+            "Video mouse: click the buttons, click or drag the bar to seek, click the video to pause, the wheel changes the volume",
+            "Each folder opens as you left it: its open folders, tabs, cursors and panels",
+            "About: Check for updates [U] looks for a new version now, also one you skipped",
+        ],
+        fixed: &[],
+    },
+    Notes {
         version: "0.7.0",
         new: &[
             "IntelliSense from language servers (rust-analyzer, clangd, pyright, jdtls, typescript-language-server, gopls): problems underlined, Ctrl+Space suggests, F12 goes to the definition",
