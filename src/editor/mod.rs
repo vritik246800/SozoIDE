@@ -23,9 +23,9 @@ mod search;
 
 use highlight::FileHighlight;
 pub use highlight::{file_icon, highlight_lines, language_name};
+use pdf::{PageView, PdfDocument, is_pdf_path};
 #[cfg(test)]
-pub use pdf::sample as sample_pdf;
-use pdf::{PdfDocument, is_pdf_path};
+pub use pdf::{sample as sample_pdf, sample_pages as sample_pdf_pages};
 pub use search::{MAX_MATCHES, SearchMatch, SearchScope, SearchState};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_secs(2);
@@ -105,23 +105,19 @@ impl OpenFile {
             .unwrap_or_else(|| path.display().to_string());
         let icon = file_icon(&path);
         if media::kind(&path).is_some() || is_pdf_path(&path) {
-            // Pictures, GIFs, videos and models are drawn as text (Q43); a PDF page keeps the
-            // terminal's picture protocol, where its text stays readable.
-            let (language, image, pdf, media) = if is_pdf_path(&path) {
+            // Pictures, GIFs, videos and models are drawn as text (Q43); a PDF page is its text,
+            // or a picture in the terminal's picture protocol when it draws more than text (Q50).
+            let (language, pdf, media) = if is_pdf_path(&path) {
                 let bytes = fs::read(&path)
                     .with_context(|| format!("Could not open {}", path.display()))?;
                 let document = PdfDocument::open(bytes)
                     .with_context(|| format!("Could not open {}", path.display()))?;
-                let page = document
-                    .render(0)
-                    .with_context(|| format!("Could not draw {}", path.display()))?;
-                let page = picker.new_resize_protocol(page);
-                ("PDF", Some(page), Some(document), None)
+                ("PDF", Some(document), None)
             } else {
                 let media = Media::open(&path)?;
-                (media.language(), None, None, Some(media))
+                (media.language(), None, Some(media))
             };
-            return Ok(Self {
+            let mut file = Self {
                 path,
                 name,
                 icon,
@@ -131,7 +127,7 @@ impl OpenFile {
                 highlight: FileHighlight::default(),
                 markdown: None,
                 rows: Vec::new(),
-                image,
+                image: None,
                 pdf,
                 media,
                 scroll: 0,
@@ -150,7 +146,11 @@ impl OpenFile {
                 last_change: None,
                 last_edit: None,
                 disk: None,
-            });
+            };
+            if file.pdf.is_some() && !file.set_page(0, picker) {
+                anyhow::bail!("Could not draw {}", file.path.display());
+            }
+            return Ok(file);
         }
 
         let disk = on_disk(&path);
@@ -194,6 +194,11 @@ impl OpenFile {
 
     /// Text to edit, not a picture, a PDF, a video or a model.
     pub fn is_text(&self) -> bool {
+        self.shows_text() && self.pdf.is_none()
+    }
+
+    /// Lines of text on screen, to edit or, on a page of a PDF, to select and search.
+    pub fn shows_text(&self) -> bool {
         self.image.is_none() && self.media.is_none()
     }
 
@@ -206,17 +211,43 @@ impl OpenFile {
 
     /// Shows page `page` of a PDF (from 0, kept inside the document).
     pub fn show_page(&mut self, page: usize, picker: &mut Picker) {
-        let Some(document) = &mut self.pdf else {
+        let Some(document) = &self.pdf else {
             return;
         };
         let page = page.min(document.pages() - 1);
-        if page == document.page {
-            return;
+        if page != document.page {
+            self.set_page(page, picker);
         }
-        if let Some(image) = document.render(page) {
+    }
+
+    /// Puts page `page` on screen: its text from the top, or its picture; false when it
+    /// cannot be drawn.
+    fn set_page(&mut self, page: usize, picker: &mut Picker) -> bool {
+        let Some(view) = self.pdf.as_ref().and_then(|document| document.view(page)) else {
+            return false;
+        };
+        let lines = match view {
+            PageView::Text(lines) => {
+                self.image = None;
+                lines
+            }
+            PageView::Picture(picture) => {
+                self.image = Some(picker.new_resize_protocol(picture));
+                Vec::new()
+            }
+        };
+        self.highlighted = lines
+            .iter()
+            .map(|line| vec![Span::raw(line.clone())])
+            .collect();
+        self.lines = lines;
+        (self.cursor_row, self.cursor_column, self.anchor) = (0, 0, None);
+        (self.scroll, self.scroll_x) = (0, 0);
+        self.layout();
+        if let Some(document) = &mut self.pdf {
             document.page = page;
-            self.image = Some(picker.new_resize_protocol(image));
         }
+        true
     }
 
     /// The selection, its start before its end, as (row, column) in characters of the source.
@@ -321,7 +352,8 @@ impl OpenFile {
     }
 
     pub fn save(&mut self) -> Result<()> {
-        if !self.dirty {
+        // The text of a PDF page is only read: it is never written over the PDF.
+        if !self.dirty || self.pdf.is_some() {
             return Ok(());
         }
         fs::write(&self.path, self.text())
@@ -906,5 +938,38 @@ mod tests {
 
         std::fs::write(directory.path().join("broken.pdf"), "%PDF-1.4 nothing").unwrap();
         assert!(OpenFile::load(directory.path().join("broken.pdf"), &mut picker).is_err());
+    }
+
+    #[test]
+    fn a_text_page_of_a_pdf_is_read_selected_and_never_saved() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.pdf");
+        let text = "BT /F1 10 Tf 5 80 Td (Hello PDF) Tj ET";
+        let bytes = pdf::sample_pages(&[text, pdf::SQUARE]);
+        std::fs::write(&path, &bytes).unwrap();
+        let mut picker = Picker::halfblocks();
+        let mut file = OpenFile::load(path.clone(), &mut picker).unwrap();
+        assert!(file.image.is_none() && file.shows_text() && !file.is_text());
+        assert_eq!(file.lines, ["Hello PDF"]);
+        file.anchor = Some((0, 0));
+        file.move_cursor_to(0, 5);
+        assert_eq!(file.selected_text().as_deref(), Some("Hello"));
+        file.dirty = true;
+        file.save().unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "the PDF stays as it was"
+        );
+
+        // The next page draws a square: a picture, and no text left behind.
+        file.show_page(1, &mut picker);
+        assert!(file.image.is_some() && file.lines.is_empty() && !file.shows_text());
+        file.show_page(0, &mut picker);
+        assert_eq!(file.lines, ["Hello PDF"]);
+        assert_eq!(
+            (file.cursor_row, file.cursor_column, file.anchor),
+            (0, 0, None)
+        );
     }
 }

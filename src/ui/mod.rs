@@ -29,6 +29,21 @@ use overlays::{
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    if let Some(index) = app.fullscreen_video() {
+        // `F` on a video (F23): its tab over the whole terminal, and nothing else to click.
+        let pane = app.active_pane();
+        let mut regions = Regions {
+            body: area,
+            editor: area,
+            editor_body: area,
+            ..Regions::default()
+        };
+        regions.pane_areas[pane] = area;
+        regions.pane_bodies[pane] = area;
+        editor::render_media(frame, &mut app.open_files[index], area, true);
+        app.regions = regions;
+        return;
+    }
     let vertical = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
@@ -1226,13 +1241,14 @@ mod tests {
         let mut app = App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap();
         app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
         settle(&mut app);
-        let mut tall = Terminal::new(TestBackend::new(140, 60)).unwrap();
+        let mut tall = Terminal::new(TestBackend::new(140, 80)).unwrap();
         tall.draw(|frame| draw(frame, &mut app)).unwrap();
         let text = buffer_text(&tall);
         for section in [
             "╭─ Panels ",
             "╭─ Editing ",
             "╭─ PDF ",
+            "╭─ Videos ",
             "╭─ Source Control ",
             "╭─ Application ",
         ] {
@@ -1253,7 +1269,10 @@ mod tests {
             "Go to the definition",
             "Breakpoint on the line",
             "Build and debug, or continue",
-            "Pause or play a video",
+            "Back / forward 30 s",
+            "Volume down / up",
+            "Leave full screen, close",
+            "Select in a page of text",
             "Cut, copy, paste (Explorer)",
             "Cut, copy, paste the text",
         ] {
@@ -1261,7 +1280,7 @@ mod tests {
         }
         // The section titles take the colour of their area, one of the terminal's.
         let buffer = tall.backend().buffer();
-        let (x, y) = (0..60)
+        let (x, y) = (0..80)
             .find_map(|y| row(buffer, y).find("╭─ Panels").map(|x| (x, y)))
             .unwrap();
         let x = row(buffer, y)[..x].chars().count() as u16 + 3;
@@ -1275,6 +1294,65 @@ mod tests {
         short.draw(|frame| draw(frame, &mut app)).unwrap();
         let last = buffer_text(&short);
         assert!(last.contains("Application") && !last.contains("╭─ Panels "));
+    }
+
+    #[test]
+    fn a_video_shows_its_bar_and_buttons_and_fills_the_screen_with_f() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("clip.mp4"), "not a video").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(directory.path().join("clip.mp4")).unwrap();
+        app.open_files[0].media = Some(crate::media::sample_video());
+        settle(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        for part in [
+            " Pause  ",
+            " Stop  ",
+            " -5s  ",
+            " Vol+  ",
+            " Mute  ",
+            " Full screen  ",
+            "Vol 100%  1x",
+            " 00:00 ─",
+            "─ 01:15 ",
+            "Space  S",
+        ] {
+            assert!(text.contains(part), "{part}");
+        }
+        let header = app.regions.header_help;
+        assert!(header.width > 0, "the normal layout has its header");
+
+        app.fullscreen = true;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            app.regions.pane_bodies[0], buffer.area,
+            "the whole terminal"
+        );
+        assert_eq!(app.regions.header_help.width, 0, "no header");
+        assert!(buffer[(0, 0)].symbol() != " " && row(buffer, 0).contains("clip.mp4"));
+        // The buttons on the last row but one, over the bottom border.
+        assert!(row(buffer, 28).contains(" Full screen "));
+    }
+
+    #[test]
+    fn a_page_of_text_of_a_pdf_is_drawn_as_text_with_its_page() {
+        let directory = tempfile::tempdir().unwrap();
+        let text = "BT /F1 10 Tf 5 80 Td (Hello PDF) Tj ET";
+        std::fs::write(
+            directory.path().join("notes.pdf"),
+            crate::editor::sample_pdf_pages(&[text, text]),
+        )
+        .unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(directory.path().join("notes.pdf")).unwrap();
+        settle(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("1 | Hello PDF") && text.contains("Page 1/2"));
     }
 
     #[test]

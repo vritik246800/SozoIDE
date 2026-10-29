@@ -436,6 +436,7 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
                     },
                     "First / last page",
                 ),
+                ("Shift+arrows", "Select in a page of text"),
             ],
         },
         HelpSection {
@@ -449,14 +450,29 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            title: "3D models and videos",
+            title: "3D models",
             color: Color::LightMagenta,
             keys: vec![
                 ("Left / Right", "Turn the model"),
                 ("Up / Down", "Tilt the model"),
                 ("+ / - or wheel", "Zoom in / out"),
                 ("Drag", "Turn it with the mouse"),
-                ("Space", "Pause or play a video"),
+            ],
+        },
+        HelpSection {
+            title: "Videos",
+            color: Color::LightCyan,
+            keys: vec![
+                ("Space or click", "Play / pause"),
+                ("S", "Stop at the start"),
+                ("Left / Right", "Back / forward 5 s"),
+                ("Shift+Left / Right", "Back / forward 30 s"),
+                ("- / + or wheel", "Volume down / up"),
+                ("M", "Mute"),
+                ("[ / ]", "Slower / faster"),
+                ("F", "Full screen"),
+                ("Esc", "Leave full screen, close"),
+                ("Click the bar", "Go to that time"),
             ],
         },
         HelpSection {

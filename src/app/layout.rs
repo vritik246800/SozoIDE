@@ -127,6 +127,24 @@ pub struct Regions {
     pub entry_menu_items: Vec<(super::EntryAction, Rect)>,
 }
 
+/// A video's tab inside its border: the picture, then the progress row and the button row
+/// (F23); the view draws them and the mouse is matched against them.
+pub fn video_areas(area: Rect) -> [Rect; 3] {
+    let inner = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    let controls = inner.height.min(2);
+    let picture = Rect::new(inner.x, inner.y, inner.width, inner.height - controls);
+    let row = |offset: u16| {
+        let y = picture.bottom() + offset;
+        Rect::new(inner.x, y, inner.width, u16::from(offset < controls))
+    };
+    [picture, row(0), row(1)]
+}
+
 pub(super) fn inner_size(area: Rect) -> (u16, u16) {
     (
         area.width.saturating_sub(2).max(1),

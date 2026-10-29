@@ -12,10 +12,11 @@ use ratatui_image::{Resize, StatefulImage};
 use tui_term::widget::{Cursor, PseudoTerminal};
 
 use crate::{
-    app::{App, DropZone, EntryAction, Focus, Regions, SHOWN_ITEMS, SplitDirection},
+    app::{App, DropZone, EntryAction, Focus, Regions, SHOWN_ITEMS, SplitDirection, video_areas},
     branding::ASCII_LOGO,
     editor::{OpenFile, file_icon},
     lsp::{Diagnostic, char_column},
+    media::Video,
 };
 
 use super::{
@@ -624,6 +625,77 @@ fn render_completion(frame: &mut Frame, app: &App, index: usize, body: Rect) {
     );
 }
 
+/// A picture, GIF, video or model in `area`; false when `file` is none of those.
+pub(super) fn render_media(
+    frame: &mut Frame,
+    file: &mut OpenFile,
+    area: Rect,
+    focused: bool,
+) -> bool {
+    let title = format!(" {} — {} ", file.path.display(), file.language);
+    let Some(media) = &mut file.media else {
+        return false;
+    };
+    let mut block = panel_block(title, focused);
+    // The keys of a model or a video on the right of the border, like the page of a PDF.
+    if let Some(hint) = media.hint() {
+        block = block.title_top(Line::from(format!(" {hint} ")).right_aligned());
+    }
+    if let Some(video) = media.video() {
+        // The frame, then the progress row and the buttons (F23).
+        let [picture, progress, buttons] = video_areas(area);
+        render_video_controls(frame, video, progress, buttons);
+        frame.render_widget(block, area);
+        match file.image.as_mut().filter(|_| video.error.is_none()) {
+            // ponytail: each frame is scaled to the pane and sent whole; encode in a
+            // thread (ratatui-image `thread`) if it slows the keys in Sixel terminals.
+            Some(image) => frame.render_stateful_widget(
+                StatefulImage::new().resize(Resize::Scale(None)),
+                picture,
+                image,
+            ),
+            None => {
+                let lines = media.lines(picture.width, picture.height).to_vec();
+                frame.render_widget(Paragraph::new(lines), picture);
+            }
+        }
+        return true;
+    }
+    let inner = block.inner(area);
+    let lines = media.lines(inner.width, inner.height).to_vec();
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+    true
+}
+
+/// Under a video: the time, the progress bar and the length; then the buttons, with the
+/// volume and the speed on the right.
+fn render_video_controls(frame: &mut Frame, video: &Video, progress: Rect, buttons: Rect) {
+    let (shown, _, length, played, total) = video.progress(progress.width);
+    let bar = vec![
+        Span::styled(format!(" {shown} "), Style::default().fg(MUTED)),
+        Span::styled("━".repeat(usize::from(played)), Style::default().fg(ACTIVE)),
+        Span::styled(
+            "─".repeat(usize::from(length - played)),
+            Style::default().fg(BORDER),
+        ),
+        Span::styled(format!(" {total} "), Style::default().fg(MUTED)),
+    ];
+    frame.render_widget(Paragraph::new(Line::from(bar)), progress);
+    let mut row = vec![Span::raw(" ")];
+    for (_, label) in video.buttons() {
+        row.push(Span::styled(
+            format!(" {label} "),
+            Style::default().fg(TEXT).add_modifier(Modifier::REVERSED),
+        ));
+        row.push(Span::raw(" "));
+    }
+    row.push(Span::styled(
+        format!(" {}", video.status()),
+        Style::default().fg(MUTED),
+    ));
+    frame.render_widget(Paragraph::new(Line::from(row)), buttons);
+}
+
 /// The rows of `file` on screen, cut at its horizontal scroll, with a scrollbar on the bottom
 /// border when the text is wider than the pane, and `marks` (search matches) marked.
 fn render_file(
@@ -635,18 +707,10 @@ fn render_file(
     problems: &[Diagnostic],
     margin: &Margin,
 ) {
-    let title = format!(" {} — {} ", file.path.display(), file.language);
-    if let Some(media) = &mut file.media {
-        let mut block = panel_block(title, focused);
-        // The keys of a model or a video on the right of the border, like the page of a PDF.
-        if let Some(hint) = media.hint() {
-            block = block.title_top(Line::from(format!(" {hint} ")).right_aligned());
-        }
-        let inner = block.inner(area);
-        let lines = media.lines(inner.width, inner.height).to_vec();
-        frame.render_widget(Paragraph::new(lines).block(block), area);
+    if render_media(frame, file, area, focused) {
         return;
     }
+    let title = format!(" {} — {} ", file.path.display(), file.language);
     if let Some(image) = &mut file.image {
         let mut block = panel_block(title, focused);
         // The page of a PDF on the right of the border, where a long path does not hide it.
@@ -750,10 +814,12 @@ fn render_file(
             Line::from(line)
         })
         .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(lines).block(panel_block(title, focused)),
-        area,
-    );
+    let mut block = panel_block(title, focused);
+    // A page of text of a PDF says which page it is, like a page drawn as a picture.
+    if let Some((page, pages)) = file.page() {
+        block = block.title_top(Line::from(format!(" Page {}/{pages} ", page + 1)).right_aligned());
+    }
+    frame.render_widget(Paragraph::new(lines).block(block), area);
     if file.max_width > text_width && area.height > 2 {
         let track = Rect::new(
             area.x + 1 + gutter as u16,

@@ -19,7 +19,7 @@ mod video;
 use model::Model;
 #[cfg(test)]
 pub use model::sample_glb;
-use video::Video;
+pub use video::{Control, Video};
 
 /// Pictures larger than this on a side are made smaller once, when they open: a terminal never
 /// shows more pixels than that, and every later resize is quicker.
@@ -106,9 +106,7 @@ impl Media {
     pub fn hint(&self) -> Option<String> {
         match &self.content {
             Content::Model(_) => Some("←/→ turn  ↑/↓ tilt  +/- zoom  drag, wheel".into()),
-            Content::Video(video) if video.ended => Some("Ended  Space: play again".into()),
-            Content::Video(video) if video.paused => Some("Paused  Space: play".into()),
-            Content::Video(_) => Some("Space: pause".into()),
+            Content::Video(_) => Some("Space  S  ←/→  +/-  M  [/]  F  Esc".into()),
             Content::Animation { frames, frame, .. } => {
                 Some(format!("Frame {}/{}", frame + 1, frames.len()))
             }
@@ -138,7 +136,7 @@ impl Media {
         changed
     }
 
-    /// The keys of a model (arrows turn and tilt, + and - zoom) and of a video (Space).
+    /// The keys of a model: arrows turn and tilt, + and - zoom.
     pub fn handle_key(&mut self, character: Option<char>, arrow: Option<(f32, f32)>) -> bool {
         let handled = match (&mut self.content, character, arrow) {
             (Content::Model(model), _, Some((yaw, pitch))) => {
@@ -149,16 +147,44 @@ impl Media {
                 model.zoom(matches!(character, '+' | '='));
                 true
             }
-            (Content::Video(video), Some(' '), _) => {
-                video.toggle();
-                true
-            }
             _ => false,
         };
         if handled {
             self.version += 1;
         }
         handled
+    }
+
+    /// The video in the tab, if it is one.
+    pub fn video(&self) -> Option<&Video> {
+        match &self.content {
+            Content::Video(video) => Some(video),
+            _ => None,
+        }
+    }
+
+    /// Plays, pauses, seeks or changes the sound of a video (F23); false when nothing changed.
+    pub fn control(&mut self, control: Control) -> bool {
+        let Content::Video(video) = &mut self.content else {
+            return false;
+        };
+        let handled = video.control(control);
+        if handled {
+            self.version += 1;
+        }
+        handled
+    }
+
+    /// The mouse drags a video's progress bar to `fraction` (0 to 1), or lets go of it there.
+    pub fn scrub(&mut self, fraction: f32, release: bool) {
+        if let Content::Video(video) = &mut self.content {
+            if release {
+                video.seek_to(fraction);
+            } else {
+                video.scrub = Some(fraction.clamp(0.0, 1.0));
+            }
+            self.version += 1;
+        }
     }
 
     /// A mouse drag of `columns` × `rows` cells turns a model.
@@ -169,12 +195,20 @@ impl Media {
         }
     }
 
-    /// The wheel zooms a model; false for the others.
+    /// The wheel zooms a model and turns a video's volume up or down (Q52); false for the
+    /// others.
     pub fn wheel(&mut self, up: bool) -> bool {
-        let Content::Model(model) = &mut self.content else {
-            return false;
-        };
-        model.zoom(up);
+        match &mut self.content {
+            Content::Model(model) => model.zoom(up),
+            Content::Video(_) => {
+                return self.control(if up {
+                    Control::Louder
+                } else {
+                    Control::Quieter
+                });
+            }
+            _ => return false,
+        }
         self.version += 1;
         true
     }
@@ -203,6 +237,16 @@ impl Media {
             self.drawn = Some((key, lines));
         }
         self.drawn.as_ref().map_or(&[], |(_, lines)| lines)
+    }
+}
+
+/// A video of 75.5 s with sound that has not started `ffmpeg`, for the tests.
+#[cfg(test)]
+pub fn sample_video() -> Media {
+    Media {
+        content: Content::Video(video::sample()),
+        version: 0,
+        drawn: None,
     }
 }
 

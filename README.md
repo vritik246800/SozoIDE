@@ -30,6 +30,7 @@
 - Every file and folder with an icon for its type, in your terminal's colours.
 - Right-click to create a file (its icon follows the extension you type) or a folder, to rename, to delete (it asks first), and to cut, copy and paste files and folders; `Ctrl+X`, `Ctrl+C` and `Ctrl+V` do the same on the selected entry. A copy in the same folder becomes `name copy`, `name copy 2`…; a move never overwrites anything.
 - The tree follows other programs: what they create, rename or delete shows up within a second.
+- Each folder opens as you left it, like VS Code: the folders you had open, your tabs with their cursors, the active tab and the panels.
 
 ### Editor
 
@@ -80,9 +81,9 @@ Problems underlined in red (errors) or yellow (warnings), with the message of th
 
 ### Pictures, videos, 3D models and PDF
 
-- Pictures (PNG, JPEG, GIF, WebP, BMP, ICO, TIFF, TGA, PNM, QOI, HDR), animated GIFs and videos (MP4, MOV, MKV, WebM, AVI, M4V) are drawn in half blocks in their own colours, two pixels a cell, on any terminal. Videos play through the system's `ffmpeg` at 15 frames a second; `Space` pauses.
+- Pictures (PNG, JPEG, GIF, WebP, BMP, ICO, TIFF, TGA, PNM, QOI, HDR), animated GIFs and videos (MP4, MOV, MKV, WebM, AVI, M4V) are drawn in half blocks in their own colours, two pixels a cell, on any terminal. Videos play through the system's `ffmpeg` at 15 frames a second, in your terminal's picture protocol when it has one (Kitty, Sixel, iTerm2), with sound through `ffplay`: a bar under the video shows the time and has buttons to play, pause, stop, seek, change the volume and the speed and fill the screen; click or drag the bar to seek, click the video to pause, and the wheel changes the volume.
 - 3D models (`.glb`, `.gltf`) open in a tab, lit and with their colours: `←`/`→` turn them, `↑`/`↓` tilt them, `+`/`-` or the wheel zoom, and a drag turns them with the mouse.
-- PDF files open as they are, one page at a time, through your terminal's picture protocol (Sixel, Kitty or iTerm2).
+- PDF files open one page at a time. A page with only text shows its text, sharp, to select, copy and search with `Ctrl+P`; a page with a picture, a diagram or another drawing shows whole as a small picture through your terminal's picture protocol (Sixel, Kitty or iTerm2), or half blocks without one.
 
 ### Two terminals
 
@@ -123,7 +124,7 @@ Each release includes `SHA256SUMS.txt`. Check a download with `shasum -a 256 -c 
 ### Requirements
 
 - A [Nerd Font](https://www.nerdfonts.com/) in your terminal for the icons.
-- SozoIDE runs `git` (Source Control), `curl` (updates), `ffmpeg` (videos) and the language servers instead of linking them. After a new installation and after each update it installs the ones that are missing, in the background:
+- SozoIDE runs `git` (Source Control), `curl` (updates), `ffmpeg` with `ffprobe` and `ffplay` (videos and their sound) and the language servers instead of linking them. After a new installation and after each update it installs the ones that are missing, in the background:
 
 | Tool | macOS | Windows | Linux |
 | --- | --- | --- | --- |
@@ -178,11 +179,14 @@ sozo --version
 | `Ctrl+C` / `Ctrl+X` | Copy / cut the selection to the system clipboard |
 | `Ctrl+V`, right-click in the editor | Paste the system clipboard; the menu also cuts and copies the selection |
 | `←`/`→`, `↑`/`↓`, `+`/`-`, drag, wheel (3D model) | Turn, tilt, zoom in and out |
-| `Space` (video) | Pause, play on, or play again from the start |
+| `Space`, `S` (video) | Play or pause (at the end, play again); stop at the start |
+| `←` / `→`, `Shift` + `←` / `→` (video) | Back / forward 5 seconds, 30 seconds |
+| `-` / `+` or wheel, `M`, `[` / `]` (video) | Volume down / up, mute, slower / faster |
+| `F`, `Esc` (video) | Full screen; leave it, then close the video |
 | `Ctrl+Space` / `F12` | Suggestions from the language server (they also open after `.`, `::`, `->` and the second letter of a word) / go to the definition |
 | `F9` / `F5` / `F10` / `F11` / `Shift+F5` | Breakpoint / build and debug, or continue / step over / step into / stop |
 | `Ctrl+R` (editor or Explorer) | Save, open the bottom terminal and run the file there: a Cargo project or Go module runs whole; C, C++, Rust, Python, JavaScript, TypeScript, Java, Kotlin, Go, Ruby, PHP, Lua, Perl, R, Swift, Dart, Zig, Haskell, Elixir, Julia and shell scripts with their own compiler or interpreter |
-| `Page Down` / `→` / mouse wheel, `Page Up` / `←`, `Home` / `End` (PDF) | Next page, previous page, first and last page |
+| `Page Down` / `→` / mouse wheel, `Page Up` / `←`, `Home` / `End` (PDF) | Next page, previous page, first and last page; on a page of text the arrows move the cursor, `Shift` selects, `Ctrl+C` copies and the wheel scrolls on to the next page |
 | Click a branch (Source Control) | Switch to it, after a confirmation |
 | Click a commit or `Enter` (Commit Graph) | Its files; `Enter` on a file: its diff; `[` / `]` other file; `Esc` back |
 | `Enter` / `Space`, `F6`, `Delete`, `Shift` + wheel (Database) | Add a table, tick a column, change a builder cell; next part; remove the builder row; scroll the results sideways |
@@ -243,7 +247,7 @@ npm run dev
 
 ```text
 src/          the application:
-  app/        state, keys, mouse, Explorer, IntelliSense list
+  app/        state, keys, mouse, Explorer, IntelliSense list, each folder's session
   editor/     text, highlighting, Markdown, Mermaid, PDF, search
   lsp/        language server client (JSON-RPC over stdio)
   run/        the command Ctrl+R runs

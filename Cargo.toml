@@ -20,6 +20,7 @@ devicons = "0.6.13"
 directories = "6.0"
 gltf = "1.4"
 hayro = "0.8.0"
+pdf-extract = "0.12.1"
 glam = "0.34"
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
 ignore = "0.4"
