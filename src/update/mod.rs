@@ -52,6 +52,8 @@ pub enum UpdateState {
 
 enum Message {
     Latest(String),
+    /// The latest version could not be read: only said after a check from About.
+    Unreachable,
     Progress(u64, Option<u64>),
     Downloaded(PathBuf),
     Failed(String),
@@ -102,6 +104,11 @@ pub struct Updater {
     settings: Option<PathBuf>,
     receiver: Option<Receiver<Message>>,
     cancel: Arc<AtomicBool>,
+    /// The check was asked for in About: it also offers a skipped version and says when there
+    /// is nothing newer.
+    manual: bool,
+    /// What the last check from About found, for its dialog.
+    pub checked: Option<String>,
 }
 
 impl Updater {
@@ -113,6 +120,8 @@ impl Updater {
                 .map(|directories| directories.config_dir().join("update.toml")),
             receiver: None,
             cancel: Arc::new(AtomicBool::new(false)),
+            manual: false,
+            checked: None,
         };
         if check {
             let sender = updater.channel();
@@ -143,6 +152,10 @@ impl Updater {
         for message in messages {
             match message {
                 Message::Latest(latest) => self.offer(latest),
+                Message::Unreachable => {
+                    self.manual = false;
+                    self.checked = Some("Could not check for updates".to_string());
+                }
                 Message::Progress(received, total) => {
                     if matches!(self.state, UpdateState::Downloading { .. }) {
                         self.state = UpdateState::Downloading { received, total };
@@ -154,11 +167,39 @@ impl Updater {
         }
     }
 
+    /// Offers `latest` when it is newer. A skipped version is offered again only from About; a
+    /// version newer than the skipped one is always offered.
     fn offer(&mut self, latest: String) {
-        if is_newer(&latest, CURRENT) && self.skipped().as_deref() != Some(latest.as_str()) {
+        let manual = std::mem::take(&mut self.manual);
+        let skipped = !manual && self.skipped().as_deref() == Some(latest.as_str());
+        if is_newer(&latest, CURRENT) && !skipped {
             self.version = latest;
             self.state = UpdateState::Available;
+            self.checked = None;
+        } else if manual {
+            self.checked = Some(format!("You have the latest version ({CURRENT})"));
         }
+    }
+
+    /// About's button: asks GitHub for the latest release now, also when it was skipped
+    /// (F16). Nothing happens while an update downloads or waits to install.
+    pub fn check_now(&mut self) {
+        if matches!(
+            self.state,
+            UpdateState::Downloading { .. } | UpdateState::Ready(_)
+        ) {
+            return;
+        }
+        self.manual = true;
+        self.checked = Some("Checking for updates...".to_string());
+        // The tests never ask GitHub: they send the answer themselves.
+        if cfg!(test) {
+            return;
+        }
+        let sender = self.channel();
+        thread::spawn(move || {
+            let _ = sender.send(latest_version().map_or(Message::Unreachable, Message::Latest));
+        });
     }
 
     pub fn start_download(&mut self) {
@@ -448,7 +489,9 @@ mod tests {
         };
         assert_eq!(
             versions("0.3.1"),
-            [CURRENT, "0.6.0", "0.5.0", "0.4.0", "0.3.3", "0.3.2"]
+            [
+                CURRENT, "0.7.0", "0.6.0", "0.5.0", "0.4.0", "0.3.3", "0.3.2"
+            ]
         );
         assert_eq!(versions("0.1.4").len(), NOTES.len());
         assert!(versions(CURRENT).is_empty());
@@ -517,6 +560,56 @@ mod tests {
         restarted.offer("99.0.1".to_string());
         assert_eq!(restarted.state, UpdateState::Available);
         assert_eq!(restarted.version, "99.0.1");
+    }
+
+    #[test]
+    fn a_check_from_about_offers_the_skipped_version_and_says_when_there_is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut updater = updater_in(directory.path());
+        updater.offer("99.0.0".to_string());
+        updater.skip();
+
+        // The startup check keeps quiet about the skipped version; About's offers it.
+        updater.offer("99.0.0".to_string());
+        assert_eq!(updater.state, UpdateState::Idle);
+        assert!(updater.checked.is_none());
+        updater.manual = true;
+        updater.offer("99.0.0".to_string());
+        assert_eq!(updater.state, UpdateState::Available);
+        assert_eq!(updater.version, "99.0.0");
+        assert!(!updater.manual, "only that check");
+        updater.dismiss();
+
+        // Nothing newer: About says so; the startup check says nothing.
+        updater.offer(CURRENT.to_string());
+        assert!(updater.checked.is_none());
+        updater.manual = true;
+        updater.offer(CURRENT.to_string());
+        assert_eq!(updater.state, UpdateState::Idle);
+        assert_eq!(
+            updater.checked,
+            Some(format!("You have the latest version ({CURRENT})"))
+        );
+
+        // No answer from GitHub, after a check from About.
+        updater.manual = true;
+        let sender = updater.channel();
+        sender.send(Message::Unreachable).unwrap();
+        updater.tick();
+        assert_eq!(
+            updater.checked.as_deref(),
+            Some("Could not check for updates")
+        );
+        assert!(!updater.manual);
+
+        // A download in progress is not checked again.
+        updater.checked = None;
+        updater.state = UpdateState::Downloading {
+            received: 0,
+            total: None,
+        };
+        updater.check_now();
+        assert!(updater.checked.is_none() && !updater.manual);
     }
 
     #[test]

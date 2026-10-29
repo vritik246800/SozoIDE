@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use ratatui_image::picker::Picker;
+use ratatui_image::picker::{Picker, ProtocolType};
 
 use crate::{
     database::controller::DatabaseController,
@@ -23,11 +23,12 @@ mod input;
 mod intellisense;
 mod layout;
 mod motion;
+mod session;
 
 pub use explorer::{EntryAction, EntryMenu, FileEntry, NamePrompt};
 pub use intellisense::{Completion, SHOWN_ITEMS};
 use layout::{DragTarget, TabDrag, inner_size};
-pub use layout::{DropZone, Focus, Overlay, Regions, Split, SplitDirection, TabBar};
+pub use layout::{DropZone, Focus, Overlay, Regions, Split, SplitDirection, TabBar, video_areas};
 pub(crate) use motion::AppMotion;
 
 /// How often the open files and the Explorer are compared with the disk.
@@ -109,6 +110,13 @@ pub struct App {
     selecting: bool,
     /// Where a drag over a 3D model was last: moving from there turns it.
     turning: Option<(u16, u16)>,
+    /// The mouse holds a video's progress bar (F23).
+    scrubbing: bool,
+    /// The video tab fills the screen (`F`, F23).
+    pub fullscreen: bool,
+    /// Where each folder's state is kept, and this folder's as last written (F28).
+    sessions: Option<PathBuf>,
+    saved_session: Option<session::Session>,
     /// The last time the wheel turned a PDF page: one page per gesture, not per event.
     page_turned: Option<Instant>,
     pub split: Option<Split>,
@@ -189,6 +197,10 @@ impl App {
             folders: Vec::new(),
             selecting: false,
             turning: None,
+            scrubbing: false,
+            fullscreen: false,
+            sessions: session::sessions_path(),
+            saved_session: None,
             page_turned: None,
             split: None,
             tab_bars: [TabBar::default(); 2],
@@ -198,6 +210,7 @@ impl App {
             drag: None,
         };
         app.refresh_entries()?;
+        app.restore_session()?;
         Ok(app)
     }
 
@@ -244,17 +257,25 @@ impl App {
         for index in due {
             self.save_file(index);
         }
-        // GIFs and videos move on, also in the pane that is not focused.
-        for media in self
-            .open_files
-            .iter_mut()
-            .filter_map(|file| file.media.as_mut())
-        {
-            media.tick(now);
+        // GIFs and videos move on, also in the pane that is not focused. A video frame goes
+        // to the terminal's picture protocol when it has one, else it is half blocks (F23).
+        let protocol = self.picker.protocol_type() != ProtocolType::Halfblocks;
+        for file in &mut self.open_files {
+            let Some(media) = &mut file.media else {
+                continue;
+            };
+            if media.tick(now) && protocol {
+                let frame = media.video().and_then(|video| video.frame.clone());
+                file.image = frame.map(|frame| {
+                    self.picker
+                        .new_resize_protocol(image::DynamicImage::ImageRgba8(frame))
+                });
+            }
         }
         if now.duration_since(self.watched) >= WATCH_INTERVAL {
             self.watched = now;
             self.watch_disk();
+            self.save_session();
         }
         if let Some(message) = self
             .dependencies
@@ -308,7 +329,7 @@ impl App {
 
     /// The modification times of the project folder and the folders open in the Explorer:
     /// they change when something in them is created, renamed or deleted.
-    fn folder_times(&self) -> Vec<Option<SystemTime>> {
+    pub(super) fn folder_times(&self) -> Vec<Option<SystemTime>> {
         std::iter::once(&self.root)
             .chain(
                 self.entries
@@ -349,12 +370,15 @@ impl App {
             self.open_overlay(overlay);
             return;
         }
+        // A check asked for in About opens the notice in its place.
+        let about = self.overlay == Overlay::About && !self.motion.overlay_closing();
         match self.updater.state {
-            UpdateState::Available if free => {
+            UpdateState::Available if free || about => {
                 self.open_overlay(Overlay::Update);
             }
             UpdateState::Ready(_) => {
                 self.flush_all_files();
+                self.save_session();
                 self.should_quit = true;
             }
             _ => {}
@@ -469,6 +493,28 @@ impl App {
             .iter()
             .find(|(icon, _)| *icon == name)
             .map_or(' ', |(_, glyph)| *glyph)
+    }
+
+    /// The video tab that fills the screen, if `F` asked for it and it is still on screen.
+    pub fn fullscreen_video(&self) -> Option<usize> {
+        self.active_tab
+            .filter(|_| self.fullscreen && !self.show_git && !self.show_database)
+            .filter(|_| self.overlay == Overlay::None && self.search.is_none())
+            .filter(|index| {
+                self.open_files
+                    .get(*index)
+                    .and_then(|file| file.media.as_ref())
+                    .is_some_and(|media| media.video().is_some())
+            })
+    }
+
+    /// A key or a button of a video: `F` fills the screen, the rest goes to the video.
+    pub(super) fn control_video(&mut self, index: usize, control: crate::media::Control) {
+        if control == crate::media::Control::Fullscreen {
+            self.fullscreen = !self.fullscreen;
+        } else if let Some(media) = self.open_files[index].media.as_mut() {
+            media.control(control);
+        }
     }
 
     pub fn open_file(&mut self, path: PathBuf) -> Result<()> {
@@ -596,6 +642,7 @@ impl App {
         }
         self.save_file(index);
         self.lsp.close(&self.open_files[index].path);
+        self.fullscreen = false;
         if self.completion.is_some() && self.active_tab == Some(index) {
             self.completion = None;
         }

@@ -213,7 +213,7 @@ impl App {
         Ok(())
     }
 
-    fn collect_entries(
+    pub(super) fn collect_entries(
         dir: &Path,
         depth: usize,
         expanded: &[PathBuf],

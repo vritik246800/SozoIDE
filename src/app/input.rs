@@ -5,10 +5,13 @@ use ratatui::layout::Rect;
 
 use crate::{
     editor::{SearchScope, SearchState},
+    media::Control,
     update::UpdateState,
 };
 
-use super::{App, DragTarget, DropZone, EntryAction, Focus, Overlay, TUTORIAL_STEPS, TabDrag};
+use super::{
+    App, DragTarget, DropZone, EntryAction, Focus, Overlay, TUTORIAL_STEPS, TabDrag, video_areas,
+};
 
 impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -23,6 +26,7 @@ impl App {
         };
         if ctrl && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
             self.flush_all_files();
+            self.save_session();
             self.should_quit = true;
             return;
         }
@@ -325,6 +329,8 @@ impl App {
                 self.close_overlay()
             }
             (Overlay::About, KeyCode::Char('g' | 'G')) => self.open_repository(),
+            // A check from About also offers a version skipped before (F16).
+            (Overlay::About, KeyCode::Char('u' | 'U')) => self.updater.check_now(),
             (_, KeyCode::Esc | KeyCode::F(1) | KeyCode::F(2)) => self.close_overlay(),
             (Overlay::Help | Overlay::WhatsNew, code) => {
                 // The dialog clamps the scroll when it draws.
@@ -431,8 +437,39 @@ impl App {
             return self.run_file(path);
         }
         let file = &mut self.open_files[active];
+        if file
+            .media
+            .as_ref()
+            .is_some_and(|media| media.video().is_some())
+        {
+            // A video's keys (F23); Esc leaves the full screen, then closes the tab.
+            let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+            let control = match key.code {
+                _ if ctrl => None,
+                KeyCode::Char(' ') => Some(Control::Play),
+                KeyCode::Char('s' | 'S') => Some(Control::Stop),
+                KeyCode::Left => Some(Control::Seek(if shift { -30 } else { -5 })),
+                KeyCode::Right => Some(Control::Seek(if shift { 30 } else { 5 })),
+                KeyCode::Char('-' | '_') => Some(Control::Quieter),
+                KeyCode::Char('+' | '=') => Some(Control::Louder),
+                KeyCode::Char('m' | 'M') => Some(Control::Mute),
+                KeyCode::Char('[') => Some(Control::Slower),
+                KeyCode::Char(']') => Some(Control::Faster),
+                KeyCode::Char('f' | 'F') => Some(Control::Fullscreen),
+                KeyCode::Esc if self.fullscreen => {
+                    self.fullscreen = false;
+                    None
+                }
+                KeyCode::Esc => return self.close_tab(active),
+                _ => None,
+            };
+            if let Some(control) = control {
+                self.control_video(active, control);
+            }
+            return;
+        }
         if let Some(media) = &mut file.media {
-            // A model turns, tilts and zooms; a video pauses.
+            // A model turns, tilts and zooms.
             let arrow = match key.code {
                 KeyCode::Left => Some((-1.0, 0.0)),
                 KeyCode::Right => Some((1.0, 0.0)),
@@ -447,21 +484,46 @@ impl App {
             media.handle_key(character, arrow);
             return;
         }
-        if file.image.is_some() {
-            // A PDF turns its pages; an image has nothing to edit.
-            if let Some((page, _)) = file.page() {
-                let target = match key.code {
-                    KeyCode::PageDown | KeyCode::Right | KeyCode::Down | KeyCode::Char(' ') => {
-                        Some(page + 1)
-                    }
-                    KeyCode::PageUp | KeyCode::Left | KeyCode::Up => Some(page.saturating_sub(1)),
-                    KeyCode::Home => Some(0),
-                    KeyCode::End => Some(usize::MAX),
-                    _ => None,
-                };
-                if let Some(target) = target {
-                    file.show_page(target, &mut self.picker);
+        if file.pdf.is_some() || file.image.is_some() {
+            // A PDF turns its pages; an image has nothing to edit. On a page of text the cursor
+            // moves and selects and Ctrl+C copies, but nothing is typed into it (F21).
+            let Some((page, _)) = file.page() else {
+                return;
+            };
+            let picture = file.image.is_some();
+            let target = match key.code {
+                KeyCode::PageDown => Some(page + 1),
+                KeyCode::PageUp => Some(page.saturating_sub(1)),
+                KeyCode::Home => Some(0),
+                KeyCode::End => Some(usize::MAX),
+                KeyCode::Right | KeyCode::Down | KeyCode::Char(' ') if picture => Some(page + 1),
+                KeyCode::Left | KeyCode::Up if picture => Some(page.saturating_sub(1)),
+                _ => None,
+            };
+            if let Some(target) = target {
+                file.show_page(target, &mut self.picker);
+                return;
+            }
+            let step = match key.code {
+                KeyCode::Up => (-1, 0),
+                KeyCode::Down => (1, 0),
+                KeyCode::Left => (0, -1),
+                KeyCode::Right => (0, 1),
+                _ => (0, 0),
+            };
+            match key.code {
+                _ if picture => {}
+                KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {
+                    file.mark(key.modifiers.contains(KeyModifiers::SHIFT));
+                    file.move_cursor(step.0, step.1);
                 }
+                KeyCode::Char('a' | 'A') if ctrl => file.select_all(),
+                KeyCode::Char('c' | 'C') if ctrl => {
+                    if let Some(text) = file.selected_text() {
+                        self.copy(text);
+                    }
+                }
+                _ => {}
             }
             return;
         }
@@ -644,6 +706,8 @@ impl App {
                     let regions = &self.regions;
                     let key = if contains(regions.about_repository, point) {
                         Some(KeyCode::Char('g'))
+                    } else if contains(regions.about_update, point) {
+                        Some(KeyCode::Char('u'))
                     } else if contains(regions.dialog_next, point) {
                         Some(KeyCode::Enter)
                     } else if contains(regions.dialog_skip, point) {
@@ -723,6 +787,14 @@ impl App {
                         self.select_tab(split.other);
                     }
                     let area = self.regions.pane_bodies[pane];
+                    if let Some(index) = self.active_tab.filter(|index| {
+                        self.open_files
+                            .get(*index)
+                            .and_then(|file| file.media.as_ref())
+                            .is_some_and(|media| media.video().is_some())
+                    }) {
+                        return self.click_video(index, area, point);
+                    }
                     if self
                         .active_tab
                         .and_then(|index| self.open_files.get(index))
@@ -734,7 +806,7 @@ impl App {
                     if let Some(file) = self
                         .active_tab
                         .and_then(|index| self.open_files.get_mut(index))
-                        && file.is_text()
+                        && file.shows_text()
                         && contains(area, point)
                     {
                         // A click starts a selection that a drag makes longer; Shift extends
@@ -776,6 +848,9 @@ impl App {
                     self.entry_menu = None;
                 }
             }
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) if self.scrubbing => {
+                self.scrub_video(point, false);
+            }
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) if self.turning.is_some() => {
                 let (column, row) = self.turning.replace(point).unwrap_or(point);
                 if let Some(media) = self
@@ -792,7 +867,7 @@ impl App {
                 if let Some(file) = self
                     .active_tab
                     .and_then(|index| self.open_files.get_mut(index))
-                    && file.is_text()
+                    && file.shows_text()
                 {
                     // Past the top or the bottom of the text the view follows the selection.
                     let (row, visual_column) = if point.1 <= area.y {
@@ -847,6 +922,9 @@ impl App {
                 None => {}
             },
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                if self.scrubbing {
+                    self.scrub_video(point, true);
+                }
                 self.drag = None;
                 self.selecting = false;
                 self.turning = None;
@@ -899,7 +977,18 @@ impl App {
                 media.wheel(up);
                 return;
             }
-            if let Some((page, _)) = self.open_files[index].page() {
+            let file = &self.open_files[index];
+            // A page of text scrolls first and turns at its top or its end (F21).
+            let height = self.regions.pane_bodies[file.pane.min(1)]
+                .height
+                .saturating_sub(2);
+            let turns = file.image.is_some()
+                || if up {
+                    file.scroll == 0
+                } else {
+                    usize::from(file.scroll) + usize::from(height) >= file.display_rows()
+                };
+            if let Some((page, _)) = file.page().filter(|_| turns && !sideways) {
                 // One page per turn of the wheel, however many events it sends.
                 let now = Instant::now();
                 if self
@@ -928,6 +1017,56 @@ impl App {
             } else {
                 scroll.saturating_add(step)
             };
+        }
+    }
+
+    /// A click on a video (Q52): a button does what it says, the progress bar starts a seek,
+    /// the picture plays or pauses.
+    fn click_video(&mut self, index: usize, area: Rect, point: (u16, u16)) {
+        let [picture, progress, buttons] = video_areas(area);
+        let Some(video) = self.open_files[index]
+            .media
+            .as_ref()
+            .and_then(|media| media.video())
+        else {
+            return;
+        };
+        if contains(progress, point) {
+            if video
+                .fraction_at(progress.width, point.0 - progress.x)
+                .is_some()
+            {
+                self.scrubbing = true;
+                self.scrub_video(point, false);
+            }
+        } else if contains(buttons, point) {
+            if let Some(control) = video.button_at(point.0 - buttons.x) {
+                self.control_video(index, control);
+            }
+        } else if contains(picture, point) {
+            self.control_video(index, Control::Play);
+        }
+    }
+
+    /// The mouse holds the progress bar at `point`, kept on the bar; letting go seeks there.
+    fn scrub_video(&mut self, point: (u16, u16), release: bool) {
+        self.scrubbing = !release;
+        let Some(index) = self.active_tab else {
+            return;
+        };
+        let pane = self.open_files[index].pane.min(1);
+        let [_, progress, _] = video_areas(self.regions.pane_bodies[pane]);
+        if let Some(media) = self.open_files[index].media.as_mut()
+            && let Some(video) = media.video()
+        {
+            let (_, start, length, _, _) = video.progress(progress.width);
+            let column = point
+                .0
+                .saturating_sub(progress.x)
+                .clamp(start, start + length.saturating_sub(1));
+            if let Some(fraction) = video.fraction_at(progress.width, column) {
+                media.scrub(fraction, release);
+            }
         }
     }
 
@@ -1550,7 +1689,7 @@ mod tests {
     }
 
     #[test]
-    fn models_turn_and_zoom_with_keys_and_the_mouse_and_videos_pause() {
+    fn models_turn_and_zoom_with_keys_and_the_mouse() {
         use crossterm::event::MouseButton;
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1592,15 +1731,109 @@ mod tests {
             app.open_files[0].lines.is_empty(),
             "nothing typed into a model"
         );
+    }
 
-        // A video pauses with Space; it never takes typing either.
+    #[test]
+    fn videos_answer_to_their_keys_buttons_bar_and_wheel() {
+        use crossterm::event::MouseButton;
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("clip.mp4"), "not a video").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
         app.open_file(directory.path().join("clip.mp4")).unwrap();
-        let hint = |app: &App| app.active_file().unwrap().media.as_ref().unwrap().hint();
-        assert_eq!(hint(&app).as_deref(), Some("Space: pause"));
-        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
-        assert_eq!(hint(&app).as_deref(), Some("Paused  Space: play"));
+        // A video of 75.5 s with sound, playing; seeking starts `ffmpeg` on the file above,
+        // which ends at once: the state is what is checked.
+        app.open_files[0].media = Some(crate::media::sample_video());
+        app.regions.editor = Rect::new(30, 2, 60, 20);
+        app.regions.editor_body = app.regions.editor;
+        app.regions.pane_bodies[0] = app.regions.editor;
+        let video = |app: &App| {
+            let media = app.open_files[0].media.as_ref().unwrap();
+            let video = media.video().unwrap();
+            (
+                video.paused,
+                video.volume,
+                video.muted,
+                video.speed(),
+                video.position().as_secs(),
+            )
+        };
+        let key = |app: &mut App, code| press(app, code, KeyModifiers::NONE);
+
+        key(&mut app, KeyCode::Char(' '));
+        assert!(video(&app).0, "Space pauses");
+        key(&mut app, KeyCode::Right);
+        assert_eq!(video(&app).4, 5, "→ 5 s on");
+        press(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
+        assert_eq!(video(&app).4, 35, "Shift+→ 30 s on");
+        key(&mut app, KeyCode::Left);
+        assert_eq!(video(&app).4, 30);
+        assert!(video(&app).0, "seeking keeps it paused");
+        key(&mut app, KeyCode::Char('-'));
+        key(&mut app, KeyCode::Char('m'));
+        assert_eq!(video(&app).1, 90);
+        assert!(video(&app).2, "M mutes");
+        key(&mut app, KeyCode::Char(']'));
+        assert_eq!(video(&app).3, 1.25);
+        key(&mut app, KeyCode::Char('['));
+        key(&mut app, KeyCode::Char('['));
+        assert_eq!(video(&app).3, 0.75);
+        key(&mut app, KeyCode::Char('s'));
+        assert_eq!(
+            (video(&app).0, video(&app).4),
+            (true, 0),
+            "S stops at the start"
+        );
         app.editor_paste("text");
-        assert!(app.active_file().unwrap().lines.is_empty());
+        key(&mut app, KeyCode::Char('x'));
+        assert!(
+            app.open_files[0].lines.is_empty(),
+            "nothing typed into a video"
+        );
+
+        // The border is at 30, 2: the picture from row 3, the bar on row 19, buttons on 20.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 50, 10);
+        assert!(!video(&app).0, "a click on the picture plays");
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 32, 20);
+        assert!(video(&app).0, "the first button pauses");
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 46, 20);
+        assert_eq!(video(&app).4, 0, "-5s stops at the start");
+        mouse(&mut app, MouseEventKind::ScrollUp, 50, 10);
+        assert_eq!(
+            (video(&app).1, video(&app).2),
+            (100, false),
+            "the wheel turns it up"
+        );
+        mouse(&mut app, MouseEventKind::ScrollDown, 50, 10);
+        assert_eq!(video(&app).1, 90);
+        // The bar is the 44 cells from column 38: a drag only moves the bar, letting go
+        // in its middle goes to the middle of the video.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 40, 19);
+        mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 60, 19);
+        let scrub = |app: &App| {
+            let media = app.open_files[0].media.as_ref().unwrap();
+            media.video().unwrap().scrub
+        };
+        assert!(scrub(&app).is_some() && video(&app).4 == 0);
+        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 59, 19);
+        assert!(scrub(&app).is_none());
+        assert!((36..=40).contains(&video(&app).4), "{}", video(&app).4);
+
+        // F fills the screen; Esc leaves it, then closes the tab.
+        key(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.fullscreen_video(), Some(0));
+        app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        assert_eq!(
+            app.fullscreen_video(),
+            None,
+            "Help shows over the normal layout"
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.tick_at(Instant::now() + Duration::from_millis(200));
+        assert_eq!(app.fullscreen_video(), Some(0), "and back once it closed");
+        key(&mut app, KeyCode::Esc);
+        assert!(app.fullscreen_video().is_none() && app.open_files.len() == 1);
+        key(&mut app, KeyCode::Esc);
+        assert!(app.open_files.is_empty(), "Esc closes the video");
     }
 
     #[test]
@@ -1881,6 +2114,54 @@ mod tests {
     }
 
     #[test]
+    fn a_text_page_of_a_pdf_is_read_selected_copied_and_scrolled_into_the_next() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.pdf");
+        let long = (1..=30)
+            .map(|line| format!("({line}. text) Tj 0 -3 Td"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let first = format!("BT /F1 2 Tf 5 96 Td {long} ET");
+        let second = "BT /F1 10 Tf 5 80 Td (Second page) Tj ET";
+        std::fs::write(&path, crate::editor::sample_pdf_pages(&[&first, second])).unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path.clone()).unwrap();
+        let page = |app: &App| app.active_file().unwrap().page().unwrap().0;
+        fn file(app: &App) -> &crate::editor::OpenFile {
+            app.active_file().unwrap()
+        }
+        assert_eq!(file(&app).lines.len(), 30);
+        // The arrows move the cursor and select; Ctrl+C copies; nothing is typed.
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Down, KeyModifiers::SHIFT);
+        assert_eq!(page(&app), 0, "arrows stay on a page of text");
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(app.copied.as_deref(), Some("2. text\n"));
+        for code in [KeyCode::Char('x'), KeyCode::Enter, KeyCode::Backspace] {
+            press(&mut app, code, KeyModifiers::NONE);
+        }
+        press(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert_eq!(file(&app).lines[1], "2. text");
+        assert!(!file(&app).dirty);
+        // The wheel scrolls the 30 lines in 18 rows, then turns the page at the end.
+        app.regions.pane_bodies[0] = Rect::new(30, 2, 60, 20);
+        for _ in 0..4 {
+            mouse(&mut app, MouseEventKind::ScrollDown, 40, 5);
+        }
+        assert_eq!((page(&app), file(&app).scroll), (0, 12));
+        mouse(&mut app, MouseEventKind::ScrollDown, 40, 5);
+        assert_eq!(page(&app), 1);
+        assert_eq!(file(&app).lines, ["Second page"]);
+        app.page_turned = None;
+        mouse(&mut app, MouseEventKind::ScrollUp, 40, 5);
+        assert_eq!(page(&app), 0, "and back at the top");
+        press(&mut app, KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(page(&app), 1);
+        press(&mut app, KeyCode::PageUp, KeyModifiers::NONE);
+        assert_eq!(page(&app), 0);
+    }
+
+    #[test]
     fn long_dialogs_scroll_with_the_keys_and_the_wheel() {
         let mut app = test_app();
         press(&mut app, KeyCode::F(1), KeyModifiers::NONE);
@@ -1898,6 +2179,38 @@ mod tests {
         let mut app = test_app();
         app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn about_checks_for_updates_and_opens_the_notice_in_its_place() {
+        use crate::update::Updater;
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        press(&mut app, KeyCode::F(2), KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::About);
+        app.regions.about_update = Rect::new(40, 20, 23, 1);
+        mouse(
+            &mut app,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            45,
+            20,
+        );
+        assert_eq!(
+            app.updater.checked.as_deref(),
+            Some("Checking for updates...")
+        );
+        app.updater.checked = None;
+        press(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
+        assert_eq!(
+            app.updater.checked.as_deref(),
+            Some("Checking for updates...")
+        );
+        assert_eq!(app.overlay, Overlay::About, "About stays while it checks");
+
+        // The answer: a newer version, also one skipped before, takes About's place.
+        app.updater = Updater::offering("99.0.0", directory.path().join("update.toml"));
+        app.tick();
+        assert_eq!(app.overlay, Overlay::Update);
     }
 
     #[test]
