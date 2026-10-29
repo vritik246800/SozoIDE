@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
         Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
@@ -12,9 +12,10 @@ use ratatui_image::{Resize, StatefulImage};
 use tui_term::widget::{Cursor, PseudoTerminal};
 
 use crate::{
-    app::{App, DropZone, EntryAction, Focus, Regions, SplitDirection},
+    app::{App, DropZone, EntryAction, Focus, Regions, SHOWN_ITEMS, SplitDirection},
     branding::ASCII_LOGO,
     editor::{OpenFile, file_icon},
+    lsp::{Diagnostic, char_column},
 };
 
 use super::{
@@ -353,13 +354,23 @@ pub(super) fn render_editor(frame: &mut Frame, app: &mut App, regions: &mut Regi
         match app.shown_tab(pane) {
             Some(index) => {
                 let marks = search_marks(app, index);
+                let empty = Vec::new();
+                let problems = app
+                    .lsp
+                    .diagnostics
+                    .get(&app.open_files[index].path)
+                    .unwrap_or(&empty);
                 render_file(
                     frame,
                     &mut app.open_files[index],
                     body,
                     focused && pane == active_pane,
                     &marks,
+                    problems,
                 );
+                if pane == active_pane {
+                    render_completion(frame, app, index, body);
+                }
             }
             None => render_empty(frame, focused, body),
         }
@@ -464,6 +475,69 @@ fn search_marks(app: &App, index: usize) -> Vec<(usize, usize, usize, bool)> {
         .collect()
 }
 
+/// The suggestions of the language server under the cursor of the active file (F26).
+fn render_completion(frame: &mut Frame, app: &App, index: usize, body: Rect) {
+    let Some((items, selected, _)) = app.completion_view() else {
+        return;
+    };
+    if items.is_empty() {
+        return;
+    }
+    let file = &app.open_files[index];
+    let gutter = file.lines.len().max(1).to_string().len() + 3;
+    let row = file
+        .display_row(file.cursor_row)
+        .saturating_sub(file.scroll as usize);
+    let column = file.cursor_x().saturating_sub(file.scroll_x as usize);
+    // The list scrolls with the selection, a page of `SHOWN_ITEMS` at a time.
+    let first = selected / SHOWN_ITEMS * SHOWN_ITEMS;
+    let shown = &items[first..items.len().min(first + SHOWN_ITEMS)];
+    let width = shown
+        .iter()
+        .map(|item| item.label.chars().count() + item.detail.chars().count().min(30) + 3)
+        .max()
+        .unwrap_or(10)
+        .clamp(16, 60) as u16
+        + 2;
+    let height = shown.len() as u16 + 2;
+    let below = body.y + 1 + row as u16 + 1;
+    let y = if below + height <= body.bottom() {
+        below
+    } else {
+        (body.y + 1 + row as u16).saturating_sub(height)
+    };
+    let x = (body.x + 1 + (gutter + column) as u16).min(body.right().saturating_sub(width));
+    let area = Rect::new(x, y, width, height).intersection(body);
+    frame.render_widget(Clear, area);
+    let lines = shown
+        .iter()
+        .enumerate()
+        .map(|(position, item)| {
+            let detail = item.detail.chars().take(30).collect::<String>();
+            let room = (width as usize).saturating_sub(item.label.chars().count() + 3);
+            let line = Line::from(vec![
+                Span::styled(format!(" {}", item.label), Style::default().fg(TEXT)),
+                Span::styled(format!("{detail:>room$} "), Style::default().fg(MUTED)),
+            ]);
+            if first + position == selected {
+                line.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>();
+    let title = format!(" {}/{} ", selected + 1, items.len());
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(ACTIVE))
+                .title_bottom(Line::from(title).right_aligned()),
+        ),
+        area,
+    );
+}
+
 /// The rows of `file` on screen, cut at its horizontal scroll, with a scrollbar on the bottom
 /// border when the text is wider than the pane, and `marks` (search matches) marked.
 fn render_file(
@@ -472,6 +546,7 @@ fn render_file(
     area: Rect,
     focused: bool,
     marks: &[(usize, usize, usize, bool)],
+    problems: &[Diagnostic],
 ) {
     let title = format!(" {} — {} ", file.path.display(), file.language);
     if let Some(media) = &mut file.media {
@@ -523,14 +598,53 @@ fn render_file(
                 let style = if current { CURRENT_MATCH } else { MATCH };
                 spans = mark_columns(spans, from, to, style);
             }
+            // Problems from the language server: the number in red (error) or yellow, the text
+            // underlined in that colour (F26).
+            let line_text = row
+                .and_then(|row| file.lines.get(row))
+                .map_or("", String::as_str);
+            let mut number_style = Style::default().fg(MUTED);
+            for problem in problems.iter().filter(|problem| {
+                row.is_some_and(|row| (problem.row..=problem.end_row).contains(&row))
+            }) {
+                let colour = if problem.error {
+                    Color::Red
+                } else {
+                    Color::Yellow
+                };
+                if number_style.fg == Some(MUTED) || problem.error {
+                    number_style = Style::default().fg(colour);
+                }
+                let row = row.unwrap_or_default();
+                let chars = line_text.chars().count();
+                let from = if row == problem.row {
+                    char_column(line_text, problem.start)
+                } else {
+                    0
+                };
+                let to = if row == problem.end_row {
+                    char_column(line_text, problem.end)
+                } else {
+                    chars
+                };
+                let to = to.max(from + 1);
+                let width = |column: usize| {
+                    Span::raw(line_text.chars().take(column).collect::<String>()).width()
+                };
+                spans = mark_columns(
+                    spans,
+                    width(from),
+                    width(to).max(width(from) + 1),
+                    Style::default()
+                        .add_modifier(Modifier::UNDERLINED)
+                        .underline_color(colour),
+                );
+            }
             let number = number.map_or_else(
                 || " ".repeat(number_width),
                 |number| format!("{number:>number_width$}"),
             );
-            let mut line = vec![Span::styled(
-                format!("{number} | "),
-                Style::default().fg(MUTED),
-            )];
+            let mut line = vec![Span::styled(format!("{number} | "), number_style)];
             line.extend(skip_columns(spans, scroll_x));
             Line::from(line)
         })

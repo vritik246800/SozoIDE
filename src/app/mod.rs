@@ -19,10 +19,12 @@ use crate::{
 
 mod explorer;
 mod input;
+mod intellisense;
 mod layout;
 mod motion;
 
 pub use explorer::{EntryAction, EntryMenu, FileEntry, NamePrompt};
+pub use intellisense::{Completion, SHOWN_ITEMS};
 use layout::{DragTarget, TabDrag, inner_size};
 pub use layout::{DropZone, Focus, Overlay, Regions, Split, SplitDirection, TabBar};
 pub(crate) use motion::AppMotion;
@@ -82,6 +84,11 @@ pub struct App {
     pub overlay_scroll: u16,
     /// Text copied in the editor, for `main` to hand to the terminal (OSC 52).
     pub clipboard: Option<String>,
+    /// The language servers (F26), the suggestions open under the cursor and when the edited
+    /// text last went to the servers.
+    pub lsp: crate::lsp::Lsp,
+    pub completion: Option<Completion>,
+    lsp_synced: Instant,
     /// The message of the installation of git, curl or ffmpeg running in the background (F24).
     dependencies: Option<Receiver<String>>,
     /// The last text copied here, for Ctrl+V when the system clipboard cannot be read.
@@ -127,6 +134,7 @@ impl App {
         // A new installation or a new version installs the tools it is missing (Q41).
         let dependencies =
             (welcome != Welcome::None).then(crate::update::deps::install_in_background);
+        let lsp_root = root.clone();
         let mut app = Self {
             root,
             entries: Vec::new(),
@@ -163,6 +171,9 @@ impl App {
             overlay_scroll: 0,
             clipboard: None,
             dependencies,
+            lsp: crate::lsp::Lsp::new(lsp_root, !cfg!(test)),
+            completion: None,
+            lsp_synced: now,
             copied: None,
             file_clipboard: None,
             watched: now,
@@ -244,6 +255,7 @@ impl App {
             self.status = message;
             self.dependencies = None;
         }
+        self.tick_lsp(now);
         self.database.tick_at(now);
         // Copy in the SQL tab: the app owns the clipboard.
         if let Some(text) = self.database.copy_request.take() {
@@ -460,6 +472,11 @@ impl App {
         }
         let mut file = OpenFile::load(path, &mut self.picker)?;
         file.pane = self.active_pane();
+        if file.is_text()
+            && let Some(message) = self.lsp.open(&file.path, &file.text(), file.edits)
+        {
+            self.status = message;
+        }
         self.flush_active_file();
         self.status = format!("Opened {}", file.name);
         self.open_files.push(file);
@@ -568,6 +585,10 @@ impl App {
             return;
         }
         self.save_file(index);
+        self.lsp.close(&self.open_files[index].path);
+        if self.completion.is_some() && self.active_tab == Some(index) {
+            self.completion = None;
+        }
         let pane = self.open_files[index].pane;
         let was_active = self.active_tab == Some(index);
         self.open_files.remove(index);

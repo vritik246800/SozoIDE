@@ -4,6 +4,7 @@ mod branding;
 mod database;
 mod editor;
 mod git;
+mod lsp;
 mod media;
 mod run;
 mod terminal;

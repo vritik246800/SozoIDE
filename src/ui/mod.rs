@@ -114,7 +114,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         render_handle(frame, regions.right_handle, true);
         render_terminal(frame, app, regions.right_terminal, false);
     }
-    render_footer(frame, vertical[2]);
+    render_footer(frame, app, vertical[2]);
     app.regions = regions;
     app.resize_terminals();
 
@@ -215,7 +215,9 @@ fn render_header(frame: &mut Frame, app: &App, regions: &mut Regions, area: Rect
     regions.header_about = about;
 }
 
-fn render_footer(frame: &mut Frame, area: Rect) {
+/// The keys on the left; on the right the problem on the cursor's line (F26) or the last thing
+/// that happened (`app.status`).
+fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let footer = Line::from(vec![
         Span::styled(" Ctrl+B ", Style::default().fg(ACTIVE)),
         Span::raw("Explorer  "),
@@ -230,9 +232,44 @@ fn render_footer(frame: &mut Frame, area: Rect) {
         Span::styled("Ctrl+Q ", Style::default().fg(ACTIVE)),
         Span::raw("Quit"),
     ]);
+    let problem = app
+        .active_tab
+        .and_then(|index| app.open_files.get(index))
+        .and_then(|file| {
+            let row = file.cursor_row;
+            app.lsp
+                .diagnostics
+                .get(&file.path)?
+                .iter()
+                .find(|problem| (problem.row..=problem.end_row).contains(&row))
+        });
+    let message = match problem {
+        Some(problem) => {
+            let (label, colour) = if problem.error {
+                ("error", ratatui::style::Color::Red)
+            } else {
+                ("warning", ratatui::style::Color::Yellow)
+            };
+            Line::from(vec![
+                Span::styled(format!("{label}: "), Style::default().fg(colour)),
+                Span::styled(format!("{} ", problem.message), Style::default().fg(TEXT)),
+            ])
+        }
+        None => Line::from(format!("{} ", app.status)),
+    };
+    // The message comes first, in up to 60 % of the row; the keys give way (they are in Help).
+    let room = (message.width() as u16).min(area.width * 3 / 5);
+    let [left, right] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(room)]).areas(area);
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(MUTED)),
-        area,
+        left,
+    );
+    frame.render_widget(
+        Paragraph::new(message)
+            .style(Style::default().fg(MUTED))
+            .alignment(Alignment::Right),
+        right,
     );
 }
 
@@ -1211,6 +1248,8 @@ mod tests {
             "New, rename, delete",
             "Turn the model",
             "Run the file or its project",
+            "Suggestions (language server)",
+            "Go to the definition",
             "Pause or play a video",
             "Cut, copy, paste (Explorer)",
             "Cut, copy, paste the text",
@@ -1286,6 +1325,71 @@ mod tests {
             })
             .count();
         assert!(red > 20, "{red}");
+    }
+
+    #[test]
+    fn problems_are_marked_in_the_editor_and_said_in_the_footer_with_the_suggestions() {
+        use crate::lsp::{Diagnostic, Event, Item};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("main.c");
+        std::fs::write(&path, "int main() {\n  retur 0;\n}\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path.clone()).unwrap();
+        settle(&mut app);
+        app.status = "Opened main.c".into();
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(
+            buffer_text(&terminal).contains("Opened main.c"),
+            "the status shows"
+        );
+        app.lsp.diagnostics.insert(
+            path.clone(),
+            vec![Diagnostic {
+                row: 1,
+                start: 2,
+                end_row: 1,
+                end: 7,
+                error: true,
+                message: "use of undeclared identifier 'retur'".into(),
+            }],
+        );
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("error: use of undeclared identifier 'retur'"),
+            "{text}"
+        );
+        let buffer = terminal.backend().buffer();
+        let (x, y) = (0..20)
+            .find_map(|y| row(buffer, y).find("retur").map(|x| (x, y)))
+            .unwrap();
+        let x = row(buffer, y)[..x].chars().count() as u16;
+        let cell = &buffer[(x, y)];
+        assert!(cell.modifier.contains(ratatui::style::Modifier::UNDERLINED));
+        assert_eq!(cell.underline_color, ratatui::style::Color::Red);
+        let number = row(buffer, y).find("2 |").unwrap();
+        let number = row(buffer, y)[..number].chars().count() as u16;
+        assert_eq!(buffer[(number, y)].fg, ratatui::style::Color::Red);
+
+        // Suggestions open under the cursor with their count.
+        app.lsp_event(Event::Completion {
+            path,
+            row: 1,
+            column: 0,
+            items: vec![Item {
+                label: "return".into(),
+                detail: "keyword".into(),
+                insert: "return".into(),
+            }],
+        });
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains(" return") && text.contains("keyword") && text.contains("1/1"));
     }
 
     #[test]

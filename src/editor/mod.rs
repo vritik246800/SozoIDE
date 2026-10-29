@@ -85,6 +85,8 @@ pub struct OpenFile {
     /// selects nothing.
     pub anchor: Option<(usize, usize)>,
     pub dirty: bool,
+    /// Counts the edits, from 1: the language server is sent the text when it changes (F26).
+    pub edits: u64,
     trailing_newline: bool,
     /// The text before each edit, for `undo`, and the kind and time of the last one.
     history: Vec<Snapshot>,
@@ -142,6 +144,7 @@ impl OpenFile {
                 cursor_column: 0,
                 anchor: None,
                 dirty: false,
+                edits: 1,
                 trailing_newline: false,
                 history: Vec::new(),
                 last_change: None,
@@ -178,6 +181,7 @@ impl OpenFile {
             cursor_column: 0,
             anchor: None,
             dirty: false,
+            edits: 1,
             trailing_newline,
             history: Vec::new(),
             last_change: None,
@@ -320,11 +324,7 @@ impl OpenFile {
         if !self.dirty {
             return Ok(());
         }
-        let mut text = self.lines.join("\n");
-        if self.trailing_newline {
-            text.push('\n');
-        }
-        fs::write(&self.path, text)
+        fs::write(&self.path, self.text())
             .with_context(|| format!("Could not save {}", self.path.display()))?;
         self.dirty = false;
         self.last_edit = None;
@@ -358,9 +358,19 @@ impl OpenFile {
         self.disk = disk;
         self.clamp_cursor();
         self.follow_cursor = false;
+        self.edits += 1;
         self.highlighted = self.highlight.update(&self.path, &self.lines);
         self.layout();
         Ok(())
+    }
+
+    /// The text as it is saved.
+    pub fn text(&self) -> String {
+        let mut text = self.lines.join("\n");
+        if self.trailing_newline {
+            text.push('\n');
+        }
+        text
     }
 
     pub fn autosave_due(&self, now: Instant) -> bool {
@@ -636,6 +646,7 @@ impl OpenFile {
     fn changed(&mut self) {
         self.follow_cursor = true;
         self.dirty = true;
+        self.edits += 1;
         self.last_edit = Some(Instant::now());
         self.highlighted = self.highlight.update(&self.path, &self.lines);
         self.layout();

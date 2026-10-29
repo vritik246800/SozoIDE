@@ -46,7 +46,7 @@ The installers are not signed yet:
 
 Each release includes `SHA256SUMS.txt`. Check a download with `shasum -a 256 -c SHA256SUMS.txt --ignore-missing` on macOS, `sha256sum -c SHA256SUMS.txt --ignore-missing` on Linux, or `Get-FileHash` on Windows.
 
-**Requirements:** a [Nerd Font](https://www.nerdfonts.com/) in your terminal for the icons. SozoIDE runs `git` (Source Control), `curl` (updates) and `ffmpeg` (videos) instead of linking them: after a new installation and after each update it installs the ones that are missing in the background, with Homebrew on macOS, `winget` on Windows and `apt-get` or `dnf` on Linux (the DEB and RPM packages also recommend them).
+**Requirements:** a [Nerd Font](https://www.nerdfonts.com/) in your terminal for the icons. IntelliSense — problems underlined, suggestions and go to definition — comes from the language servers: rust-analyzer, clangd, pyright, jdtls, typescript-language-server and gopls, each started when you open the first file of its language. SozoIDE runs `git` (Source Control), `curl` (updates) and `ffmpeg` (videos) instead of linking them: after a new installation and after each update it installs the ones that are missing in the background, with the language servers, with Homebrew on macOS, `winget` on Windows and `apt-get` or `dnf` on Linux (and rustup, npm, pip or `go install` for the servers) (the DEB and RPM packages also recommend them).
 
 ## Usage
 
@@ -90,6 +90,7 @@ sozo --version
 | `Ctrl+V`, right-click in the editor | Paste the system clipboard; the menu also cuts and copies the selection |
 | `←`/`→`, `↑`/`↓`, `+`/`-`, drag, wheel (3D model) | Turn, tilt, zoom in and out |
 | `Space` (video) | Pause, play on, or play again from the start |
+| `Ctrl+Space` / `F12` | Suggestions from the language server (they also open after `.`, `::`, `->` and the second letter of a word) / go to the definition |
 | `Ctrl+R` (editor or Explorer) | Save, open the bottom terminal and run the file there: a Cargo project or Go module runs whole; C, C++, Rust, Python, JavaScript, TypeScript, Java, Kotlin, Go, Ruby, PHP, Lua, Perl, R, Swift, Dart, Zig, Haskell, Elixir, Julia and shell scripts with their own compiler or interpreter |
 | `Page Down` / `→` / mouse wheel, `Page Up` / `←`, `Home` / `End` (PDF) | Next page, previous page, first and last page |
 | Click a branch (Source Control) | Switch to it, after a confirmation |

@@ -386,6 +386,8 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
                 ("Ctrl+Z", "Undo the last edit"),
                 ("Ctrl+C / Ctrl+X", "Copy / cut the selection"),
                 ("Ctrl+V", "Paste"),
+                ("Ctrl+Space", "Suggestions (language server)"),
+                ("F12", "Go to the definition"),
                 ("Right-click", "Cut, copy, paste the text"),
                 (
                     if mac {

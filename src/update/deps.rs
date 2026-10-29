@@ -5,6 +5,7 @@
 use std::{
     env,
     ffi::OsStr,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc::{Receiver, channel},
     thread,
@@ -112,37 +113,186 @@ pub fn sudo(quiet: bool) -> &'static [&'static str] {
     }
 }
 
-/// Installs what is missing in a thread; the message for the status bar arrives when it is
-/// done (none when nothing was missing).
+/// Where a tool is: the `PATH`, then the folders where `go install`, `cargo install` and
+/// `pip install --user` put them without adding them to it.
+pub fn locate(tool: &str) -> Option<PathBuf> {
+    let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"));
+    let extra = home.iter().flat_map(|home| {
+        let home = Path::new(home);
+        [".cargo/bin", "go/bin", ".local/bin"].map(|folder| home.join(folder))
+    });
+    env::var_os("PATH")
+        .map(|paths| env::split_paths(&paths).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .chain(extra)
+        .flat_map(|folder| {
+            ["", ".exe", ".cmd"].map(|suffix| folder.join(format!("{tool}{suffix}")))
+        })
+        .find(|path| path.is_file())
+}
+
+/// The command line of a language server, found by `locate`; on macOS `clangd` also comes
+/// with the Xcode command line tools, behind `xcrun`.
+pub fn server_command(name: &str, arguments: &[&str]) -> Option<Vec<String>> {
+    let program = locate(name)
+        .map(|path| vec![path.display().to_string()])
+        .or_else(|| {
+            let xcrun = cfg!(target_os = "macos")
+                && name == "clangd"
+                && Command::new("xcrun")
+                    .args(["--find", "clangd"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .is_ok_and(|status| status.success());
+            xcrun.then(|| vec!["xcrun".to_owned(), name.to_owned()])
+        })?;
+    Some(
+        program
+            .into_iter()
+            .chain(arguments.iter().map(|argument| (*argument).to_owned()))
+            .collect(),
+    )
+}
+
+/// The language servers of F26 (Q46) that are not `present`, each with the command that
+/// installs it with what this machine `has`; one without a way to install it is left out.
+pub fn language_plan(
+    os: &str,
+    present: impl Fn(&str) -> bool,
+    has: impl Fn(&str) -> bool,
+    sudo: &[&str],
+) -> Vec<(&'static str, Vec<String>)> {
+    let words = |words: &[&str]| {
+        words
+            .iter()
+            .map(|word| (*word).to_owned())
+            .collect::<Vec<_>>()
+    };
+    let system = |manager: &[&str]| {
+        let mut command = words(sudo);
+        command.extend(words(manager));
+        command
+    };
+    let python = ["python3", "python"].into_iter().find(|python| has(python));
+    let mut plan = Vec::new();
+    let mut add = |tool: &'static str, command: Option<Vec<String>>| {
+        if !present(tool)
+            && let Some(command) = command
+        {
+            plan.push((tool, command));
+        }
+    };
+    add(
+        "rust-analyzer",
+        if has("rustup") {
+            Some(words(&["rustup", "component", "add", "rust-analyzer"]))
+        } else {
+            (os == "macos" && has("brew")).then(|| words(&["brew", "install", "rust-analyzer"]))
+        },
+    );
+    add(
+        "clangd",
+        match os {
+            "linux" if has("apt-get") => Some(system(&["apt-get", "install", "-y", "clangd"])),
+            "linux" if has("dnf") => Some(system(&["dnf", "install", "-y", "clang-tools-extra"])),
+            "windows" if has("winget") => Some(words(&[
+                "winget",
+                "install",
+                "--id",
+                "LLVM.LLVM",
+                "--exact",
+                "--silent",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "--disable-interactivity",
+            ])),
+            _ => None,
+        },
+    );
+    add(
+        "pyright-langserver",
+        if has("npm") {
+            Some(words(&["npm", "install", "--global", "pyright"]))
+        } else {
+            python.map(|python| words(&[python, "-m", "pip", "install", "--user", "pyright"]))
+        },
+    );
+    add(
+        "typescript-language-server",
+        has("npm").then(|| {
+            words(&[
+                "npm",
+                "install",
+                "--global",
+                "typescript-language-server",
+                "typescript",
+            ])
+        }),
+    );
+    add(
+        "gopls",
+        has("go").then(|| words(&["go", "install", "golang.org/x/tools/gopls@latest"])),
+    );
+    add(
+        "jdtls",
+        (os != "windows" && has("brew")).then(|| words(&["brew", "install", "jdtls"])),
+    );
+    plan
+}
+
+/// Installs what is missing in a thread: `git`, `curl` and `ffmpeg`, then the language
+/// servers. The message for the status bar arrives when it is done (none when nothing was
+/// missing).
 pub fn install_in_background() -> Receiver<String> {
     let (sender, receiver) = channel();
     thread::spawn(move || {
-        let missing = missing();
-        if missing.is_empty() {
-            return;
-        }
         let sudo = if cfg!(target_os = "linux") {
             sudo(true)
         } else {
             &[]
         };
-        let commands = plan(env::consts::OS, &missing, on_path, sudo);
-        let installed = !commands.is_empty()
-            && commands.iter().all(|command| {
-                Command::new(&command[0])
-                    .args(&command[1..])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .is_ok_and(|status| status.success())
-            });
-        let list = missing.join(", ");
-        let _ = sender.send(if installed {
-            format!("Installed {list}: restart SozoIDE if a video does not play")
-        } else {
-            format!("Could not install {list}: install it with your package manager")
-        });
+        let os = env::consts::OS;
+        let missing = missing();
+        let mut steps = plan(os, &missing, on_path, sudo)
+            .into_iter()
+            .map(|command| (missing.join(", "), command))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() && steps.is_empty() {
+            let _ = sender.send(format!(
+                "Install {}: no package manager found",
+                missing.join(", ")
+            ));
+        }
+        let servers = language_plan(os, |tool| locate(tool).is_some(), on_path, sudo);
+        steps.extend(
+            servers
+                .into_iter()
+                .map(|(tool, command)| (tool.to_owned(), command)),
+        );
+        if steps.is_empty() {
+            return;
+        }
+        let (mut installed, mut failed) = (Vec::new(), Vec::new());
+        for (tools, command) in steps {
+            let done = Command::new(&command[0])
+                .args(&command[1..])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
+            if done { &mut installed } else { &mut failed }.push(tools);
+        }
+        let mut message = Vec::new();
+        if !installed.is_empty() {
+            message.push(format!("Installed {}", installed.join(", ")));
+        }
+        if !failed.is_empty() {
+            message.push(format!("could not install {}", failed.join(", ")));
+        }
+        let _ = sender.send(message.join("; "));
     });
     receiver
 }
@@ -158,8 +308,6 @@ pub fn install_here() {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
 
     #[test]
@@ -206,5 +354,31 @@ mod tests {
         std::fs::write(directory.path().join("ffmpeg"), "").unwrap();
         let paths = env::join_paths([Path::new("/nowhere"), directory.path()]).unwrap();
         assert!(found_in(&paths, "ffmpeg") && !found_in(&paths, "git"));
+
+        // Language servers: each with the tool its ecosystem installs it with, or none.
+        let servers = |os, has: &'static [&'static str]| {
+            language_plan(os, |tool| tool == "gopls", only(has), &["sudo", "-n"])
+                .into_iter()
+                .map(|(tool, command)| format!("{tool}: {}", command.join(" ")))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            servers("linux", &["rustup", "apt-get", "python3", "go"]),
+            [
+                "rust-analyzer: rustup component add rust-analyzer",
+                "clangd: sudo -n apt-get install -y clangd",
+                "pyright-langserver: python3 -m pip install --user pyright",
+            ],
+            "gopls is there; no npm for TypeScript, no Homebrew for jdtls"
+        );
+        assert_eq!(
+            servers("macos", &["brew", "npm"]),
+            [
+                "rust-analyzer: brew install rust-analyzer",
+                "pyright-langserver: npm install --global pyright",
+                "typescript-language-server: npm install --global typescript-language-server typescript",
+                "jdtls: brew install jdtls",
+            ]
+        );
     }
 }

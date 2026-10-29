@@ -465,6 +465,19 @@ impl App {
             }
             return;
         }
+        // IntelliSense (F26): the open list takes its keys first.
+        if self.completion.is_some() && self.handle_completion_key(key) {
+            return;
+        }
+        if ctrl && key.code == KeyCode::Char(' ') {
+            self.request_completion();
+            return;
+        }
+        if key.code == KeyCode::F(12) {
+            self.go_to_definition();
+            return;
+        }
+        let file = &mut self.open_files[active];
         // Ctrl+Z on every system: on a Mac, Cmd+Z stays with the terminal.
         if ctrl && matches!(key.code, KeyCode::Char('z' | 'Z')) {
             if !file.undo() {
@@ -510,7 +523,10 @@ impl App {
                 copied = file.selected_text();
                 file.delete_selection();
             }
-            KeyCode::Char(character) if !ctrl => file.insert(character),
+            KeyCode::Char(character) if !ctrl => {
+                file.insert(character);
+                self.typed(character);
+            }
             _ => {}
         }
         if let Some(text) = copied {
@@ -1644,6 +1660,83 @@ mod tests {
             .unwrap();
         press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
         assert!(app.show_bottom_terminal && app.status.starts_with("Running"));
+    }
+
+    #[test]
+    fn suggestions_narrow_as_you_type_and_the_chosen_one_replaces_the_word() {
+        use crate::lsp::{Event, Item};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("main.rs");
+        std::fs::write(&path, "fn main() {\n    let list = Vec::new();\n}\n").unwrap();
+        std::fs::write(directory.path().join("lib.rs"), "pub fn helper() {}\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path.clone()).unwrap();
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut app, KeyCode::End, KeyModifiers::NONE);
+        app.editor_paste("\n    list.pu");
+        let item = |label: &str, insert: &str| Item {
+            label: label.into(),
+            detail: String::new(),
+            insert: insert.into(),
+        };
+        let answer = |app: &mut App, row| {
+            app.lsp_event(Event::Completion {
+                path: path.clone(),
+                row,
+                column: 11,
+                items: vec![
+                    item("push", "push"),
+                    item("pop", "pop"),
+                    item("as_ptr", "as_ptr"),
+                ],
+            })
+        };
+        // A late answer for another row is dropped.
+        answer(&mut app, 0);
+        assert!(app.completion.is_none());
+        answer(&mut app, 2);
+        let labels = |app: &App| {
+            let (items, ..) = app.completion_view().unwrap();
+            items
+                .iter()
+                .map(|item| item.label.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(labels(&app), ["push"], "pu: push only");
+        press(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(
+            labels(&app),
+            ["push", "pop", "as_ptr"],
+            "p: starting with it, then the rest"
+        );
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.active_file().unwrap().lines[2], "    list.pop");
+        assert!(app.completion.is_none());
+        // Esc closes it; a key the list does not use reaches the editor.
+        answer(&mut app, 2);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.completion.is_none());
+        answer(&mut app, 2);
+        press(&mut app, KeyCode::Char('('), KeyModifiers::NONE);
+        assert!(app.completion.is_none());
+        assert_eq!(app.active_file().unwrap().lines[2], "    list.pop(");
+
+        // A definition elsewhere opens there; messages reach the status bar.
+        app.lsp_event(Event::Definition {
+            path: directory.path().join("lib.rs"),
+            row: 0,
+            column: 7,
+        });
+        let file = app.active_file().unwrap();
+        assert!(file.path.ends_with("lib.rs"));
+        assert_eq!((file.cursor_row, file.cursor_column), (0, 7));
+        app.lsp_event(Event::Message("rust-analyzer stopped".into()));
+        assert_eq!(app.status, "rust-analyzer stopped");
+        // Without a server Ctrl+Space and F12 do nothing harmful.
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        press(&mut app, KeyCode::F(12), KeyModifiers::NONE);
+        assert!(app.completion.is_none());
     }
 
     #[test]
