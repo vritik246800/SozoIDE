@@ -9,7 +9,7 @@ use std::{
 
 use serde_json::{Value, json};
 
-mod client;
+pub(crate) mod client;
 
 use client::{Client, Pending};
 

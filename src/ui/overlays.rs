@@ -439,6 +439,16 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             ],
         },
         HelpSection {
+            title: "Debug",
+            color: Color::LightRed,
+            keys: vec![
+                ("F9", "Breakpoint on the line"),
+                ("F5", "Build and debug, or continue"),
+                ("F10 / F11", "Step over / into"),
+                ("Shift+F5", "Stop and close the panel"),
+            ],
+        },
+        HelpSection {
             title: "3D models and videos",
             color: Color::LightMagenta,
             keys: vec![

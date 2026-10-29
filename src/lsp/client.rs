@@ -155,7 +155,7 @@ impl Drop for Client {
 }
 
 /// Reads `Content-Length` frames until the server closes its output.
-fn read_messages(mut reader: impl BufRead, sender: &Sender<Value>) {
+pub(crate) fn read_messages(mut reader: impl BufRead, sender: &Sender<Value>) {
     loop {
         let mut length = None;
         loop {

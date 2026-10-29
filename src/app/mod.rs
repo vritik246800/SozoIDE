@@ -17,6 +17,7 @@ use crate::{
     update::{Notes, UpdateState, Updater, Welcome, notes_since},
 };
 
+mod debugging;
 mod explorer;
 mod input;
 mod intellisense;
@@ -84,6 +85,11 @@ pub struct App {
     pub overlay_scroll: u16,
     /// Text copied in the editor, for `main` to hand to the terminal (OSC 52).
     pub clipboard: Option<String>,
+    /// Breakpoints by file (rows from 0), the build running before a debug session and the
+    /// session (F27).
+    pub breakpoints: std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>,
+    debug_build: Option<Receiver<crate::debug::Built>>,
+    pub debug: Option<crate::debug::Session>,
     /// The language servers (F26), the suggestions open under the cursor and when the edited
     /// text last went to the servers.
     pub lsp: crate::lsp::Lsp,
@@ -174,6 +180,9 @@ impl App {
             lsp: crate::lsp::Lsp::new(lsp_root, !cfg!(test)),
             completion: None,
             lsp_synced: now,
+            breakpoints: Default::default(),
+            debug_build: None,
+            debug: None,
             copied: None,
             file_clipboard: None,
             watched: now,
@@ -256,6 +265,7 @@ impl App {
             self.dependencies = None;
         }
         self.tick_lsp(now);
+        self.tick_debug();
         self.database.tick_at(now);
         // Copy in the SQL tab: the app owns the clipboard.
         if let Some(text) = self.database.copy_request.take() {

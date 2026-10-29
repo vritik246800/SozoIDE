@@ -2,6 +2,7 @@ mod animation;
 mod app;
 mod branding;
 mod database;
+mod debug;
 mod editor;
 mod git;
 mod lsp;

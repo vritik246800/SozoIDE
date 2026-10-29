@@ -259,8 +259,9 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     };
     // The message comes first, in up to 60 % of the row; the keys give way (they are in Help).
     let room = (message.width() as u16).min(area.width * 3 / 5);
-    let [left, right] =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(room)]).areas(area);
+    let [left, right] = Layout::horizontal([Constraint::Min(0), Constraint::Length(room)])
+        .spacing(1)
+        .areas(area);
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(MUTED)),
         left,
@@ -1250,6 +1251,8 @@ mod tests {
             "Run the file or its project",
             "Suggestions (language server)",
             "Go to the definition",
+            "Breakpoint on the line",
+            "Build and debug, or continue",
             "Pause or play a video",
             "Cut, copy, paste (Explorer)",
             "Cut, copy, paste the text",
@@ -1390,6 +1393,53 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains(" return") && text.contains("keyword") && text.contains("1/1"));
+    }
+
+    #[test]
+    fn the_margin_marks_breakpoints_and_the_paused_line_and_the_panel_shows_the_session() {
+        use crate::debug::{Frame, State, fake};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("main.c");
+        std::fs::write(&path, "int main(void) {\n  int x = 1;\n  return x;\n}\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path.clone()).unwrap();
+        settle(&mut app);
+        app.breakpoints.insert(path.clone(), [1].into());
+        let frame = Frame {
+            id: 1,
+            name: "main".into(),
+            path: Some(path.clone()),
+            row: 2,
+        };
+        app.debug = Some(fake(
+            State::Paused("breakpoint".into()),
+            vec![frame],
+            vec![("x".into(), "1".into())],
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        for part in [
+            "2●|   int x = 1;",
+            "3▶|   return x;",
+            "╭ Debug ",
+            "Paused: breakpoint",
+            "Call stack",
+            "main  main.c:3",
+            "x = 1",
+            "Output",
+            "hello",
+        ] {
+            assert!(text.contains(part), "{part}");
+        }
+        let buffer = terminal.backend().buffer();
+        let y = (0..24).find(|y| row(buffer, *y).contains("2●|")).unwrap();
+        let x = row(buffer, y).find('●').unwrap();
+        let x = row(buffer, y)[..x].chars().count() as u16;
+        assert_eq!(buffer[(x, y)].fg, ratatui::style::Color::Red);
+        app.debug = None;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(!buffer_text(&terminal).contains("╭ Debug "));
     }
 
     #[test]

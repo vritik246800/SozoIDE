@@ -239,6 +239,32 @@ pub fn language_plan(
         "jdtls",
         (os != "windows" && has("brew")).then(|| words(&["brew", "install", "jdtls"])),
     );
+    // Debuggers (F27): GDB speaks DAP since 14 (lldb-dap comes with Xcode and with LLVM, the
+    // clangd of Windows); debugpy for Python; Delve for Go.
+    let gdb = if os != "linux" || present("lldb-dap") {
+        None
+    } else if has("apt-get") {
+        Some(system(&["apt-get", "install", "-y", "gdb"]))
+    } else {
+        has("dnf").then(|| system(&["dnf", "install", "-y", "gdb"]))
+    };
+    add("gdb", gdb);
+    add(
+        "debugpy",
+        python.map(|python| words(&[python, "-m", "pip", "install", "--user", "debugpy"])),
+    );
+    add(
+        "dlv",
+        if has("go") {
+            Some(words(&[
+                "go",
+                "install",
+                "github.com/go-delve/delve/cmd/dlv@latest",
+            ]))
+        } else {
+            (os != "windows" && has("brew")).then(|| words(&["brew", "install", "delve"]))
+        },
+    );
     plan
 }
 
@@ -265,7 +291,11 @@ pub fn install_in_background() -> Receiver<String> {
                 missing.join(", ")
             ));
         }
-        let servers = language_plan(os, |tool| locate(tool).is_some(), on_path, sudo);
+        let present = |tool: &str| match tool {
+            "lldb-dap" | "debugpy" => crate::debug::locate(tool).is_some(),
+            _ => locate(tool).is_some(),
+        };
+        let servers = language_plan(os, present, on_path, sudo);
         steps.extend(
             servers
                 .into_iter()
@@ -357,10 +387,15 @@ mod tests {
 
         // Language servers: each with the tool its ecosystem installs it with, or none.
         let servers = |os, has: &'static [&'static str]| {
-            language_plan(os, |tool| tool == "gopls", only(has), &["sudo", "-n"])
-                .into_iter()
-                .map(|(tool, command)| format!("{tool}: {}", command.join(" ")))
-                .collect::<Vec<_>>()
+            language_plan(
+                os,
+                |tool| tool == "gopls" || tool == "dlv",
+                only(has),
+                &["sudo", "-n"],
+            )
+            .into_iter()
+            .map(|(tool, command)| format!("{tool}: {}", command.join(" ")))
+            .collect::<Vec<_>>()
         };
         assert_eq!(
             servers("linux", &["rustup", "apt-get", "python3", "go"]),
@@ -368,8 +403,10 @@ mod tests {
                 "rust-analyzer: rustup component add rust-analyzer",
                 "clangd: sudo -n apt-get install -y clangd",
                 "pyright-langserver: python3 -m pip install --user pyright",
+                "gdb: sudo -n apt-get install -y gdb",
+                "debugpy: python3 -m pip install --user debugpy",
             ],
-            "gopls is there; no npm for TypeScript, no Homebrew for jdtls"
+            "gopls and dlv are there; no npm for TypeScript, no Homebrew for jdtls"
         );
         assert_eq!(
             servers("macos", &["brew", "npm"]),
@@ -378,7 +415,8 @@ mod tests {
                 "pyright-langserver: npm install --global pyright",
                 "typescript-language-server: npm install --global typescript-language-server typescript",
                 "jdtls: brew install jdtls",
-            ]
+            ],
+            "no gdb on macOS (lldb-dap comes with Xcode), no Python for debugpy, dlv is there"
         );
     }
 }

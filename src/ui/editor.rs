@@ -355,11 +355,13 @@ pub(super) fn render_editor(frame: &mut Frame, app: &mut App, regions: &mut Regi
             Some(index) => {
                 let marks = search_marks(app, index);
                 let empty = Vec::new();
-                let problems = app
-                    .lsp
-                    .diagnostics
-                    .get(&app.open_files[index].path)
-                    .unwrap_or(&empty);
+                let path = &app.open_files[index].path;
+                let problems = app.lsp.diagnostics.get(path).unwrap_or(&empty);
+                let none = Default::default();
+                let margin = Margin {
+                    breakpoints: app.breakpoints.get(path).unwrap_or(&none),
+                    paused: app.paused_row(path),
+                };
                 render_file(
                     frame,
                     &mut app.open_files[index],
@@ -367,6 +369,7 @@ pub(super) fn render_editor(frame: &mut Frame, app: &mut App, regions: &mut Regi
                     focused && pane == active_pane,
                     &marks,
                     problems,
+                    &margin,
                 );
                 if pane == active_pane {
                     render_completion(frame, app, index, body);
@@ -380,6 +383,7 @@ pub(super) fn render_editor(frame: &mut Frame, app: &mut App, regions: &mut Regi
     } else {
         regions.pane_bodies[0]
     };
+    render_debug(frame, app, regions.editor_body);
     if let Some(zone) = app.tab_drop_zone() {
         render_drop_preview(frame, regions, zone);
     }
@@ -475,6 +479,88 @@ fn search_marks(app: &App, index: usize) -> Vec<(usize, usize, usize, bool)> {
         .collect()
 }
 
+/// The debugger's panel on the right of the editor (F27): what it is doing, the call stack,
+/// the variables of the paused frame and the program's output.
+fn render_debug(frame: &mut Frame, app: &App, body: Rect) {
+    use crate::debug::State;
+    let session = app.debug.as_ref();
+    if session.is_none() && !app.debug_building() {
+        return;
+    }
+    let width = (body.width / 2).clamp(24, 48);
+    let area = Rect::new(
+        body.right().saturating_sub(width),
+        body.y,
+        width,
+        body.height,
+    );
+    let room = width.saturating_sub(4) as usize;
+    let cut = |text: String| text.chars().take(room).collect::<String>();
+    let heading = |text: &str| Line::styled(text.to_owned(), Style::default().fg(ACTIVE));
+    let (state, colour) = match session.map(|session| &session.state) {
+        None => ("Building...".to_owned(), MUTED),
+        Some(State::Starting) => ("Starting...".to_owned(), MUTED),
+        Some(State::Running) => ("Running".to_owned(), Color::Green),
+        Some(State::Paused(reason)) => (format!("Paused: {reason}"), Color::Yellow),
+        Some(State::Ended(how)) => (how.clone(), MUTED),
+    };
+    let mut lines = vec![Line::styled(cut(state), Style::default().fg(colour))];
+    if let Some(session) = session {
+        if !session.frames.is_empty() {
+            lines.push(heading("Call stack"));
+            lines.extend(session.frames.iter().take(6).map(|frame| {
+                let place = frame.path.as_ref().map_or_else(String::new, |path| {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    format!("  {name}:{}", frame.row + 1)
+                });
+                Line::from(vec![
+                    Span::styled(cut(frame.name.clone()), Style::default().fg(TEXT)),
+                    Span::styled(place, Style::default().fg(MUTED)),
+                ])
+            }));
+        }
+        if !session.variables.is_empty() {
+            lines.push(heading("Variables"));
+            let shown = usize::from(body.height / 2).max(3);
+            lines.extend(session.variables.iter().take(shown).map(|(name, value)| {
+                Line::from(vec![
+                    Span::styled(format!("{name} = "), Style::default().fg(TEXT)),
+                    Span::styled(cut(value.clone()), Style::default().fg(MUTED)),
+                ])
+            }));
+        }
+        if !session.output.is_empty() {
+            lines.push(heading("Output"));
+            let left = usize::from(body.height.saturating_sub(2)).saturating_sub(lines.len());
+            let skip = session.output.len().saturating_sub(left);
+            lines.extend(
+                session
+                    .output
+                    .iter()
+                    .skip(skip)
+                    .map(|line| Line::styled(cut(line.clone()), Style::default().fg(TEXT))),
+            );
+        }
+    }
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(ACTIVE))
+                .title(" Debug ")
+                .title_bottom(Line::from(" F5 F10 F11  Shift+F5 stop ").right_aligned()),
+        ),
+        area,
+    );
+}
+
+/// What the margin marks for the debugger (F27).
+struct Margin<'a> {
+    breakpoints: &'a std::collections::BTreeSet<usize>,
+    paused: Option<usize>,
+}
+
 /// The suggestions of the language server under the cursor of the active file (F26).
 fn render_completion(frame: &mut Frame, app: &App, index: usize, body: Rect) {
     let Some((items, selected, _)) = app.completion_view() else {
@@ -547,6 +633,7 @@ fn render_file(
     focused: bool,
     marks: &[(usize, usize, usize, bool)],
     problems: &[Diagnostic],
+    margin: &Margin,
 ) {
     let title = format!(" {} — {} ", file.path.display(), file.language);
     if let Some(media) = &mut file.media {
@@ -644,7 +731,21 @@ fn render_file(
                 || " ".repeat(number_width),
                 |number| format!("{number:>number_width$}"),
             );
-            let mut line = vec![Span::styled(format!("{number} | "), number_style)];
+            // Before the `|`: a breakpoint (●) or the line the debugger is paused at (▶).
+            let mark = match row {
+                Some(row) if margin.paused == Some(row) => {
+                    Span::styled("▶", Style::default().fg(Color::Yellow))
+                }
+                Some(row) if margin.breakpoints.contains(&row) => {
+                    Span::styled("●", Style::default().fg(Color::Red))
+                }
+                _ => Span::raw(" "),
+            };
+            let mut line = vec![
+                Span::styled(number, number_style),
+                mark,
+                Span::styled("| ", number_style),
+            ];
             line.extend(skip_columns(spans, scroll_x));
             Line::from(line)
         })

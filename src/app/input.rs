@@ -477,6 +477,17 @@ impl App {
             self.go_to_definition();
             return;
         }
+        // Debugging (F27); Shift+F5 also arrives as F17.
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        match key.code {
+            KeyCode::F(5) if shift => return self.debug_stop(),
+            KeyCode::F(17) => return self.debug_stop(),
+            KeyCode::F(5) => return self.debug_start_or_continue(),
+            KeyCode::F(9) => return self.toggle_breakpoint(),
+            KeyCode::F(10) => return self.debug_step("next"),
+            KeyCode::F(11) => return self.debug_step("stepIn"),
+            _ => {}
+        }
         let file = &mut self.open_files[active];
         // Ctrl+Z on every system: on a Mac, Cmd+Z stays with the terminal.
         if ctrl && matches!(key.code, KeyCode::Char('z' | 'Z')) {
@@ -1737,6 +1748,62 @@ mod tests {
         press(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
         press(&mut app, KeyCode::F(12), KeyModifiers::NONE);
         assert!(app.completion.is_none());
+    }
+
+    #[test]
+    fn f9_marks_breakpoints_f5_builds_in_the_background_and_shift_f5_stops() {
+        use crate::debug::{Frame, State, fake};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.md");
+        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path.clone()).unwrap();
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
+        assert_eq!(
+            app.breakpoints[&path].iter().copied().collect::<Vec<_>>(),
+            [1]
+        );
+        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
+        assert!(app.breakpoints[&path].is_empty(), "F9 again takes it off");
+
+        // F5 plans and builds in a thread; the answer comes in a tick.
+        press(&mut app, KeyCode::F(5), KeyModifiers::NONE);
+        assert!(app.debug_building());
+        let start = Instant::now();
+        while app.debug_building() && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+            app.tick_at(Instant::now());
+        }
+        assert_eq!(app.status, "SozoIDE does not know how to debug .md files");
+        assert!(app.debug.is_none());
+
+        // Paused: F10 steps, the margin knows the line; Shift+F5 (or F17) closes the panel.
+        let frame = Frame {
+            id: 1,
+            name: "main".into(),
+            path: Some(path.clone()),
+            row: 2,
+        };
+        app.debug = Some(fake(
+            State::Paused("breakpoint".into()),
+            vec![frame],
+            Vec::new(),
+        ));
+        assert_eq!(app.paused_row(&path), Some(2));
+        press(&mut app, KeyCode::F(10), KeyModifiers::NONE);
+        assert_eq!(app.debug.as_ref().unwrap().state, State::Running);
+        assert_eq!(app.paused_row(&path), None);
+        press(&mut app, KeyCode::F(5), KeyModifiers::SHIFT);
+        assert!(app.debug.is_none());
+        assert_eq!(app.status, "Debugging stopped");
+        app.debug = Some(fake(
+            State::Ended("Exited with code 0".into()),
+            Vec::new(),
+            Vec::new(),
+        ));
+        press(&mut app, KeyCode::F(17), KeyModifiers::NONE);
+        assert!(app.debug.is_none());
     }
 
     #[test]
