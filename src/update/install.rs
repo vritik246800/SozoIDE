@@ -56,8 +56,10 @@ pub fn install_and_restart(file: &Path, root: &Path) -> Result<()> {
     match Package::for_executable(&exe) {
         Package::Dmg => install_dmg(file, &exe),
         Package::Msi => install_msi(file, &exe),
-        Package::Deb => run(sudo("dpkg").arg("-i").arg(file)),
-        Package::Rpm => run(sudo("rpm").arg("-U").arg(file)),
+        // The package only recommends git, curl and ffmpeg (F24): what is missing is installed
+        // here, while `sudo` can still ask for the password.
+        Package::Deb => run(sudo("dpkg").arg("-i").arg(file)).map(|()| super::deps::install_here()),
+        Package::Rpm => run(sudo("rpm").arg("-U").arg(file)).map(|()| super::deps::install_here()),
         Package::Archive => install_archive(file, &exe),
     }
     .context("Could not install the update. Download it again from the SozoIDE website")?;

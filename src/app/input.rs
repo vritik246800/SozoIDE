@@ -391,7 +391,21 @@ impl App {
     }
 
     fn handle_explorer_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
+            KeyCode::Char('c' | 'C') if ctrl => self.hold_selected_entry(false),
+            KeyCode::Char('x' | 'X') if ctrl => self.hold_selected_entry(true),
+            KeyCode::Char('v' | 'V') if ctrl => self.paste_selected_entry(),
+            KeyCode::Char('r' | 'R') if ctrl => {
+                if let Some(entry) = self
+                    .entries
+                    .get(self.selected_entry)
+                    .filter(|entry| !entry.is_dir)
+                {
+                    let path = entry.path.clone();
+                    self.run_file(path);
+                }
+            }
             KeyCode::Up => self.selected_entry = self.selected_entry.saturating_sub(1),
             KeyCode::Down => {
                 self.selected_entry =
@@ -412,7 +426,27 @@ impl App {
             self.close_tab(active);
             return;
         }
+        if ctrl && matches!(key.code, KeyCode::Char('r' | 'R')) {
+            let path = self.open_files[active].path.clone();
+            return self.run_file(path);
+        }
         let file = &mut self.open_files[active];
+        if let Some(media) = &mut file.media {
+            // A model turns, tilts and zooms; a video pauses.
+            let arrow = match key.code {
+                KeyCode::Left => Some((-1.0, 0.0)),
+                KeyCode::Right => Some((1.0, 0.0)),
+                KeyCode::Up => Some((0.0, -1.0)),
+                KeyCode::Down => Some((0.0, 1.0)),
+                _ => None,
+            };
+            let character = match key.code {
+                KeyCode::Char(character) if !ctrl => Some(character),
+                _ => None,
+            };
+            media.handle_key(character, arrow);
+            return;
+        }
         if file.image.is_some() {
             // A PDF turns its pages; an image has nothing to edit.
             if let Some((page, _)) = file.page() {
@@ -431,11 +465,39 @@ impl App {
             }
             return;
         }
+        // IntelliSense (F26): the open list takes its keys first.
+        if self.completion.is_some() && self.handle_completion_key(key) {
+            return;
+        }
+        if ctrl && key.code == KeyCode::Char(' ') {
+            self.request_completion();
+            return;
+        }
+        if key.code == KeyCode::F(12) {
+            self.go_to_definition();
+            return;
+        }
+        // Debugging (F27); Shift+F5 also arrives as F17.
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        match key.code {
+            KeyCode::F(5) if shift => return self.debug_stop(),
+            KeyCode::F(17) => return self.debug_stop(),
+            KeyCode::F(5) => return self.debug_start_or_continue(),
+            KeyCode::F(9) => return self.toggle_breakpoint(),
+            KeyCode::F(10) => return self.debug_step("next"),
+            KeyCode::F(11) => return self.debug_step("stepIn"),
+            _ => {}
+        }
+        let file = &mut self.open_files[active];
         // Ctrl+Z on every system: on a Mac, Cmd+Z stays with the terminal.
         if ctrl && matches!(key.code, KeyCode::Char('z' | 'Z')) {
             if !file.undo() {
                 self.status = "Nothing to undo".into();
             }
+            return;
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('v' | 'V')) {
+            self.paste_clipboard();
             return;
         }
         let mut copied = None;
@@ -472,7 +534,10 @@ impl App {
                 copied = file.selected_text();
                 file.delete_selection();
             }
-            KeyCode::Char(character) if !ctrl => file.insert(character),
+            KeyCode::Char(character) if !ctrl => {
+                file.insert(character);
+                self.typed(character);
+            }
             _ => {}
         }
         if let Some(text) = copied {
@@ -658,10 +723,18 @@ impl App {
                         self.select_tab(split.other);
                     }
                     let area = self.regions.pane_bodies[pane];
+                    if self
+                        .active_tab
+                        .and_then(|index| self.open_files.get(index))
+                        .is_some_and(|file| file.media.is_some())
+                    {
+                        self.turning = Some(point);
+                        return;
+                    }
                     if let Some(file) = self
                         .active_tab
                         .and_then(|index| self.open_files.get_mut(index))
-                        && file.image.is_none()
+                        && file.is_text()
                         && contains(area, point)
                     {
                         // A click starts a selection that a drag makes longer; Shift extends
@@ -688,8 +761,30 @@ impl App {
                     self.focus = Focus::Explorer;
                     let index = self.explorer_scroll + usize::from(point.1 - explorer.y - 1);
                     self.open_entry_menu((index < self.entries.len()).then_some(index), point);
+                } else if free
+                    && let Some(index) = self
+                        .pane_at(point)
+                        .filter(|index| self.open_files[*index].is_text())
+                {
+                    if Some(index) != self.active_tab {
+                        self.flush_active_file();
+                        self.select_tab(index);
+                    }
+                    self.focus = Focus::Editor;
+                    self.open_editor_menu(point);
                 } else {
                     self.entry_menu = None;
+                }
+            }
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) if self.turning.is_some() => {
+                let (column, row) = self.turning.replace(point).unwrap_or(point);
+                if let Some(media) = self
+                    .active_tab
+                    .and_then(|index| self.open_files.get_mut(index))
+                    .and_then(|file| file.media.as_mut())
+                {
+                    let columns = i32::from(point.0) - i32::from(column);
+                    media.drag(columns, i32::from(point.1) - i32::from(row));
                 }
             }
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) if self.selecting => {
@@ -697,7 +792,7 @@ impl App {
                 if let Some(file) = self
                     .active_tab
                     .and_then(|index| self.open_files.get_mut(index))
-                    && file.image.is_none()
+                    && file.is_text()
                 {
                     // Past the top or the bottom of the text the view follows the selection.
                     let (row, visual_column) = if point.1 <= area.y {
@@ -754,6 +849,7 @@ impl App {
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
                 self.drag = None;
                 self.selecting = false;
+                self.turning = None;
                 if let Some(drag) = self.tab_drag.take()
                     && let Some(zone) = drag.zone
                 {
@@ -798,6 +894,11 @@ impl App {
         } else if contains(self.regions.right_terminal, point) {
             self.right_terminal.scroll(up, 3);
         } else if let Some(index) = self.pane_at(point) {
+            // The wheel zooms a model; pictures and videos do not scroll.
+            if let Some(media) = &mut self.open_files[index].media {
+                media.wheel(up);
+                return;
+            }
             if let Some((page, _)) = self.open_files[index].page() {
                 // One page per turn of the wheel, however many events it sends.
                 let now = Instant::now();
@@ -1145,7 +1246,7 @@ mod tests {
         app.show_explorer = true;
         app.regions.explorer = Rect::new(0, 0, 30, 20);
         app.open_file(folder.join("a.md")).unwrap();
-        app.insert_editor_character('!');
+        app.editor_paste("!");
         // The project folder has no Delete.
         mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 10);
         assert!(
@@ -1234,7 +1335,7 @@ mod tests {
 
         // On the src folder: a new file goes inside it, opens and is selected.
         mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 1);
-        assert_eq!(app.entry_menu.as_ref().unwrap().actions.len(), 4);
+        assert_eq!(app.entry_menu.as_ref().unwrap().actions.len(), 6);
         app.regions.entry_menu_items = vec![(EntryAction::NewFile, Rect::new(3, 2, 14, 1))];
         mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 5, 2);
         assert!(app.entry_menu.is_none());
@@ -1291,6 +1392,418 @@ mod tests {
             (tab.path.as_path(), tab.name.as_str()),
             (renamed.as_path(), "lib.rs")
         );
+    }
+
+    #[test]
+    fn the_explorer_cuts_copies_and_pastes_with_keys_and_the_menu() {
+        use crossterm::event::MouseButton;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::create_dir(root.join("docs")).unwrap();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        let mut app = App::new(root.to_path_buf()).unwrap();
+        app.regions.explorer = Rect::new(0, 0, 30, 20);
+        let select = |app: &mut App, name: &str| {
+            app.focus = Focus::Explorer;
+            app.selected_entry = app
+                .entries
+                .iter()
+                .position(|entry| entry.path == root.join(name))
+                .unwrap();
+        };
+        // Nothing kept: Paste is not in the menu and Ctrl+V says what to do.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 1);
+        assert!(
+            !app.entry_menu
+                .as_ref()
+                .unwrap()
+                .actions
+                .contains(&EntryAction::Paste)
+        );
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        select(&mut app, "a.txt");
+        press(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert!(app.status.contains("first"));
+
+        // Ctrl+C, Ctrl+V next to the file: a copy with a free name, selected.
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        press(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert!(root.join("a copy.txt").is_file());
+        assert_eq!(
+            app.entries[app.selected_entry].path,
+            root.join("a copy.txt")
+        );
+        // The menu of a folder pastes into it, which opens.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 1);
+        let menu = app.entry_menu.as_ref().unwrap();
+        assert_eq!(menu.target, root.join("docs"));
+        assert_eq!(
+            menu.actions,
+            [
+                EntryAction::NewFile,
+                EntryAction::NewFolder,
+                EntryAction::Cut,
+                EntryAction::Copy,
+                EntryAction::Paste,
+                EntryAction::Rename,
+                EntryAction::Delete
+            ]
+        );
+        app.choose_entry_action(EntryAction::Paste);
+        assert!(root.join("docs/a.txt").is_file());
+        assert!(
+            app.entries
+                .iter()
+                .any(|entry| entry.path == root.join("docs/a.txt"))
+        );
+
+        // Ctrl+X moves once, and the open tab follows; never over a file there.
+        app.open_file(root.join("a copy.txt")).unwrap();
+        select(&mut app, "a.txt");
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
+        select(&mut app, "docs");
+        press(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert!(app.status.contains("already exists") && root.join("a.txt").is_file());
+        select(&mut app, "a copy.txt");
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
+        select(&mut app, "docs");
+        press(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert!(root.join("docs/a copy.txt").is_file() && !root.join("a copy.txt").exists());
+        assert_eq!(app.open_files[0].path, root.join("docs/a copy.txt"));
+        assert!(app.file_clipboard.is_none(), "a move is done once");
+    }
+
+    #[test]
+    fn the_editor_menu_and_ctrl_v_cut_copy_and_paste_text() {
+        use crossterm::event::MouseButton;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.txt");
+        std::fs::write(&path, "alpha beta\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path).unwrap();
+        app.regions.editor_body = Rect::new(30, 2, 60, 20);
+        app.regions.pane_bodies[0] = app.regions.editor_body;
+        let right_click = |app: &mut App| {
+            mouse(app, MouseEventKind::Down(MouseButton::Right), 40, 4);
+            let menu = app.entry_menu.as_ref().unwrap();
+            assert!(menu.editor);
+            menu.actions.clone()
+        };
+        // Without a selection there is only Paste, and nothing to paste yet.
+        assert_eq!(right_click(&mut app), [EntryAction::Paste]);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.status, "The clipboard is empty");
+        for _ in 0..5 {
+            press(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
+        }
+        assert_eq!(
+            right_click(&mut app),
+            [EntryAction::Cut, EntryAction::Copy, EntryAction::Paste]
+        );
+        app.choose_entry_action(EntryAction::Copy);
+        assert_eq!(app.clipboard.take().as_deref(), Some("alpha"));
+        press(&mut app, KeyCode::End, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert_eq!(app.active_file().unwrap().lines, ["alpha betaalpha"]);
+        press(&mut app, KeyCode::Home, KeyModifiers::SHIFT);
+        right_click(&mut app);
+        app.choose_entry_action(EntryAction::Cut);
+        assert_eq!(app.active_file().unwrap().lines, [""]);
+        right_click(&mut app);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.active_file().unwrap().lines, ["alpha betaalpha"]);
+        press(&mut app, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(
+            app.active_file().unwrap().lines,
+            [""],
+            "a paste undoes at once"
+        );
+    }
+
+    #[test]
+    fn changes_by_other_programs_reach_the_open_tabs_and_the_explorer() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        std::fs::write(root.join("b.txt"), "two\n").unwrap();
+        let mut app = App::new(root.to_path_buf()).unwrap();
+        app.open_file(root.join("a.txt")).unwrap();
+        app.open_file(root.join("b.txt")).unwrap();
+        app.editor_paste("!");
+        std::fs::write(root.join("a.txt"), "uno\n").unwrap();
+        std::fs::write(root.join("b.txt"), "dos dos\n").unwrap();
+        std::fs::write(root.join("c.txt"), "").unwrap();
+        let now = Instant::now();
+        app.tick_at(now);
+        assert_eq!(app.open_files[0].lines, ["one"], "compared once a second");
+        // Before the autosave of the edit in b.txt (2 s).
+        app.tick_at(now + Duration::from_millis(1500));
+        assert_eq!(app.open_files[0].lines, ["uno"]);
+        assert_eq!(app.open_files[1].lines, ["!two"]);
+        assert!(app.open_files[1].dirty);
+        assert_eq!(app.status, "b.txt changed on disk: your edits are kept");
+        assert!(
+            app.entries
+                .iter()
+                .any(|entry| entry.path == root.join("c.txt"))
+        );
+    }
+
+    #[test]
+    fn models_turn_and_zoom_with_keys_and_the_mouse_and_videos_pause() {
+        use crossterm::event::MouseButton;
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("ship.glb"),
+            crate::media::sample_glb(),
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("clip.mp4"), "not a video").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(directory.path().join("ship.glb")).unwrap();
+        app.regions.editor_body = Rect::new(30, 2, 60, 20);
+        app.regions.pane_bodies[0] = app.regions.editor_body;
+        let drawn = |app: &mut App| {
+            let media = app.open_files[0].media.as_mut().unwrap();
+            media.lines(40, 15).to_vec()
+        };
+        let mut last = drawn(&mut app);
+        let mut changed = |app: &mut App, what: &str| {
+            let now = drawn(app);
+            assert_ne!(now, last, "{what}");
+            last = now;
+        };
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        changed(&mut app, "→ turns");
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        changed(&mut app, "↑ tilts");
+        press(&mut app, KeyCode::Char('+'), KeyModifiers::NONE);
+        changed(&mut app, "+ comes closer");
+        press(&mut app, KeyCode::Char('-'), KeyModifiers::NONE);
+        changed(&mut app, "- goes back");
+        mouse(&mut app, MouseEventKind::ScrollUp, 50, 10);
+        changed(&mut app, "the wheel zooms");
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 50, 10);
+        mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 56, 12);
+        changed(&mut app, "a drag turns");
+        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 56, 12);
+        assert!(app.turning.is_none() && !app.selecting);
+        assert!(
+            app.open_files[0].lines.is_empty(),
+            "nothing typed into a model"
+        );
+
+        // A video pauses with Space; it never takes typing either.
+        app.open_file(directory.path().join("clip.mp4")).unwrap();
+        let hint = |app: &App| app.active_file().unwrap().media.as_ref().unwrap().hint();
+        assert_eq!(hint(&app).as_deref(), Some("Space: pause"));
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(hint(&app).as_deref(), Some("Paused  Space: play"));
+        app.editor_paste("text");
+        assert!(app.active_file().unwrap().lines.is_empty());
+    }
+
+    #[test]
+    fn a_gif_plays_in_its_tab_and_installed_tools_reach_the_status_bar() {
+        use image::{Delay, Frame, Rgba, RgbaImage, codecs::gif::GifEncoder};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("blink.gif");
+        let mut encoder = GifEncoder::new(std::fs::File::create(&path).unwrap());
+        for colour in [[255, 0, 0, 255], [0, 0, 255, 255]] {
+            let frame = RgbaImage::from_pixel(4, 4, Rgba(colour));
+            let delay = Delay::from_numer_denom_ms(100, 1);
+            encoder
+                .encode_frame(Frame::from_parts(frame, 0, 0, delay))
+                .unwrap();
+        }
+        drop(encoder);
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path).unwrap();
+        let hint = |app: &App| app.active_file().unwrap().media.as_ref().unwrap().hint();
+        assert_eq!(hint(&app).as_deref(), Some("Frame 1/2"));
+        app.tick_at(Instant::now() + Duration::from_millis(150));
+        assert_eq!(hint(&app).as_deref(), Some("Frame 2/2"));
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.dependencies = Some(receiver);
+        app.tick_at(Instant::now());
+        assert_ne!(app.status, "Installed ffmpeg");
+        sender.send("Installed ffmpeg".into()).unwrap();
+        app.tick_at(Instant::now());
+        assert_eq!(app.status, "Installed ffmpeg");
+        assert!(app.dependencies.is_none());
+    }
+
+    #[test]
+    fn ctrl_r_runs_the_file_in_the_bottom_terminal_and_stays_with_the_shell_there() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = if cfg!(windows) {
+            "hello.bat"
+        } else {
+            "hello.sh"
+        };
+        std::fs::write(directory.path().join(script), "echo hello\n").unwrap();
+        std::fs::write(directory.path().join("notes.md"), "# notes\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(directory.path().join("notes.md")).unwrap();
+        app.editor_paste("unsaved");
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert_eq!(app.status, "SozoIDE does not know how to run .md files");
+        assert!(!app.show_bottom_terminal);
+        assert!(!app.open_files[0].dirty, "Ctrl+R saves first");
+
+        app.open_file(directory.path().join(script)).unwrap();
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert!(app.status.starts_with("Running"), "{}", app.status);
+        assert!(app.show_bottom_terminal && app.focus == Focus::BottomTerminal);
+        // In the terminal Ctrl+R belongs to the shell (history search).
+        app.status.clear();
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert!(app.status.is_empty());
+
+        // The Explorer runs the selected file.
+        app.focus = Focus::Explorer;
+        app.show_bottom_terminal = false;
+        app.selected_entry = app
+            .entries
+            .iter()
+            .position(|entry| entry.path.ends_with(script))
+            .unwrap();
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert!(app.show_bottom_terminal && app.status.starts_with("Running"));
+    }
+
+    #[test]
+    fn suggestions_narrow_as_you_type_and_the_chosen_one_replaces_the_word() {
+        use crate::lsp::{Event, Item};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("main.rs");
+        std::fs::write(&path, "fn main() {\n    let list = Vec::new();\n}\n").unwrap();
+        std::fs::write(directory.path().join("lib.rs"), "pub fn helper() {}\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path.clone()).unwrap();
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut app, KeyCode::End, KeyModifiers::NONE);
+        app.editor_paste("\n    list.pu");
+        let item = |label: &str, insert: &str| Item {
+            label: label.into(),
+            detail: String::new(),
+            insert: insert.into(),
+        };
+        let answer = |app: &mut App, row| {
+            app.lsp_event(Event::Completion {
+                path: path.clone(),
+                row,
+                column: 11,
+                items: vec![
+                    item("push", "push"),
+                    item("pop", "pop"),
+                    item("as_ptr", "as_ptr"),
+                ],
+            })
+        };
+        // A late answer for another row is dropped.
+        answer(&mut app, 0);
+        assert!(app.completion.is_none());
+        answer(&mut app, 2);
+        let labels = |app: &App| {
+            let (items, ..) = app.completion_view().unwrap();
+            items
+                .iter()
+                .map(|item| item.label.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(labels(&app), ["push"], "pu: push only");
+        press(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(
+            labels(&app),
+            ["push", "pop", "as_ptr"],
+            "p: starting with it, then the rest"
+        );
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.active_file().unwrap().lines[2], "    list.pop");
+        assert!(app.completion.is_none());
+        // Esc closes it; a key the list does not use reaches the editor.
+        answer(&mut app, 2);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.completion.is_none());
+        answer(&mut app, 2);
+        press(&mut app, KeyCode::Char('('), KeyModifiers::NONE);
+        assert!(app.completion.is_none());
+        assert_eq!(app.active_file().unwrap().lines[2], "    list.pop(");
+
+        // A definition elsewhere opens there; messages reach the status bar.
+        app.lsp_event(Event::Definition {
+            path: directory.path().join("lib.rs"),
+            row: 0,
+            column: 7,
+        });
+        let file = app.active_file().unwrap();
+        assert!(file.path.ends_with("lib.rs"));
+        assert_eq!((file.cursor_row, file.cursor_column), (0, 7));
+        app.lsp_event(Event::Message("rust-analyzer stopped".into()));
+        assert_eq!(app.status, "rust-analyzer stopped");
+        // Without a server Ctrl+Space and F12 do nothing harmful.
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        press(&mut app, KeyCode::F(12), KeyModifiers::NONE);
+        assert!(app.completion.is_none());
+    }
+
+    #[test]
+    fn f9_marks_breakpoints_f5_builds_in_the_background_and_shift_f5_stops() {
+        use crate::debug::{Frame, State, fake};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.md");
+        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path.clone()).unwrap();
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
+        assert_eq!(
+            app.breakpoints[&path].iter().copied().collect::<Vec<_>>(),
+            [1]
+        );
+        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
+        assert!(app.breakpoints[&path].is_empty(), "F9 again takes it off");
+
+        // F5 plans and builds in a thread; the answer comes in a tick.
+        press(&mut app, KeyCode::F(5), KeyModifiers::NONE);
+        assert!(app.debug_building());
+        let start = Instant::now();
+        while app.debug_building() && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+            app.tick_at(Instant::now());
+        }
+        assert_eq!(app.status, "SozoIDE does not know how to debug .md files");
+        assert!(app.debug.is_none());
+
+        // Paused: F10 steps, the margin knows the line; Shift+F5 (or F17) closes the panel.
+        let frame = Frame {
+            id: 1,
+            name: "main".into(),
+            path: Some(path.clone()),
+            row: 2,
+        };
+        app.debug = Some(fake(
+            State::Paused("breakpoint".into()),
+            vec![frame],
+            Vec::new(),
+        ));
+        assert_eq!(app.paused_row(&path), Some(2));
+        press(&mut app, KeyCode::F(10), KeyModifiers::NONE);
+        assert_eq!(app.debug.as_ref().unwrap().state, State::Running);
+        assert_eq!(app.paused_row(&path), None);
+        press(&mut app, KeyCode::F(5), KeyModifiers::SHIFT);
+        assert!(app.debug.is_none());
+        assert_eq!(app.status, "Debugging stopped");
+        app.debug = Some(fake(
+            State::Ended("Exited with code 0".into()),
+            Vec::new(),
+            Vec::new(),
+        ));
+        press(&mut app, KeyCode::F(17), KeyModifiers::NONE);
+        assert!(app.debug.is_none());
     }
 
     #[test]

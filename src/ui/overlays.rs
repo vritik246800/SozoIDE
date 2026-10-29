@@ -360,7 +360,9 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             keys: vec![
                 ("Enter", "Open a file or a folder"),
                 ("Right-click", "New, rename, delete (Explorer)"),
+                ("Ctrl+X/C/V", "Cut, copy, paste (Explorer)"),
                 ("Ctrl+W", "Close the tab"),
+                ("Ctrl+R", "Run the file or its project"),
                 ("Wheel on the tabs", "Scroll the tabs, or click < and >"),
                 ("Drag a tab", "To an editor edge: split the editor"),
                 ("", "To the other pane: move it there"),
@@ -383,6 +385,10 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
                 ("Ctrl+A", "Select all"),
                 ("Ctrl+Z", "Undo the last edit"),
                 ("Ctrl+C / Ctrl+X", "Copy / cut the selection"),
+                ("Ctrl+V", "Paste"),
+                ("Ctrl+Space", "Suggestions (language server)"),
+                ("F12", "Go to the definition"),
+                ("Right-click", "Cut, copy, paste the text"),
                 (
                     if mac {
                         "Delete/fn+Delete"
@@ -430,6 +436,27 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
                     },
                     "First / last page",
                 ),
+            ],
+        },
+        HelpSection {
+            title: "Debug",
+            color: Color::LightRed,
+            keys: vec![
+                ("F9", "Breakpoint on the line"),
+                ("F5", "Build and debug, or continue"),
+                ("F10 / F11", "Step over / into"),
+                ("Shift+F5", "Stop and close the panel"),
+            ],
+        },
+        HelpSection {
+            title: "3D models and videos",
+            color: Color::LightMagenta,
+            keys: vec![
+                ("Left / Right", "Turn the model"),
+                ("Up / Down", "Tilt the model"),
+                ("+ / - or wheel", "Zoom in / out"),
+                ("Drag", "Turn it with the mouse"),
+                ("Space", "Pause or play a video"),
             ],
         },
         HelpSection {

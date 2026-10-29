@@ -1,6 +1,6 @@
 [package]
 name = "SozoIDE"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 authors = ["Vritik Valabdas"]
 description = "A terminal-native integrated development environment"
@@ -18,16 +18,20 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 crossterm = "0.29"
 devicons = "0.6.13"
 directories = "6.0"
+gltf = "1.4"
 hayro = "0.8.0"
+glam = "0.34"
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
 ignore = "0.4"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "ico", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "ico", "webp", "tiff", "tga", "pnm", "qoi", "hdr"] }
 keyring = "3.6"
 mermaid-text = "0.57.0"
 portable-pty = "0.9"
 ratatui = "0.30.2"
+rayon = "1.12"
 ratatui-image = { version = "10.0", default-features = false, features = ["crossterm"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "mysql", "any"] }
 syntect = { version = "5.3", default-features = false, features = ["parsing", "dump-load", "default-syntaxes", "regex-fancy"] }
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "sync"] }
@@ -51,6 +55,9 @@ name = "sozoide"
 maintainer = "Vritik Valabdas"
 section = "devel"
 priority = "optional"
+# Recommended, not required: `dpkg -i` in the updater does not fail without them, and the app
+# installs what is missing (F24).
+recommends = "git, curl, ffmpeg"
 assets = [
     ["target/release/sozo", "usr/bin/sozo", "755"],
     ["packaging/linux/sozoide.desktop", "usr/share/applications/sozoide.desktop", "644"],
@@ -64,6 +71,13 @@ assets = [
     { source = "packaging/linux/sozoide.desktop", dest = "/usr/share/applications/sozoide.desktop", mode = "644" },
     { source = "assets/Sozo.png", dest = "/usr/share/icons/hicolor/256x256/apps/sozoide.png", mode = "644" },
 ]
+
+# Weak dependencies (F24): `rpm -U` in the updater does not need them. Fedora calls FFmpeg
+# `ffmpeg-free`; RPM Fusion, `ffmpeg`.
+[package.metadata.generate-rpm.recommends]
+git = ""
+curl = ""
+"(ffmpeg or ffmpeg-free)" = ""
 
 [package.metadata.wix]
 include = ["packaging/windows/main.wxs"]

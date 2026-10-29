@@ -2,7 +2,8 @@ use std::{
     io::Write,
     path::PathBuf,
     process::{Command, Stdio},
-    time::{Duration, Instant},
+    sync::mpsc::Receiver,
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{Context, Result};
@@ -16,15 +17,21 @@ use crate::{
     update::{Notes, UpdateState, Updater, Welcome, notes_since},
 };
 
+mod debugging;
 mod explorer;
 mod input;
+mod intellisense;
 mod layout;
 mod motion;
 
 pub use explorer::{EntryAction, EntryMenu, FileEntry, NamePrompt};
+pub use intellisense::{Completion, SHOWN_ITEMS};
 use layout::{DragTarget, TabDrag, inner_size};
 pub use layout::{DropZone, Focus, Overlay, Regions, Split, SplitDirection, TabBar};
 pub(crate) use motion::AppMotion;
+
+/// How often the open files and the Explorer are compared with the disk.
+const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Pages of the first-start tutorial (`ui::overlays` writes them).
 pub const TUTORIAL_STEPS: usize = 6;
@@ -78,8 +85,30 @@ pub struct App {
     pub overlay_scroll: u16,
     /// Text copied in the editor, for `main` to hand to the terminal (OSC 52).
     pub clipboard: Option<String>,
+    /// Breakpoints by file (rows from 0), the build running before a debug session and the
+    /// session (F27).
+    pub breakpoints: std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>,
+    debug_build: Option<Receiver<crate::debug::Built>>,
+    pub debug: Option<crate::debug::Session>,
+    /// The language servers (F26), the suggestions open under the cursor and when the edited
+    /// text last went to the servers.
+    pub lsp: crate::lsp::Lsp,
+    pub completion: Option<Completion>,
+    lsp_synced: Instant,
+    /// The message of the installation of git, curl or ffmpeg running in the background (F24).
+    dependencies: Option<Receiver<String>>,
+    /// The last text copied here, for Ctrl+V when the system clipboard cannot be read.
+    copied: Option<String>,
+    /// The file or folder Copy or Cut (true) kept in the Explorer, for Paste.
+    pub file_clipboard: Option<(PathBuf, bool)>,
+    /// When the open files and the folders on screen were last compared with the disk, and the
+    /// modification times of those folders.
+    watched: Instant,
+    folders: Vec<Option<SystemTime>>,
     /// A mouse drag that started in the editor text selects.
     selecting: bool,
+    /// Where a drag over a 3D model was last: moving from there turns it.
+    turning: Option<(u16, u16)>,
     /// The last time the wheel turned a PDF page: one page per gesture, not per event.
     page_turned: Option<Instant>,
     pub split: Option<Split>,
@@ -108,6 +137,10 @@ impl App {
         } else {
             Welcome::None
         };
+        // A new installation or a new version installs the tools it is missing (Q41).
+        let dependencies =
+            (welcome != Welcome::None).then(crate::update::deps::install_in_background);
+        let lsp_root = root.clone();
         let mut app = Self {
             root,
             entries: Vec::new(),
@@ -143,7 +176,19 @@ impl App {
             notes: Vec::new(),
             overlay_scroll: 0,
             clipboard: None,
+            dependencies,
+            lsp: crate::lsp::Lsp::new(lsp_root, !cfg!(test)),
+            completion: None,
+            lsp_synced: now,
+            breakpoints: Default::default(),
+            debug_build: None,
+            debug: None,
+            copied: None,
+            file_clipboard: None,
+            watched: now,
+            folders: Vec::new(),
             selecting: false,
+            turning: None,
             page_turned: None,
             split: None,
             tab_bars: [TabBar::default(); 2],
@@ -199,6 +244,28 @@ impl App {
         for index in due {
             self.save_file(index);
         }
+        // GIFs and videos move on, also in the pane that is not focused.
+        for media in self
+            .open_files
+            .iter_mut()
+            .filter_map(|file| file.media.as_mut())
+        {
+            media.tick(now);
+        }
+        if now.duration_since(self.watched) >= WATCH_INTERVAL {
+            self.watched = now;
+            self.watch_disk();
+        }
+        if let Some(message) = self
+            .dependencies
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok())
+        {
+            self.status = message;
+            self.dependencies = None;
+        }
+        self.tick_lsp(now);
+        self.tick_debug();
         self.database.tick_at(now);
         // Copy in the SQL tab: the app owns the clipboard.
         if let Some(text) = self.database.copy_request.take() {
@@ -213,6 +280,48 @@ impl App {
             }
         }
         self.tick_update();
+    }
+
+    /// Follows what other programs do to the project: open files read again (unless they have
+    /// edits not saved yet, which stay, Q40) and the Explorer when a folder on screen changes.
+    fn watch_disk(&mut self) {
+        for file in &mut self.open_files {
+            if !file.changed_on_disk() {
+                continue;
+            }
+            self.status = if file.dirty {
+                file.keep_edits();
+                format!("{} changed on disk: your edits are kept", file.name)
+            } else {
+                match file.reload() {
+                    Ok(()) => format!("Reloaded {}", file.name),
+                    Err(error) => error.to_string(),
+                }
+            };
+        }
+        if self.folder_times() != self.folders
+            && let Err(error) = self.refresh_entries()
+        {
+            self.status = error.to_string();
+        }
+    }
+
+    /// The modification times of the project folder and the folders open in the Explorer:
+    /// they change when something in them is created, renamed or deleted.
+    fn folder_times(&self) -> Vec<Option<SystemTime>> {
+        std::iter::once(&self.root)
+            .chain(
+                self.entries
+                    .iter()
+                    .filter(|entry| entry.expanded)
+                    .map(|entry| &entry.path),
+            )
+            .map(|path| {
+                std::fs::metadata(path)
+                    .and_then(|data| data.modified())
+                    .ok()
+            })
+            .collect()
     }
 
     /// Shows the update notice once nothing else is on screen; quits to install when the
@@ -272,7 +381,87 @@ impl App {
             system_clipboard(text.clone());
         }
         self.status = format!("Copied {} characters", text.chars().count());
+        self.copied = Some(text.clone());
         self.clipboard = Some(text);
+    }
+
+    /// Ctrl+R (F25): saves everything and types the command that runs `file` into the bottom
+    /// terminal, which opens and takes the focus.
+    pub(super) fn run_file(&mut self, file: PathBuf) {
+        self.flush_all_files();
+        let scratch = std::env::temp_dir().join("sozo-run");
+        let command = crate::run::command(
+            &file,
+            &self.root,
+            std::env::consts::OS,
+            crate::update::deps::on_path,
+            &scratch,
+        );
+        match command {
+            Ok(line) => {
+                self.show_bottom_terminal = true;
+                self.focus = Focus::BottomTerminal;
+                self.bottom_terminal.send_text(&format!("{line}\r"));
+                self.status = format!("Running {}", file.display());
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    /// Ctrl+V and Paste in the editor: the system clipboard, or the last text copied here.
+    pub(super) fn paste_clipboard(&mut self) {
+        let text = if cfg!(test) {
+            None
+        } else {
+            system_clipboard_text()
+        }
+        .or_else(|| self.copied.clone());
+        match text {
+            Some(text) => self.editor_paste(&text),
+            None => self.status = "The clipboard is empty".into(),
+        }
+    }
+
+    /// The editor's right-click menu: Cut and Copy with a selection, Paste always (F02).
+    pub(super) fn open_editor_menu(&mut self, position: (u16, u16)) {
+        let Some(file) = self.active_tab.and_then(|index| self.open_files.get(index)) else {
+            return;
+        };
+        let mut actions = Vec::new();
+        if file.selection().is_some() {
+            actions.extend([EntryAction::Cut, EntryAction::Copy]);
+        }
+        actions.push(EntryAction::Paste);
+        self.entry_menu = Some(EntryMenu {
+            target: file.path.clone(),
+            actions,
+            position,
+            selected: 0,
+            editor: true,
+        });
+    }
+
+    /// Cut, Copy or Paste from the editor's menu.
+    pub(super) fn editor_action(&mut self, action: EntryAction) {
+        let Some(file) = self
+            .active_tab
+            .and_then(|index| self.open_files.get_mut(index))
+        else {
+            return;
+        };
+        let text = match action {
+            EntryAction::Copy => file.selected_text(),
+            EntryAction::Cut => {
+                let text = file.selected_text();
+                file.delete_selection();
+                text
+            }
+            EntryAction::Paste => return self.paste_clipboard(),
+            _ => None,
+        };
+        if let Some(text) = text {
+            self.copy(text);
+        }
     }
 
     pub fn icon(&self, name: &str) -> char {
@@ -293,6 +482,11 @@ impl App {
         }
         let mut file = OpenFile::load(path, &mut self.picker)?;
         file.pane = self.active_pane();
+        if file.is_text()
+            && let Some(message) = self.lsp.open(&file.path, &file.text(), file.edits)
+        {
+            self.status = message;
+        }
         self.flush_active_file();
         self.status = format!("Opened {}", file.name);
         self.open_files.push(file);
@@ -401,6 +595,10 @@ impl App {
             return;
         }
         self.save_file(index);
+        self.lsp.close(&self.open_files[index].path);
+        if self.completion.is_some() && self.active_tab == Some(index) {
+            self.completion = None;
+        }
         let pane = self.open_files[index].pane;
         let was_active = self.active_tab == Some(index);
         self.open_files.remove(index);
@@ -442,23 +640,12 @@ impl App {
             || self
                 .active_tab
                 .and_then(|index| self.open_files.get(index))
-                .is_none_or(|file| file.image.is_some())
+                .is_none_or(|file| !file.is_text())
         {
             return;
         }
-        for character in text.chars() {
-            match character {
-                '\r' => {}
-                '\n' | '\t' => self.insert_editor_character(character),
-                character if !character.is_control() => self.insert_editor_character(character),
-                _ => {}
-            }
-        }
-    }
-
-    pub(super) fn insert_editor_character(&mut self, character: char) {
         if let Some(active) = self.active_tab {
-            self.open_files[active].insert(character);
+            self.open_files[active].insert_str(text);
         }
     }
 
@@ -522,6 +709,41 @@ pub fn clipboard_sequence(text: &str) -> String {
         }
     }
     format!("\x1b]52;c;{encoded}\x07")
+}
+
+/// The text on the clipboard of this system, from its tool (Wayland, then X11, on Linux).
+fn system_clipboard_text() -> Option<String> {
+    let tools: &[&[&str]] = match std::env::consts::OS {
+        "macos" => &[&["pbpaste"]],
+        "windows" => &[&[
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-Clipboard -Raw",
+        ]],
+        _ => &[
+            &["wl-paste", "--no-newline"],
+            &["xclip", "-selection", "clipboard", "-o"],
+            &["xsel", "--clipboard", "--output"],
+        ],
+    };
+    tools.iter().find_map(|tool| {
+        let output = Command::new(tool[0])
+            .args(&tool[1..])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())?;
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        // PowerShell ends what it prints with a line break of its own.
+        let text = if cfg!(windows) {
+            text.strip_suffix("\r\n").map(str::to_owned).unwrap_or(text)
+        } else {
+            text
+        };
+        (!text.is_empty()).then_some(text)
+    })
 }
 
 /// Hands `text` to the clipboard tool of this system, trying the next one when a tool is

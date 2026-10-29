@@ -5,8 +5,8 @@
 <h1 align="center">SozoIDE</h1>
 
 <p align="center">
-  An editor, two terminals, a Git browser and a SQL client in one terminal window.<br>
-  Written in Rust, for Windows, macOS and Linux.
+  An IDE in your terminal: editor with IntelliSense, two terminals, Git, a SQL client,<br>
+  run with one key, pictures, videos and 3D models. One Rust binary for Windows, macOS and Linux.
 </p>
 
 <p align="center">
@@ -16,15 +16,89 @@
   <a href="LICENSE">Apache-2.0</a>
 </p>
 
+## Why SozoIDE
+
+- **One binary, three systems.** `sozo` runs the same on Windows, macOS and Linux, on x86_64 and ARM64, and installs with a native installer.
+- **Fast while you type.** Highlighting is redone only from the line you changed (at most a few tens of milliseconds a key on long files), a frame draws in under a millisecond, and language servers, Git, builds and videos run in their own processes or threads: the editor never waits for them.
+- **Your terminal's look.** SozoIDE has no colours of its own: it draws with the 16 ANSI colours of your terminal theme and shows every shortcut the way your system types it.
+- **Nothing to set up.** The tools it needs (`git`, `curl`, `ffmpeg` and the language servers) are installed in the background the first time it opens.
+
 ## Features
 
-- **Explorer and editor** — every file shows an icon for its type; right-click to create a file (its icon follows the extension you type) or a folder, or to rename or delete one (it asks first); open files in tabs (the tab bar scrolls when there are many) and drag a tab to an edge of the editor to split it side by side or stacked, each side with its own tabs; drag tabs back to the other side to join them again. Long lines scroll sideways. Select text with the mouse or `Shift` and the arrows, `Ctrl+A` for everything, and copy or cut it with `Ctrl+C` and `Ctrl+X`; `Ctrl+Z` undoes the last edit (`Ctrl+Z` on macOS too). Edits save themselves after two idle seconds and before you switch tabs or quit. Syntax highlighting for more than 30 languages, from Rust and Go to SQL, JSP, Astro and Mermaid, and for configuration files by their name (`.env`, `Cargo.lock`, `.config`, `.properties`, `Dockerfile`, `Makefile`, `.gitignore`…), with its own colour for keywords, types, functions, strings, numbers and comments, down to the last line of long files. Markdown is drawn as you read it: headings in their own size and colour, quotes, rules, framed code blocks, Mermaid diagrams in box-drawing characters (flowcharts, sequence, class, state, C4, ZenUML, Kanban, Radar, Treemap and more), aligned tables with inline formatting, typographic quotes, *italic*, **bold** and ==highlight== — and the source comes back under the cursor or the mouse. Images render inline on Sixel, Kitty and iTerm2 terminals, and PDF files open in a tab as they are, one page at a time. `Ctrl+P` finds in the file as you type, marks every match in the editor and counts them (`◂ 3/12 ▸`); `Ctrl+Shift+P` searches the whole folder in the background and groups the results by file with the match highlighted.
-- **Two terminals** — a bottom and a right terminal, each with its own shell, with scrollback on the mouse wheel or Page Up and Page Down. Drag the dividers to resize every panel.
-- **Source Control** — stage and commit, scroll back through a timeline of every branch, each in its own colour with dots and merge lines — click a commit to slide in its files, and a file to see what was added (green), removed (red) or modified (yellow) — and see every branch in a tree grouped by remote and folder: click one to switch to it. The Launchpad shows your branch, its upstream, how far ahead and behind it is, and the staged, unstaged and untracked files, each a click away from what resolves it. The diff numbers its lines, folds its hunks, goes side by side, and moves to the next or previous changed file. Pull is fast-forward only; rebase and checkout ask before they run.
-- **Database** — connect to SQLite, PostgreSQL and MySQL and the tables and views appear on the left. Pick some to draw them as a diagram with their keys and relations, tick columns to build the query — group, count, sum, average, sort and filter — and get the `SELECT` with its joins in the SQL tab, ready to edit, copy or run with `Ctrl+Enter` or `F5`. The rows come out below and scroll both ways. Saved connections never write passwords to disk.
-- **Search** — in the open file or across the whole folder; files listed in `.gitignore` stay out of the results.
-- **Your terminal's look** — SozoIDE has no colors of its own. It draws with the 16 ANSI colors of your terminal theme, and shows each shortcut the way your system types it (`fn+F1` and `Ctrl+Option+B` on macOS, `Ctrl+Alt+B` on Linux).
-- **A guided start** — a short tutorial on the first start (skip it with `Esc`), and after an update a note with what is new and what was fixed in every version since the one you had. `F1` lists every key in boxed sections, in your terminal's colours.
+### Explorer
+
+- Every file and folder with an icon for its type, in your terminal's colours.
+- Right-click to create a file (its icon follows the extension you type) or a folder, to rename, to delete (it asks first), and to cut, copy and paste files and folders; `Ctrl+X`, `Ctrl+C` and `Ctrl+V` do the same on the selected entry. A copy in the same folder becomes `name copy`, `name copy 2`…; a move never overwrites anything.
+- The tree follows other programs: what they create, rename or delete shows up within a second.
+
+### Editor
+
+- Tabs with a scrolling tab bar; drag a tab to an edge of the editor to split it side by side or stacked, each side with its own tabs.
+- Edits save themselves after two idle seconds and before you switch tabs or quit. A file changed by another program is read again (your unsaved edits are kept).
+- Select with the mouse or `Shift` and the arrows, `Ctrl+A` for everything; copy, cut and paste with `Ctrl+C`, `Ctrl+X`, `Ctrl+V` or the right-click menu, through the system clipboard (and OSC 52 over SSH). `Ctrl+Z` undoes, a word or a paste at a time.
+- Syntax highlighting for more than 30 languages, from Rust, Go, C, Java and Python to SQL, JSP, Astro and Mermaid, and for configuration files by their name (`.env`, `Cargo.lock`, `.config`, `.properties`, `Dockerfile`, `Makefile`, `.gitignore`…).
+- Markdown drawn as you read it: headings, quotes, rules, framed code blocks, aligned tables with inline formatting, *italic*, **bold** and ==highlight==, and Mermaid diagrams in box-drawing characters (flowchart, sequence, class, state, C4, ZenUML, Kanban, Radar, Treemap and more). The source comes back under the cursor or the mouse.
+- `Ctrl+P` finds in the file as you type and marks every match (`◂ 3/12 ▸`); `Ctrl+Shift+P` searches the whole folder in the background, groups the results by file and skips what `.gitignore` lists.
+
+### IntelliSense
+
+Problems underlined in red (errors) or yellow (warnings), with the message of the cursor's line in the footer; suggestions with `Ctrl+Space`, and by themselves after `.`, `::`, `->` and the second letter of a word; `F12` goes to the definition. They come from the language server of each language, started when you open its first file:
+
+| Language | Server |
+| --- | --- |
+| Rust | rust-analyzer |
+| C, C++ | clangd |
+| Python | pyright |
+| Java | jdtls |
+| TypeScript, JavaScript | typescript-language-server |
+| Go | gopls |
+
+### Run
+
+`Ctrl+R` saves everything, opens the bottom terminal and runs the file there with the tool of its language; a Cargo project or a Go module runs whole. The command stays in the shell's history, so you can run it again.
+
+| Language | Command |
+| --- | --- |
+| Rust | `cargo run` (in a Cargo project) or `rustc` |
+| C, C++ | `gcc`/`clang`, `g++`/`clang++` |
+| Python | `python3` (`python` on Windows) |
+| JavaScript, TypeScript | `node`; `deno`, `bun` or `npx tsx` |
+| Java, Kotlin | `java`, `kotlinc` |
+| Go | `go run` |
+| Ruby, PHP, Lua, Perl, R, Swift, Dart, Zig, Haskell, Elixir, Julia | their own interpreter or compiler |
+| Shell, PowerShell, Batch | `bash`, `zsh`, `pwsh`, `cmd.exe` |
+
+### Debug
+
+`F9` puts a breakpoint (`●`) on the cursor's line. `F5` saves, builds the file with debug symbols in the background (a Cargo project with `cargo build`, a single Rust, C or C++ file with `rustc -g`, `clang -g` or `gcc -g`) and starts the debugger; when it stops, the editor jumps to the line (`▶`) and a panel on the right shows the call stack, the variables and the program's output. `F5` continues, `F10` steps over, `F11` steps into and `Shift+F5` stops.
+
+| Language | Debugger (Debug Adapter Protocol) |
+| --- | --- |
+| Rust, C, C++ | lldb-dap (comes with Xcode and LLVM), or GDB 14 and later (`gdb -i dap`) |
+| Python | debugpy |
+| Go | Delve (`dlv dap`) |
+
+### Pictures, videos, 3D models and PDF
+
+- Pictures (PNG, JPEG, GIF, WebP, BMP, ICO, TIFF, TGA, PNM, QOI, HDR), animated GIFs and videos (MP4, MOV, MKV, WebM, AVI, M4V) are drawn in half blocks in their own colours, two pixels a cell, on any terminal. Videos play through the system's `ffmpeg` at 15 frames a second; `Space` pauses.
+- 3D models (`.glb`, `.gltf`) open in a tab, lit and with their colours: `←`/`→` turn them, `↑`/`↓` tilt them, `+`/`-` or the wheel zoom, and a drag turns them with the mouse.
+- PDF files open as they are, one page at a time, through your terminal's picture protocol (Sixel, Kitty or iTerm2).
+
+### Two terminals
+
+A bottom and a right terminal, each with its own shell, with scrollback on the mouse wheel or Page Up and Page Down. Drag the dividers to resize every panel.
+
+### Source Control
+
+Stage and commit, and scroll back through a timeline of every branch, each in its own colour with dots and merge lines: click a commit to slide in its files, and a file to see what was added (green), removed (red) or modified (yellow). Every branch in a tree grouped by remote and folder; click one to switch to it. The Launchpad shows your branch, its upstream, how far ahead and behind it is, and the staged, unstaged and untracked files. The diff numbers its lines, folds its hunks, goes side by side and moves to the next changed file. Pull is fast-forward only; rebase and checkout ask before they run.
+
+### Database
+
+Connect to SQLite, PostgreSQL and MySQL and the tables and views appear on the left. Draw some as a diagram with their keys and relations, tick columns to build the query (group, count, sum, average, sort and filter) and get the `SELECT` with its joins in the SQL tab, ready to edit, copy or run with `Ctrl+Enter` or `F5`. The rows scroll both ways. Passwords stay in your system's keychain, never on disk.
+
+### A guided start
+
+A short tutorial on the first start (skip it with `Esc`), and after an update a note with what is new in every version since the one you had. `F1` lists every key in boxed sections; the footer shows what just happened.
 
 ## Install
 
@@ -46,7 +120,22 @@ The installers are not signed yet:
 
 Each release includes `SHA256SUMS.txt`. Check a download with `shasum -a 256 -c SHA256SUMS.txt --ignore-missing` on macOS, `sha256sum -c SHA256SUMS.txt --ignore-missing` on Linux, or `Get-FileHash` on Windows.
 
-**Requirements:** `git` on your PATH for fetch, pull and push, and a [Nerd Font](https://www.nerdfonts.com/) in your terminal for the icons.
+### Requirements
+
+- A [Nerd Font](https://www.nerdfonts.com/) in your terminal for the icons.
+- SozoIDE runs `git` (Source Control), `curl` (updates), `ffmpeg` (videos) and the language servers instead of linking them. After a new installation and after each update it installs the ones that are missing, in the background:
+
+| Tool | macOS | Windows | Linux |
+| --- | --- | --- | --- |
+| `git`, `curl`, `ffmpeg` | Homebrew | `winget` | `apt-get` or `dnf` (also recommended by the DEB and RPM packages) |
+| rust-analyzer | `rustup` or Homebrew | `rustup` | `rustup` |
+| clangd | Xcode command line tools | `winget` (LLVM) | `apt-get` or `dnf` |
+| pyright, typescript-language-server | `npm` (or `pip` for pyright) | `npm` | `npm` |
+| gopls | `go install` | `go install` | `go install` |
+| jdtls | Homebrew | — | Homebrew |
+| Debuggers | lldb-dap with Xcode; debugpy with `pip`; Delve with `go install` or Homebrew | lldb-dap with LLVM; debugpy with `pip`; Delve with `go install` | GDB with `apt-get` or `dnf`; debugpy with `pip`; Delve with `go install` |
+
+On Linux the background install only works when `sudo` needs no password; otherwise the footer tells you what to install. Nothing is installed in debug builds or tests.
 
 ## Usage
 
@@ -67,7 +156,8 @@ sozo --version
 | `Ctrl+P` | Search the open file |
 | `Ctrl+Shift+P` | Search the whole folder |
 | `Up` / `Down`, `◂` / `▸` (search) | Previous / next result; `Enter` opens it selected |
-| Right-click in the Explorer | New file, new folder, rename, delete (after a confirmation) |
+| Right-click in the Explorer | New file, new folder, cut, copy, paste, rename, delete (after a confirmation) |
+| `Ctrl+X` / `Ctrl+C` / `Ctrl+V` in the Explorer | Cut / copy / paste the selected file or folder (paste goes into the selected folder) |
 | `Ctrl+W` | Close the active tab |
 | `Ctrl+Enter` or `F5` | Run the SQL query |
 | `F1` | Help with every command |
@@ -86,6 +176,12 @@ sozo --version
 | `Ctrl+A` | Select all the text |
 | `Ctrl+Z` (also on macOS) | Undo the last edit in the editor |
 | `Ctrl+C` / `Ctrl+X` | Copy / cut the selection to the system clipboard |
+| `Ctrl+V`, right-click in the editor | Paste the system clipboard; the menu also cuts and copies the selection |
+| `←`/`→`, `↑`/`↓`, `+`/`-`, drag, wheel (3D model) | Turn, tilt, zoom in and out |
+| `Space` (video) | Pause, play on, or play again from the start |
+| `Ctrl+Space` / `F12` | Suggestions from the language server (they also open after `.`, `::`, `->` and the second letter of a word) / go to the definition |
+| `F9` / `F5` / `F10` / `F11` / `Shift+F5` | Breakpoint / build and debug, or continue / step over / step into / stop |
+| `Ctrl+R` (editor or Explorer) | Save, open the bottom terminal and run the file there: a Cargo project or Go module runs whole; C, C++, Rust, Python, JavaScript, TypeScript, Java, Kotlin, Go, Ruby, PHP, Lua, Perl, R, Swift, Dart, Zig, Haskell, Elixir, Julia and shell scripts with their own compiler or interpreter |
 | `Page Down` / `→` / mouse wheel, `Page Up` / `←`, `Home` / `End` (PDF) | Next page, previous page, first and last page |
 | Click a branch (Source Control) | Switch to it, after a confirmation |
 | Click a commit or `Enter` (Commit Graph) | Its files; `Enter` on a file: its diff; `[` / `]` other file; `Esc` back |
@@ -121,7 +217,7 @@ Before sending changes, run:
 
 ```sh
 cargo fmt --check
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
@@ -146,7 +242,19 @@ npm run dev
 ## Project layout
 
 ```text
-src/          the application: app, editor (highlight, Markdown, Mermaid, PDF), terminal, git, database, update, ui, animation
+src/          the application:
+  app/        state, keys, mouse, Explorer, IntelliSense list
+  editor/     text, highlighting, Markdown, Mermaid, PDF, search
+  lsp/        language server client (JSON-RPC over stdio)
+  run/        the command Ctrl+R runs
+  debug/      the debugger client (Debug Adapter Protocol)
+  media/      pictures, GIFs, videos and 3D models in half blocks
+  terminal/   the two PTY terminals
+  git/        Source Control
+  database/   SQLite, PostgreSQL and MySQL
+  update/     updates and the tools installed in the background
+  ui/         drawing
+  animation/  transitions
 tests/        CLI, end-to-end and interaction tests in a real PTY
 packaging/    native installers for Linux, macOS and Windows
 site/         landing page (Astro), published to GitHub Pages; site/scripts captures its SozoIDE screens

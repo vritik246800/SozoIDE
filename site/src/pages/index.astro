@@ -84,7 +84,7 @@ const themeCss = [
 
 const features = [
   { keys: [['Ctrl', 'B']], title: 'Explorer and editor',
-    text: 'Browse the project tree, with an icon for every file type; right-click to create a file or a folder, or to rename or delete one. Open files in tabs that scroll when there are many; drag a tab to an edge of the editor to split it side by side or stacked, each side with its own tabs. Long lines scroll sideways. Select text with the mouse or Shift and the arrows, and copy it with Ctrl+C; Ctrl+Z undoes the last edit. Edits save themselves after two idle seconds and before you switch tabs or quit. Syntax highlighting covers more than 30 languages, from Rust and Go to SQL, JSP, Astro and Mermaid, and configuration files by their name, from .env and Cargo.lock to Dockerfile, with its own colour for keywords, types, functions, strings and numbers, down to the last line of long files. Markdown is drawn as you read it: headings in their own size and colour, quotes, rules, framed code blocks, Mermaid diagrams in box-drawing characters (C4, ZenUML, Kanban, Radar and Treemap too) and tables with inline formatting, with the source back under the cursor or the mouse. Images render inline on Sixel, Kitty and iTerm2 terminals, and PDF files open in a tab, one page at a time.' },
+    text: 'Browse the project tree, with an icon for every file type; right-click to create a file or a folder, or to rename or delete one, and cut, copy and paste them with the same menu or Ctrl+X, Ctrl+C and Ctrl+V. Changes made by other programs show up by themselves. Open files in tabs that scroll when there are many; drag a tab to an edge of the editor to split it side by side or stacked, each side with its own tabs. Long lines scroll sideways. Select text with the mouse or Shift and the arrows, and copy, cut or paste it with Ctrl+C, Ctrl+X, Ctrl+V or a right-click; Ctrl+Z undoes the last edit. Edits save themselves after two idle seconds and before you switch tabs or quit. Syntax highlighting covers more than 30 languages, from Rust and Go to SQL, JSP, Astro and Mermaid, and configuration files by their name, from .env and Cargo.lock to Dockerfile, with its own colour for keywords, types, functions, strings and numbers, down to the last line of long files. Markdown is drawn as you read it: headings in their own size and colour, quotes, rules, framed code blocks, Mermaid diagrams in box-drawing characters (C4, ZenUML, Kanban, Radar and Treemap too) and tables with inline formatting, with the source back under the cursor or the mouse. Pictures, animated GIFs and videos are drawn in half blocks in their own colours on any terminal, 3D models (.glb, .gltf) turn and zoom with the arrows, + and - or the mouse, and PDF files open in a tab, one page at a time. Ctrl+R saves and runs the file, or its Cargo or Go project, in the bottom terminal. Language servers (rust-analyzer, clangd, pyright, jdtls, typescript-language-server, gopls) underline problems, suggest with Ctrl+Space and go to a definition with F12. F9 sets breakpoints and F5 builds and debugs Rust, C, C++, Python and Go, with the call stack and the variables in a panel.' },
   { keys: [['Ctrl', 'J'], ['Ctrl', 'Shift', 'B']], title: 'Two terminals',
     text: 'A bottom and a right terminal, each with its own shell. The right terminal opens with Ctrl+Shift+B on Windows, Ctrl+Option+B on macOS and Ctrl+Alt+B on Linux. Scroll back with the mouse wheel or Page Up and Page Down, and drag the dividers to resize every panel.' },
   { keys: [['Ctrl', 'G']], title: 'Source Control',
@@ -97,19 +97,31 @@ const features = [
     text: 'Every command in boxed sections, in the colours of your terminal and with the keys your system types (fn+F1 on a Mac). A short tutorial on the first start, notes on what is new in every version since yours after an update, and in About the flower grows in the middle and a button opens the repository to contribute.' },
 ];
 
-// The title rises word by word (Docs/development/DESIGN.md §2.5); the last three words take the accent.
-const title = 'Code, shells, Git and SQL in one terminal window.'
+// The title rises word by word (Docs/development/DESIGN.md §2.5); the last two words take the accent.
+const title = 'Code Without Leaving the Terminal'
   .split(' ')
-  .map((text, index, words) => ({ text, accent: index >= words.length - 3 }));
+  .map((text, index, words) => ({ text, accent: index >= words.length - 2 }));
+
+// The tour under the keys: real captures (site/scripts/capture.sh), each opening in a popout.
+const tour = [
+  { name: 'editor', title: 'Editor and terminals', text: 'Highlighting for 30+ languages, Markdown drawn as you read it and a shell under the code.' },
+  { name: 'intellisense', title: 'IntelliSense', text: 'The language server suggests as you type and underlines what is wrong; F12 jumps to the definition.' },
+  { name: 'run', title: 'Run with Ctrl+R', text: 'Save and run the file, or its Cargo or Go project, in the bottom terminal.' },
+  { name: 'git-changes', title: 'Source Control', text: 'Stage and commit, with the Launchpad of your branch and its upstream.' },
+  { name: 'git-graph', title: 'Commit timeline', text: 'Every branch in its own colour; a commit slides its files in from the right.' },
+  { name: 'db-query', title: 'Database diagram and builder', text: 'Tables with their keys and relations; tick columns and the SQL writes itself.' },
+  { name: 'db-results', title: 'Query results', text: 'Run with Ctrl+Enter or F5; the rows scroll down and sideways.' },
+  { name: 'search', title: 'Find as you type', text: 'Every match marked and counted, 3/12, in the file or the whole folder.' },
+] as const;
 ---
 
 <html lang="en" data-theme="campbell">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>SozoIDE: an IDE in your terminal</title>
+    <title>SozoIDE — Never Leave the Terminal</title>
     <meta name="description" content="SozoIDE puts an editor, two terminals, Git and a SQL client in one terminal window. Free and open source for Windows, macOS and Linux." />
-    <meta property="og:title" content="SozoIDE: an IDE in your terminal" />
+    <meta property="og:title" content="SozoIDE — Never Leave the Terminal" />
     <meta property="og:description" content="An editor, two terminals, Git and a SQL client in one terminal window." />
     <meta property="og:type" content="website" />
     <meta property="og:url" content={new URL(base, Astro.site)} />
@@ -155,6 +167,7 @@ const title = 'Code, shells, Git and SQL in one terminal window.'
             <Fragment>{index > 0 && ' '}<span class:list={['word', { accent }]} aria-hidden="true">{text}</span></Fragment>
           ))}
         </h1>
+        <p class="tagline"><strong>SozoIDE — Never Leave the Terminal.</strong> Smart coding. Zero unnecessary distractions.</p>
         <p class="lede">
           SozoIDE is a terminal-native IDE written in Rust. Run <code>sozo .</code> in any folder to
           get an editor, two terminals, a Git browser and a SQL client side by side.
@@ -211,6 +224,30 @@ const title = 'Code, shells, Git and SQL in one terminal window.'
 
       <section id="features" aria-labelledby="features-title">
         <h2 id="features-title" class="reveal" aria-label="One key for each tool">One key for each tool</h2>
+        <p class="section-lede reveal">Real screens of SozoIDE: scroll sideways and open one to see it whole.</p>
+        <div class="tour reveal">
+          <button type="button" class="tour-arrow" data-tour-step="-1" aria-label="Previous screens">‹</button>
+          <ul class="gallery" data-gallery>
+            {tour.map(({ name, title, text }) => (
+              <li>
+                <button type="button" class="shot" data-shot aria-label={`Open ${title}`}>
+                  <span class="thumb"><Screen runs={screens.screens[name]} /></span>
+                  <span class="shot-title">{title}</span>
+                  <span class="shot-text">{text}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+          <button type="button" class="tour-arrow" data-tour-step="1" aria-label="Next screens">›</button>
+        </div>
+        <dialog class="popout" data-popout aria-labelledby="popout-title">
+          <div class="popout-head">
+            <h3 id="popout-title" data-popout-title></h3>
+            <form method="dialog"><button class="popout-close" aria-label="Close">Esc ✕</button></form>
+          </div>
+          <div class="popout-body" data-popout-body></div>
+          <p class="popout-text" data-popout-text></p>
+        </dialog>
         <dl class="keymap">
           {features.map((feature) => (
             <div class="key-row reveal">
@@ -321,6 +358,31 @@ cargo build --release
           .then(({ architecture }) => { if (architecture === 'arm') setPackage(arm(detected)); })
           .catch(() => {});
       }
+
+      // The tour: arrows scroll the strip a card at a time; a card opens whole in the popout,
+      // which scrolls sideways when the screen is narrower than its 132 columns.
+      const gallery = document.querySelector<HTMLElement>('[data-gallery]');
+      document.querySelectorAll<HTMLButtonElement>('[data-tour-step]').forEach((arrow) =>
+        arrow.addEventListener('click', () => {
+          const card = gallery?.querySelector('li');
+          gallery?.scrollBy({ left: Number(arrow.dataset.tourStep) * ((card?.clientWidth ?? 300) + 16), behavior: 'smooth' });
+        }),
+      );
+      const popout = document.querySelector<HTMLDialogElement>('[data-popout]');
+      document.querySelectorAll<HTMLButtonElement>('[data-shot]').forEach((shot) =>
+        shot.addEventListener('click', () => {
+          if (!popout) return;
+          const screen = shot.querySelector('.screen')?.cloneNode(true);
+          popout.querySelector('[data-popout-body]')?.replaceChildren(...(screen ? [screen] : []));
+          popout.querySelector('[data-popout-title]')!.textContent = shot.querySelector('.shot-title')?.textContent ?? '';
+          popout.querySelector('[data-popout-text]')!.textContent = shot.querySelector('.shot-text')?.textContent ?? '';
+          popout.showModal();
+        }),
+      );
+      // A click outside the box (on the backdrop) closes it, like Esc.
+      popout?.addEventListener('click', (event) => {
+        if (event.target === popout) popout.close();
+      });
 
       const stars = document.querySelector<HTMLCanvasElement>('canvas.stars');
       if (stars) starField(stars);
@@ -782,6 +844,162 @@ cargo build --release
         color: var(--muted);
       }
 
+      .tagline {
+        margin: 20px 0 0;
+        font-size: 1.15rem;
+      }
+
+      .tagline strong {
+        color: var(--accent);
+      }
+
+      /* The tour (Docs/development/UX.md §2): a strip of captures that scrolls sideways, each one
+         opening whole in a popout. */
+      .tour {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        align-items: center;
+        gap: 8px;
+        margin: 28px 0 0;
+      }
+
+      .gallery {
+        display: flex;
+        gap: 16px;
+        margin: 0;
+        padding: 4px 2px 14px;
+        list-style: none;
+        overflow-x: auto;
+        scroll-snap-type: x mandatory;
+        overscroll-behavior-x: contain;
+      }
+
+      .gallery li {
+        flex: 0 0 min(78vw, 420px);
+        scroll-snap-align: start;
+      }
+
+      .shot {
+        display: grid;
+        gap: 8px;
+        width: 100%;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: none;
+        color: var(--fg);
+        font: inherit;
+        text-align: left;
+        cursor: zoom-in;
+      }
+
+      .shot:hover,
+      .shot:focus-visible {
+        border-color: var(--accent);
+        outline: none;
+      }
+
+      .thumb {
+        display: block;
+        container-type: inline-size;
+        overflow: hidden;
+        border-radius: 4px;
+      }
+
+      .shot-title {
+        font-weight: 700;
+      }
+
+      .shot-text {
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .tour-arrow {
+        width: 2.2rem;
+        height: 2.2rem;
+        border: 1px solid var(--line);
+        border-radius: 50%;
+        background: var(--bg);
+        color: var(--fg);
+        font: inherit;
+        font-size: 1.3rem;
+        cursor: pointer;
+      }
+
+      .tour-arrow:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      .popout {
+        width: min(96vw, 1180px);
+        max-height: 92vh;
+        padding: 16px;
+        border: 1px solid var(--accent);
+        border-radius: 10px;
+        background: var(--bg);
+        color: var(--fg);
+      }
+
+      .popout::backdrop {
+        background: color-mix(in srgb, var(--bg) 80%, transparent);
+      }
+
+      .popout-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        margin-bottom: 12px;
+      }
+
+      .popout-head h3 {
+        margin: 0;
+      }
+
+      .popout-close {
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: none;
+        color: var(--muted);
+        font: inherit;
+        cursor: pointer;
+      }
+
+      /* The whole screen at a readable size: narrower windows scroll it sideways. */
+      .popout-body {
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+      }
+
+      .popout-body .screen {
+        width: max-content;
+        overflow: visible;
+        font-size: clamp(10px, 1.05vw, 13px);
+      }
+
+      .popout-text {
+        margin: 12px 0 0;
+        color: var(--muted);
+      }
+
+      .screen .u {
+        text-decoration: underline;
+        text-decoration-color: var(--c1);
+      }
+
+      @media (max-width: 640px) {
+        .tour {
+          grid-template-columns: 1fr;
+        }
+
+        .tour-arrow {
+          display: none;
+        }
+      }
+
       .keymap {
         margin: 32px 0 0;
       }
@@ -962,7 +1180,7 @@ cargo build --release
          moves the demo and the theme wave, canvas draws characters. CSS only keeps what waits for
          those scripts (data-motion="wait", set in the head) and the small responses. With reduced
          motion nothing moves or hides. */
-      [data-motion='wait'] :is(.hero .word, .lede, .actions, .note, .window, .try, .theme-list button, .reveal, .draw) {
+      [data-motion='wait'] :is(.hero .word, .tagline, .lede, .actions, .note, .window, .try, .theme-list button, .reveal, .draw) {
         visibility: hidden;
       }
 

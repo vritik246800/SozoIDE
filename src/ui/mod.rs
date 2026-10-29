@@ -114,7 +114,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         render_handle(frame, regions.right_handle, true);
         render_terminal(frame, app, regions.right_terminal, false);
     }
-    render_footer(frame, vertical[2]);
+    render_footer(frame, app, vertical[2]);
     app.regions = regions;
     app.resize_terminals();
 
@@ -215,7 +215,9 @@ fn render_header(frame: &mut Frame, app: &App, regions: &mut Regions, area: Rect
     regions.header_about = about;
 }
 
-fn render_footer(frame: &mut Frame, area: Rect) {
+/// The keys on the left; on the right the problem on the cursor's line (F26) or the last thing
+/// that happened (`app.status`).
+fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let footer = Line::from(vec![
         Span::styled(" Ctrl+B ", Style::default().fg(ACTIVE)),
         Span::raw("Explorer  "),
@@ -230,9 +232,45 @@ fn render_footer(frame: &mut Frame, area: Rect) {
         Span::styled("Ctrl+Q ", Style::default().fg(ACTIVE)),
         Span::raw("Quit"),
     ]);
+    let problem = app
+        .active_tab
+        .and_then(|index| app.open_files.get(index))
+        .and_then(|file| {
+            let row = file.cursor_row;
+            app.lsp
+                .diagnostics
+                .get(&file.path)?
+                .iter()
+                .find(|problem| (problem.row..=problem.end_row).contains(&row))
+        });
+    let message = match problem {
+        Some(problem) => {
+            let (label, colour) = if problem.error {
+                ("error", ratatui::style::Color::Red)
+            } else {
+                ("warning", ratatui::style::Color::Yellow)
+            };
+            Line::from(vec![
+                Span::styled(format!("{label}: "), Style::default().fg(colour)),
+                Span::styled(format!("{} ", problem.message), Style::default().fg(TEXT)),
+            ])
+        }
+        None => Line::from(format!("{} ", app.status)),
+    };
+    // The message comes first, in up to 60 % of the row; the keys give way (they are in Help).
+    let room = (message.width() as u16).min(area.width * 3 / 5);
+    let [left, right] = Layout::horizontal([Constraint::Min(0), Constraint::Length(room)])
+        .spacing(1)
+        .areas(area);
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(MUTED)),
-        area,
+        left,
+    );
+    frame.render_widget(
+        Paragraph::new(message)
+            .style(Style::default().fg(MUTED))
+            .alignment(Alignment::Right),
+        right,
     );
 }
 
@@ -295,7 +333,20 @@ mod tests {
         );
         app.open_file(app.root.join("assets/Sozo.png")).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        assert!(app.active_file().unwrap().image.is_some());
+        // Pictures are drawn as half blocks in their own colours (Q43).
+        let file = app.active_file().unwrap();
+        assert!(file.media.is_some() && file.image.is_none());
+        let blocks = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .filter(|cell| {
+                matches!(cell.symbol(), "▀" | "▄")
+                    && matches!(cell.fg, ratatui::style::Color::Rgb(..))
+            })
+            .count();
+        assert!(blocks > 100, "{blocks}");
         app.overlay = Overlay::Help;
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         app.overlay = Overlay::About;
@@ -1196,6 +1247,15 @@ mod tests {
             "Remove the builder row",
             "Undo the last edit",
             "New, rename, delete",
+            "Turn the model",
+            "Run the file or its project",
+            "Suggestions (language server)",
+            "Go to the definition",
+            "Breakpoint on the line",
+            "Build and debug, or continue",
+            "Pause or play a video",
+            "Cut, copy, paste (Explorer)",
+            "Cut, copy, paste the text",
         ] {
             assert!(text.contains(keys), "{keys}");
         }
@@ -1245,6 +1305,173 @@ mod tests {
     }
 
     #[test]
+    fn a_model_is_drawn_in_half_blocks_with_its_keys_in_the_title() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ship.glb");
+        std::fs::write(&path, crate::media::sample_glb()).unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path).unwrap();
+        settle(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert_eq!(app.active_file().unwrap().language, "3D model");
+        assert!(text.contains("←/→ turn  ↑/↓ tilt  +/- zoom"));
+        let red = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .filter(|cell| {
+                matches!(cell.symbol(), "▀" | "▄")
+                    && matches!(cell.fg, ratatui::style::Color::Rgb(red, 0, 0) if red > 60)
+            })
+            .count();
+        assert!(red > 20, "{red}");
+    }
+
+    #[test]
+    fn problems_are_marked_in_the_editor_and_said_in_the_footer_with_the_suggestions() {
+        use crate::lsp::{Diagnostic, Event, Item};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("main.c");
+        std::fs::write(&path, "int main() {\n  retur 0;\n}\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path.clone()).unwrap();
+        settle(&mut app);
+        app.status = "Opened main.c".into();
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(
+            buffer_text(&terminal).contains("Opened main.c"),
+            "the status shows"
+        );
+        app.lsp.diagnostics.insert(
+            path.clone(),
+            vec![Diagnostic {
+                row: 1,
+                start: 2,
+                end_row: 1,
+                end: 7,
+                error: true,
+                message: "use of undeclared identifier 'retur'".into(),
+            }],
+        );
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("error: use of undeclared identifier 'retur'"),
+            "{text}"
+        );
+        let buffer = terminal.backend().buffer();
+        let (x, y) = (0..20)
+            .find_map(|y| row(buffer, y).find("retur").map(|x| (x, y)))
+            .unwrap();
+        let x = row(buffer, y)[..x].chars().count() as u16;
+        let cell = &buffer[(x, y)];
+        assert!(cell.modifier.contains(ratatui::style::Modifier::UNDERLINED));
+        assert_eq!(cell.underline_color, ratatui::style::Color::Red);
+        let number = row(buffer, y).find("2 |").unwrap();
+        let number = row(buffer, y)[..number].chars().count() as u16;
+        assert_eq!(buffer[(number, y)].fg, ratatui::style::Color::Red);
+
+        // Suggestions open under the cursor with their count.
+        app.lsp_event(Event::Completion {
+            path,
+            row: 1,
+            column: 0,
+            items: vec![Item {
+                label: "return".into(),
+                detail: "keyword".into(),
+                insert: "return".into(),
+            }],
+        });
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains(" return") && text.contains("keyword") && text.contains("1/1"));
+    }
+
+    #[test]
+    fn the_margin_marks_breakpoints_and_the_paused_line_and_the_panel_shows_the_session() {
+        use crate::debug::{Frame, State, fake};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("main.c");
+        std::fs::write(&path, "int main(void) {\n  int x = 1;\n  return x;\n}\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path.clone()).unwrap();
+        settle(&mut app);
+        app.breakpoints.insert(path.clone(), [1].into());
+        let frame = Frame {
+            id: 1,
+            name: "main".into(),
+            path: Some(path.clone()),
+            row: 2,
+        };
+        app.debug = Some(fake(
+            State::Paused("breakpoint".into()),
+            vec![frame],
+            vec![("x".into(), "1".into())],
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        for part in [
+            "2●|   int x = 1;",
+            "3▶|   return x;",
+            "╭ Debug ",
+            "Paused: breakpoint",
+            "Call stack",
+            "main  main.c:3",
+            "x = 1",
+            "Output",
+            "hello",
+        ] {
+            assert!(text.contains(part), "{part}");
+        }
+        let buffer = terminal.backend().buffer();
+        let y = (0..24).find(|y| row(buffer, *y).contains("2●|")).unwrap();
+        let x = row(buffer, y).find('●').unwrap();
+        let x = row(buffer, y)[..x].chars().count() as u16;
+        assert_eq!(buffer[(x, y)].fg, ratatui::style::Color::Red);
+        app.debug = None;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(!buffer_text(&terminal).contains("╭ Debug "));
+    }
+
+    #[test]
+    fn the_editor_menu_opens_at_the_mouse_in_the_text() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("a.txt"), "alpha\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(directory.path().join("a.txt")).unwrap();
+        settle(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let body = app.regions.pane_bodies[0];
+        let (column, row) = (body.x + 10, body.y + 3);
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let items = app
+            .regions
+            .entry_menu_items
+            .iter()
+            .map(|(action, area)| (action.label(), area.x, area.y))
+            .collect::<Vec<_>>();
+        assert_eq!(items, [("Paste", column + 1, row + 1)]);
+        assert!(buffer_text(&terminal).contains(" Paste"));
+    }
+
+    #[test]
     fn the_explorer_menu_opens_at_the_mouse_and_the_prompt_shows_the_icon_of_the_name() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let directory = tempfile::tempdir().unwrap();
@@ -1273,8 +1500,10 @@ mod tests {
             [
                 ("New File", 2),
                 ("New Folder", 3),
-                ("Rename", 4),
-                ("Delete", 5)
+                ("Cut", 4),
+                ("Copy", 5),
+                ("Rename", 6),
+                ("Delete", 7)
             ]
         );
         assert!(buffer_text(&terminal).contains(" New Folder"));

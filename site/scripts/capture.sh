@@ -12,6 +12,8 @@ set -euo pipefail
 
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends tmux git sqlite3 >/dev/null
+# The language server of the IntelliSense capture (F26).
+rustup component add rust-analyzer >/dev/null 2>&1
 CARGO_TARGET_DIR=/target cargo build --locked --quiet --manifest-path /src/Cargo.toml
 sozo=/target/debug/sozo
 
@@ -163,6 +165,12 @@ text 'cargo test -q --lib'
 keys Enter
 wait_for 'test result'
 capture editor
+# Ctrl+R from the editor runs the Cargo project in the bottom terminal (F25): Ctrl+J gives the
+# focus back to the editor first.
+keys C-j
+keys C-r
+wait_for 'crew Sozo'
+capture run
 
 keys C-g
 wait_for 'Staged'
@@ -221,5 +229,17 @@ keys F1
 wait_for 'Help - all commands'
 capture help
 keys Escape
+# Last, as it edits src/lib.rs: rust-analyzer suggests the fields of a launch and underlines
+# the line that is not finished yet (F26). Ctrl+J closes the terminal of the run capture.
+keys C-j
+for _ in $(seq 30); do tmux send-keys -t demo Down; done
+keys End
+keys Enter
+keys Enter
+text 'pub fn first() -> u32 {'
+keys Enter
+text '    schedule(1)[0].'
+wait_for ' 1/'
+capture intellisense
 tmux kill-server
 echo "Captured $(ls /out | wc -l) screens into /out"
