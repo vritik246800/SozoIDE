@@ -214,7 +214,7 @@ fn collect(
             let texture = material
                 .base_color_texture()
                 .and_then(|info| images.get(info.texture().source().index()));
-            for corners in indices.chunks_exact(3) {
+            for corners in indices.as_chunks::<3>().0 {
                 let corners = [0, 1, 2].map(|corner| corners[corner] as usize);
                 if corners.iter().any(|corner| *corner >= positions.len()) {
                     continue;
