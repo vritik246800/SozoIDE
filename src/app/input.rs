@@ -417,6 +417,22 @@ impl App {
             return;
         }
         let file = &mut self.open_files[active];
+        if let Some(media) = &mut file.media {
+            // A model turns, tilts and zooms; a video pauses.
+            let arrow = match key.code {
+                KeyCode::Left => Some((-1.0, 0.0)),
+                KeyCode::Right => Some((1.0, 0.0)),
+                KeyCode::Up => Some((0.0, -1.0)),
+                KeyCode::Down => Some((0.0, 1.0)),
+                _ => None,
+            };
+            let character = match key.code {
+                KeyCode::Char(character) if !ctrl => Some(character),
+                _ => None,
+            };
+            media.handle_key(character, arrow);
+            return;
+        }
         if file.image.is_some() {
             // A PDF turns its pages; an image has nothing to edit.
             if let Some((page, _)) = file.page() {
@@ -666,10 +682,18 @@ impl App {
                         self.select_tab(split.other);
                     }
                     let area = self.regions.pane_bodies[pane];
+                    if self
+                        .active_tab
+                        .and_then(|index| self.open_files.get(index))
+                        .is_some_and(|file| file.media.is_some())
+                    {
+                        self.turning = Some(point);
+                        return;
+                    }
                     if let Some(file) = self
                         .active_tab
                         .and_then(|index| self.open_files.get_mut(index))
-                        && file.image.is_none()
+                        && file.is_text()
                         && contains(area, point)
                     {
                         // A click starts a selection that a drag makes longer; Shift extends
@@ -699,7 +723,7 @@ impl App {
                 } else if free
                     && let Some(index) = self
                         .pane_at(point)
-                        .filter(|index| self.open_files[*index].image.is_none())
+                        .filter(|index| self.open_files[*index].is_text())
                 {
                     if Some(index) != self.active_tab {
                         self.flush_active_file();
@@ -711,12 +735,23 @@ impl App {
                     self.entry_menu = None;
                 }
             }
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) if self.turning.is_some() => {
+                let (column, row) = self.turning.replace(point).unwrap_or(point);
+                if let Some(media) = self
+                    .active_tab
+                    .and_then(|index| self.open_files.get_mut(index))
+                    .and_then(|file| file.media.as_mut())
+                {
+                    let columns = i32::from(point.0) - i32::from(column);
+                    media.drag(columns, i32::from(point.1) - i32::from(row));
+                }
+            }
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) if self.selecting => {
                 let area = self.regions.pane_bodies[self.active_pane()];
                 if let Some(file) = self
                     .active_tab
                     .and_then(|index| self.open_files.get_mut(index))
-                    && file.image.is_none()
+                    && file.is_text()
                 {
                     // Past the top or the bottom of the text the view follows the selection.
                     let (row, visual_column) = if point.1 <= area.y {
@@ -773,6 +808,7 @@ impl App {
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
                 self.drag = None;
                 self.selecting = false;
+                self.turning = None;
                 if let Some(drag) = self.tab_drag.take()
                     && let Some(zone) = drag.zone
                 {
@@ -817,6 +853,11 @@ impl App {
         } else if contains(self.regions.right_terminal, point) {
             self.right_terminal.scroll(up, 3);
         } else if let Some(index) = self.pane_at(point) {
+            // The wheel zooms a model; pictures and videos do not scroll.
+            if let Some(media) = &mut self.open_files[index].media {
+                media.wheel(up);
+                return;
+            }
             if let Some((page, _)) = self.open_files[index].page() {
                 // One page per turn of the wheel, however many events it sends.
                 let now = Instant::now();
@@ -1465,6 +1506,91 @@ mod tests {
                 .iter()
                 .any(|entry| entry.path == root.join("c.txt"))
         );
+    }
+
+    #[test]
+    fn models_turn_and_zoom_with_keys_and_the_mouse_and_videos_pause() {
+        use crossterm::event::MouseButton;
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("ship.glb"),
+            crate::media::sample_glb(),
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("clip.mp4"), "not a video").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(directory.path().join("ship.glb")).unwrap();
+        app.regions.editor_body = Rect::new(30, 2, 60, 20);
+        app.regions.pane_bodies[0] = app.regions.editor_body;
+        let drawn = |app: &mut App| {
+            let media = app.open_files[0].media.as_mut().unwrap();
+            media.lines(40, 15).to_vec()
+        };
+        let mut last = drawn(&mut app);
+        let mut changed = |app: &mut App, what: &str| {
+            let now = drawn(app);
+            assert_ne!(now, last, "{what}");
+            last = now;
+        };
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        changed(&mut app, "→ turns");
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        changed(&mut app, "↑ tilts");
+        press(&mut app, KeyCode::Char('+'), KeyModifiers::NONE);
+        changed(&mut app, "+ comes closer");
+        press(&mut app, KeyCode::Char('-'), KeyModifiers::NONE);
+        changed(&mut app, "- goes back");
+        mouse(&mut app, MouseEventKind::ScrollUp, 50, 10);
+        changed(&mut app, "the wheel zooms");
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 50, 10);
+        mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 56, 12);
+        changed(&mut app, "a drag turns");
+        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 56, 12);
+        assert!(app.turning.is_none() && !app.selecting);
+        assert!(
+            app.open_files[0].lines.is_empty(),
+            "nothing typed into a model"
+        );
+
+        // A video pauses with Space; it never takes typing either.
+        app.open_file(directory.path().join("clip.mp4")).unwrap();
+        let hint = |app: &App| app.active_file().unwrap().media.as_ref().unwrap().hint();
+        assert_eq!(hint(&app).as_deref(), Some("Space: pause"));
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(hint(&app).as_deref(), Some("Paused  Space: play"));
+        app.editor_paste("text");
+        assert!(app.active_file().unwrap().lines.is_empty());
+    }
+
+    #[test]
+    fn a_gif_plays_in_its_tab_and_installed_tools_reach_the_status_bar() {
+        use image::{Delay, Frame, Rgba, RgbaImage, codecs::gif::GifEncoder};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("blink.gif");
+        let mut encoder = GifEncoder::new(std::fs::File::create(&path).unwrap());
+        for colour in [[255, 0, 0, 255], [0, 0, 255, 255]] {
+            let frame = RgbaImage::from_pixel(4, 4, Rgba(colour));
+            let delay = Delay::from_numer_denom_ms(100, 1);
+            encoder
+                .encode_frame(Frame::from_parts(frame, 0, 0, delay))
+                .unwrap();
+        }
+        drop(encoder);
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path).unwrap();
+        let hint = |app: &App| app.active_file().unwrap().media.as_ref().unwrap().hint();
+        assert_eq!(hint(&app).as_deref(), Some("Frame 1/2"));
+        app.tick_at(Instant::now() + Duration::from_millis(150));
+        assert_eq!(hint(&app).as_deref(), Some("Frame 2/2"));
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.dependencies = Some(receiver);
+        app.tick_at(Instant::now());
+        assert_ne!(app.status, "Installed ffmpeg");
+        sender.send("Installed ffmpeg".into()).unwrap();
+        app.tick_at(Instant::now());
+        assert_eq!(app.status, "Installed ffmpeg");
+        assert!(app.dependencies.is_none());
     }
 
     #[test]

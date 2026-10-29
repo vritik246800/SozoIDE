@@ -200,17 +200,6 @@ fn span_style(style: syntect::highlighting::Style) -> Style {
     result
 }
 
-pub fn is_image_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "webp"
-            )
-        })
-}
-
 /// The icon of a file by its name or extension (`devicons`, Nerd Fonts glyphs) in the nearest
 /// ANSI colour. Unknown types get the plain document icon instead of the crate's `*`.
 pub fn file_icon(path: &Path) -> (char, Color) {

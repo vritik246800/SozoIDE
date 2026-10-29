@@ -19,6 +19,7 @@ use anyhow::{Context, Result, bail};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+pub mod deps;
 mod install;
 mod notes;
 

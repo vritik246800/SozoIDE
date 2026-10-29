@@ -2,6 +2,7 @@ use std::{
     io::Write,
     path::PathBuf,
     process::{Command, Stdio},
+    sync::mpsc::Receiver,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -81,6 +82,8 @@ pub struct App {
     pub overlay_scroll: u16,
     /// Text copied in the editor, for `main` to hand to the terminal (OSC 52).
     pub clipboard: Option<String>,
+    /// The message of the installation of git, curl or ffmpeg running in the background (F24).
+    dependencies: Option<Receiver<String>>,
     /// The last text copied here, for Ctrl+V when the system clipboard cannot be read.
     copied: Option<String>,
     /// The file or folder Copy or Cut (true) kept in the Explorer, for Paste.
@@ -91,6 +94,8 @@ pub struct App {
     folders: Vec<Option<SystemTime>>,
     /// A mouse drag that started in the editor text selects.
     selecting: bool,
+    /// Where a drag over a 3D model was last: moving from there turns it.
+    turning: Option<(u16, u16)>,
     /// The last time the wheel turned a PDF page: one page per gesture, not per event.
     page_turned: Option<Instant>,
     pub split: Option<Split>,
@@ -119,6 +124,9 @@ impl App {
         } else {
             Welcome::None
         };
+        // A new installation or a new version installs the tools it is missing (Q41).
+        let dependencies =
+            (welcome != Welcome::None).then(crate::update::deps::install_in_background);
         let mut app = Self {
             root,
             entries: Vec::new(),
@@ -154,11 +162,13 @@ impl App {
             notes: Vec::new(),
             overlay_scroll: 0,
             clipboard: None,
+            dependencies,
             copied: None,
             file_clipboard: None,
             watched: now,
             folders: Vec::new(),
             selecting: false,
+            turning: None,
             page_turned: None,
             split: None,
             tab_bars: [TabBar::default(); 2],
@@ -214,9 +224,25 @@ impl App {
         for index in due {
             self.save_file(index);
         }
+        // GIFs and videos move on, also in the pane that is not focused.
+        for media in self
+            .open_files
+            .iter_mut()
+            .filter_map(|file| file.media.as_mut())
+        {
+            media.tick(now);
+        }
         if now.duration_since(self.watched) >= WATCH_INTERVAL {
             self.watched = now;
             self.watch_disk();
+        }
+        if let Some(message) = self
+            .dependencies
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok())
+        {
+            self.status = message;
+            self.dependencies = None;
         }
         self.database.tick_at(now);
         // Copy in the SQL tab: the app owns the clipboard.
@@ -560,7 +586,7 @@ impl App {
             || self
                 .active_tab
                 .and_then(|index| self.open_files.get(index))
-                .is_none_or(|file| file.image.is_some())
+                .is_none_or(|file| !file.is_text())
         {
             return;
         }

@@ -474,6 +474,17 @@ fn render_file(
     marks: &[(usize, usize, usize, bool)],
 ) {
     let title = format!(" {} — {} ", file.path.display(), file.language);
+    if let Some(media) = &mut file.media {
+        let mut block = panel_block(title, focused);
+        // The keys of a model or a video on the right of the border, like the page of a PDF.
+        if let Some(hint) = media.hint() {
+            block = block.title_top(Line::from(format!(" {hint} ")).right_aligned());
+        }
+        let inner = block.inner(area);
+        let lines = media.lines(inner.width, inner.height).to_vec();
+        frame.render_widget(Paragraph::new(lines).block(block), area);
+        return;
+    }
     if let Some(image) = &mut file.image {
         let mut block = panel_block(title, focused);
         // The page of a PDF on the right of the border, where a long path does not hide it.

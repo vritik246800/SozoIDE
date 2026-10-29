@@ -11,7 +11,7 @@ use std::{
 
 use ignore::WalkBuilder;
 
-use super::{OpenFile, is_image_path};
+use super::OpenFile;
 
 /// More results than anyone reads; the workspace search stops there (F05).
 pub const MAX_MATCHES: usize = 2000;
@@ -194,7 +194,9 @@ fn search_workspace(root: &Path, query: &[char], stop: &AtomicBool, send: impl F
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        if !entry.file_type().is_some_and(|kind| kind.is_file()) || is_image_path(entry.path()) {
+        if !entry.file_type().is_some_and(|kind| kind.is_file())
+            || crate::media::kind(entry.path()).is_some()
+        {
             continue;
         }
         let Ok(bytes) = fs::read(entry.path()) else {

@@ -436,6 +436,17 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             ],
         },
         HelpSection {
+            title: "3D models and videos",
+            color: Color::LightMagenta,
+            keys: vec![
+                ("Left / Right", "Turn the model"),
+                ("Up / Down", "Tilt the model"),
+                ("+ / - or wheel", "Zoom in / out"),
+                ("Drag", "Turn it with the mouse"),
+                ("Space", "Pause or play a video"),
+            ],
+        },
+        HelpSection {
             title: "Source Control",
             color: Color::Magenta,
             keys: vec![

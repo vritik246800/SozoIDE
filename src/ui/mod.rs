@@ -295,7 +295,20 @@ mod tests {
         );
         app.open_file(app.root.join("assets/Sozo.png")).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        assert!(app.active_file().unwrap().image.is_some());
+        // Pictures are drawn as half blocks in their own colours (Q43).
+        let file = app.active_file().unwrap();
+        assert!(file.media.is_some() && file.image.is_none());
+        let blocks = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .filter(|cell| {
+                matches!(cell.symbol(), "▀" | "▄")
+                    && matches!(cell.fg, ratatui::style::Color::Rgb(..))
+            })
+            .count();
+        assert!(blocks > 100, "{blocks}");
         app.overlay = Overlay::Help;
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         app.overlay = Overlay::About;
@@ -1196,6 +1209,8 @@ mod tests {
             "Remove the builder row",
             "Undo the last edit",
             "New, rename, delete",
+            "Turn the model",
+            "Pause or play a video",
             "Cut, copy, paste (Explorer)",
             "Cut, copy, paste the text",
         ] {
@@ -1244,6 +1259,32 @@ mod tests {
             .map(|y| row(buffer, y))
             .collect::<Vec<_>>();
         assert!(rows.iter().all(|line| !line.contains("old text")));
+    }
+
+    #[test]
+    fn a_model_is_drawn_in_half_blocks_with_its_keys_in_the_title() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ship.glb");
+        std::fs::write(&path, crate::media::sample_glb()).unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path).unwrap();
+        settle(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert_eq!(app.active_file().unwrap().language, "3D model");
+        assert!(text.contains("←/→ turn  ↑/↓ tilt  +/- zoom"));
+        let red = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .filter(|cell| {
+                matches!(cell.symbol(), "▀" | "▄")
+                    && matches!(cell.fg, ratatui::style::Color::Rgb(red, 0, 0) if red > 60)
+            })
+            .count();
+        assert!(red > 20, "{red}");
     }
 
     #[test]

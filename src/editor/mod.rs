@@ -13,6 +13,8 @@ use ratatui::{
 };
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 
+use crate::media::{self, Media};
+
 mod highlight;
 mod markdown;
 mod mermaid;
@@ -20,7 +22,7 @@ mod pdf;
 mod search;
 
 use highlight::FileHighlight;
-pub use highlight::{file_icon, highlight_lines, is_image_path, language_name};
+pub use highlight::{file_icon, highlight_lines, language_name};
 #[cfg(test)]
 pub use pdf::sample as sample_pdf;
 use pdf::{PdfDocument, is_pdf_path};
@@ -62,6 +64,8 @@ pub struct OpenFile {
     /// Rows on screen; a Mermaid diagram can take more rows than its source.
     rows: Vec<Row>,
     pub image: Option<StatefulProtocol>,
+    /// A picture, GIF, video or 3D model, drawn as text (F03, F22, F23).
+    pub media: Option<Media>,
     /// A PDF shows one page at a time as `image` (F21).
     pub pdf: Option<PdfDocument>,
     /// The first row on screen (`rows`, not source lines) and the first column.
@@ -98,8 +102,10 @@ impl OpenFile {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
         let icon = file_icon(&path);
-        if is_image_path(&path) || is_pdf_path(&path) {
-            let (language, image, pdf) = if is_pdf_path(&path) {
+        if media::kind(&path).is_some() || is_pdf_path(&path) {
+            // Pictures, GIFs, videos and models are drawn as text (Q43); a PDF page keeps the
+            // terminal's picture protocol, where its text stays readable.
+            let (language, image, pdf, media) = if is_pdf_path(&path) {
                 let bytes = fs::read(&path)
                     .with_context(|| format!("Could not open {}", path.display()))?;
                 let document = PdfDocument::open(bytes)
@@ -107,13 +113,11 @@ impl OpenFile {
                 let page = document
                     .render(0)
                     .with_context(|| format!("Could not draw {}", path.display()))?;
-                ("PDF", page, Some(document))
+                let page = picker.new_resize_protocol(page);
+                ("PDF", Some(page), Some(document), None)
             } else {
-                let image = image::ImageReader::open(&path)
-                    .with_context(|| format!("Could not open {}", path.display()))?
-                    .decode()
-                    .with_context(|| format!("Could not decode {}", path.display()))?;
-                ("Image", image, None)
+                let media = Media::open(&path)?;
+                (media.language(), None, None, Some(media))
             };
             return Ok(Self {
                 path,
@@ -125,8 +129,9 @@ impl OpenFile {
                 highlight: FileHighlight::default(),
                 markdown: None,
                 rows: Vec::new(),
-                image: Some(picker.new_resize_protocol(image)),
+                image,
                 pdf,
+                media,
                 scroll: 0,
                 scroll_x: 0,
                 max_width: 0,
@@ -162,6 +167,7 @@ impl OpenFile {
             rows: Vec::new(),
             image: None,
             pdf: None,
+            media: None,
             scroll: 0,
             scroll_x: 0,
             max_width: 0,
@@ -180,6 +186,11 @@ impl OpenFile {
         };
         file.layout();
         Ok(file)
+    }
+
+    /// Text to edit, not a picture, a PDF, a video or a model.
+    pub fn is_text(&self) -> bool {
+        self.image.is_none() && self.media.is_none()
     }
 
     /// The page on screen and the number of pages of a PDF.
@@ -323,7 +334,7 @@ impl OpenFile {
 
     /// Another program changed the file since it was read or saved (a text file still there).
     pub fn changed_on_disk(&self) -> bool {
-        self.image.is_none() && on_disk(&self.path).is_some_and(|disk| Some(disk) != self.disk)
+        self.is_text() && on_disk(&self.path).is_some_and(|disk| Some(disk) != self.disk)
     }
 
     /// Another program changed the file while it has edits not saved: they stay, and are
