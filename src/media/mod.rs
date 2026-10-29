@@ -54,7 +54,8 @@ enum Content {
         frame: usize,
         next_at: Instant,
     },
-    Video(Video),
+    /// Boxed: with its two processes it is the largest by far, most of all on Windows (E33).
+    Video(Box<Video>),
     Model(Model),
 }
 
@@ -68,7 +69,7 @@ pub struct Media {
 impl Media {
     pub fn open(path: &Path) -> Result<Self> {
         let content = match kind(path).context("Not a picture, a video or a model")? {
-            Kind::Video => Content::Video(Video::open(path)),
+            Kind::Video => Content::Video(Box::new(Video::open(path))),
             Kind::Model => Content::Model(Model::load(path)?),
             Kind::Picture if is_gif(path) => animation(path)?,
             Kind::Picture => {
@@ -158,7 +159,7 @@ impl Media {
     /// The video in the tab, if it is one.
     pub fn video(&self) -> Option<&Video> {
         match &self.content {
-            Content::Video(video) => Some(video),
+            Content::Video(video) => Some(video.as_ref()),
             _ => None,
         }
     }
@@ -244,7 +245,7 @@ impl Media {
 #[cfg(test)]
 pub fn sample_video() -> Media {
     Media {
-        content: Content::Video(video::sample()),
+        content: Content::Video(Box::new(video::sample())),
         version: 0,
         drawn: None,
     }
