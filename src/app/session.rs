@@ -173,6 +173,9 @@ mod tests {
         fs::write(project.join("src/main.rs"), "fn main() {\n    run();\n}\n").unwrap();
         fs::write(project.join("src/deep/gone.txt"), "soon deleted\n").unwrap();
         fs::write(project.join("README.md"), "# Read me\n").unwrap();
+        image::RgbaImage::new(2, 2)
+            .save(project.join("dot.png"))
+            .unwrap();
         let sessions = directory.path().join("settings/sessions.toml");
         // Another folder's session in the file stays when this one is written.
         fs::create_dir_all(sessions.parent().unwrap()).unwrap();
@@ -194,6 +197,8 @@ mod tests {
         app.open_file(project.join("src/main.rs")).unwrap();
         app.open_files[1].move_cursor_to(1, 4);
         app.open_file(project.join("README.md")).unwrap();
+        // A picture or a video has no lines: its saved cursor must not panic (E34).
+        app.open_file(project.join("dot.png")).unwrap();
         app.select_tab(1);
         app.show_bottom_terminal = true;
         app.explorer_width = 44;
@@ -221,7 +226,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             tabs,
-            ["main.rs", "README.md"],
+            ["main.rs", "README.md", "dot.png"],
             "the deleted file is skipped"
         );
         let active = again.active_file().unwrap();

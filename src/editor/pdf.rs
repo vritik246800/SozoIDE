@@ -1,11 +1,18 @@
 //! PDF files (F21): a page with nothing but text shows its text, from `pdf-extract`, which can
 //! be selected and searched; a page with a picture or a drawing is drawn whole by `hayro` (pure
 //! Rust, no system libraries) into a small image that reaches the terminal like any other
-//! (Q49, Q50).
+//! (Q49, Q50). The pages around the one on screen are made in the background, several at once
+//! with `rayon`, so that turning a page shows it at once.
 
 use std::{
+    collections::{HashMap, HashSet},
+    ops::RangeInclusive,
     panic::{self, AssertUnwindSafe},
     path::Path,
+    sync::{
+        Arc,
+        mpsc::{Receiver, Sender, channel},
+    },
 };
 
 use anyhow::{Result, anyhow, bail};
@@ -22,22 +29,35 @@ use hayro::{
     vello_cpu::color::palette::css::WHITE,
 };
 use image::{DynamicImage, RgbaImage};
+use rayon::prelude::*;
 
 /// Pixels across a page drawn as an image: low resolution (Q50), still readable in Sixel, Kitty
 /// and iTerm2 terminals, quick to draw and small to send.
 const PAGE_PIXELS: f32 = 800.0;
 /// A drawing thinner than this, in points, is a rule or an underline: it stays text.
 const RULE: f64 = 2.0;
+/// Pages made ahead of the one on screen (and one behind it).
+pub const BUFFERED: usize = 10;
 
 pub struct PdfDocument {
-    pdf: Pdf,
-    /// The text of each page; empty when it could not be read.
-    texts: Vec<String>,
+    pages: Arc<Pages>,
+    /// The pages made in the background, and those still being made.
+    made: HashMap<usize, PageView>,
+    making: HashSet<usize>,
+    sender: Sender<(usize, Option<PageView>)>,
+    receiver: Receiver<(usize, Option<PageView>)>,
     /// The page on screen, from 0.
     pub page: usize,
 }
 
+struct Pages {
+    pdf: Pdf,
+    /// The text of each page; empty when it could not be read.
+    texts: Vec<String>,
+}
+
 /// How a page shows: as its lines of text, or as a picture.
+#[derive(Clone)]
 pub enum PageView {
     Text(Vec<String>),
     Picture(DynamicImage),
@@ -50,19 +70,97 @@ impl PdfDocument {
         if pdf.pages().is_empty() {
             bail!("The PDF has no pages");
         }
+        let (sender, receiver) = channel();
         Ok(Self {
-            pdf,
-            texts,
+            pages: Arc::new(Pages { pdf, texts }),
+            made: HashMap::new(),
+            making: HashSet::new(),
+            sender,
+            receiver,
             page: 0,
         })
     }
 
     pub fn pages(&self) -> usize {
-        self.pdf.pages().len()
+        self.pages.pdf.pages().len()
     }
 
+    /// Page `page` (from 0): made in the background already, or made now.
+    pub fn view(&mut self, page: usize) -> Option<PageView> {
+        self.receive();
+        match self.made.get(&page) {
+            Some(view) => Some(view.clone()),
+            None => self.pages.view(page),
+        }
+    }
+
+    /// Starts making the pages around the one on screen that are not made yet, several at
+    /// once, and forgets those far from it.
+    pub fn prefetch(&mut self) {
+        self.receive();
+        let page = self.page;
+        let near = window(page, self.pages());
+        self.made.retain(|made, _| near.contains(made));
+        let wanted = near
+            .filter(|near| *near != page && !self.made.contains_key(near))
+            .filter(|near| self.making.insert(*near))
+            .collect::<Vec<_>>();
+        if wanted.is_empty() {
+            return;
+        }
+        let (pages, sender) = (Arc::clone(&self.pages), self.sender.clone());
+        rayon::spawn(move || {
+            wanted
+                .into_par_iter()
+                .for_each_with(sender, |sender, page| {
+                    let _ = sender.send((page, pages.view(page)));
+                });
+        });
+    }
+
+    /// Keeps the pages made in the background since the last look.
+    fn receive(&mut self) {
+        let near = window(self.page, self.pages());
+        while let Ok((page, view)) = self.receiver.try_recv() {
+            self.making.remove(&page);
+            if let Some(view) = view.filter(|_| near.contains(&page)) {
+                self.made.insert(page, view);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn made(&self) -> usize {
+        self.made.len()
+    }
+
+    /// Waits for every page being made in the background.
+    #[cfg(test)]
+    pub fn wait(&mut self) {
+        while !self.making.is_empty() {
+            if let Ok((page, view)) = self.receiver.recv() {
+                self.making.remove(&page);
+                if let Some(view) = view {
+                    self.made.insert(page, view);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn render(&self, page: usize) -> Option<DynamicImage> {
+        self.pages.render(page)
+    }
+}
+
+/// The pages kept around `page`: one behind it and `BUFFERED` ahead.
+fn window(page: usize, pages: usize) -> RangeInclusive<usize> {
+    page.saturating_sub(1)..=(page + BUFFERED).min(pages.saturating_sub(1))
+}
+
+impl Pages {
     /// Page `page` (from 0) as text when it has only text, else as a picture.
-    pub fn view(&self, page: usize) -> Option<PageView> {
+    fn view(&self, page: usize) -> Option<PageView> {
         let lines = self.texts.get(page).map(|text| text_lines(text));
         match lines {
             Some(lines) if !lines.is_empty() && !self.has_graphics(page)? => {
@@ -96,7 +194,7 @@ impl PdfDocument {
     }
 
     /// Page `page` (from 0) on a white sheet; the sheet is the page's own colour, not the UI's.
-    pub fn render(&self, page: usize) -> Option<DynamicImage> {
+    fn render(&self, page: usize) -> Option<DynamicImage> {
         let page = self.pdf.pages().get(page)?;
         let scale = PAGE_PIXELS / page.render_dimensions().0.max(1.0);
         let pixmap = render(
@@ -260,7 +358,8 @@ mod tests {
         // A rule under the text stays text; a square next to it makes the page a picture.
         let ruled = format!("{text} 5 30 90 0.5 re f");
         let mixed = format!("{text} {SQUARE}");
-        let document = PdfDocument::open(sample_pages(&[text, &ruled, &mixed, SQUARE])).unwrap();
+        let mut document =
+            PdfDocument::open(sample_pages(&[text, &ruled, &mixed, SQUARE])).unwrap();
         for page in [0, 1] {
             let Some(PageView::Text(lines)) = document.view(page) else {
                 panic!("page {page} is text");
@@ -276,5 +375,21 @@ mod tests {
         );
         assert!(document.view(4).is_none());
         assert_eq!(text_lines("\n\n a\n\n\n\nb  \n\n"), [" a", "", "b"]);
+    }
+
+    #[test]
+    fn the_pages_around_the_one_on_screen_are_made_in_the_background() {
+        let mut document = PdfDocument::open(sample(15)).unwrap();
+        document.prefetch();
+        document.wait();
+        assert_eq!(document.made(), BUFFERED, "pages 2 to 11");
+        assert!(matches!(document.view(10), Some(PageView::Picture(_))));
+        // Far ahead: the pages left behind are forgotten, the new ones made.
+        document.page = 12;
+        document.prefetch();
+        document.wait();
+        assert_eq!(document.made(), 3, "pages 12, 14 and 15");
+        assert_eq!(window(0, 1), 0..=0);
+        assert_eq!(window(5, 100), 4..=15);
     }
 }

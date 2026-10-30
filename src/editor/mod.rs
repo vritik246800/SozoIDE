@@ -223,7 +223,7 @@ impl OpenFile {
     /// Puts page `page` on screen: its text from the top, or its picture; false when it
     /// cannot be drawn.
     fn set_page(&mut self, page: usize, picker: &mut Picker) -> bool {
-        let Some(view) = self.pdf.as_ref().and_then(|document| document.view(page)) else {
+        let Some(view) = self.pdf.as_mut().and_then(|document| document.view(page)) else {
             return false;
         };
         let lines = match view {
@@ -246,6 +246,7 @@ impl OpenFile {
         self.layout();
         if let Some(document) = &mut self.pdf {
             document.page = page;
+            document.prefetch();
         }
         true
     }
@@ -716,7 +717,12 @@ impl OpenFile {
     fn clamp_cursor(&mut self) {
         self.follow_cursor = true;
         self.cursor_row = self.cursor_row.min(self.lines.len().saturating_sub(1));
-        self.cursor_column = self.cursor_column.min(self.current_line().chars().count());
+        // A picture, video, model or PDF has no lines (E34).
+        let length = self
+            .lines
+            .get(self.cursor_row)
+            .map_or(0, |line| line.chars().count());
+        self.cursor_column = self.cursor_column.min(length);
     }
 }
 

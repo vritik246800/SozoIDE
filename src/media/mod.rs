@@ -218,8 +218,11 @@ impl Media {
     /// picture changed.
     pub fn lines(&mut self, width: u16, height: u16) -> &[Line<'static>] {
         let key = (width, height, self.version);
+        if let Content::Video(video) = &self.content {
+            video.draw_in(width, height);
+        }
         if self.drawn.as_ref().is_none_or(|(drawn, _)| *drawn != key) {
-            let lines = match &self.content {
+            let lines = match &mut self.content {
                 Content::Picture(picture) => ascii::render(picture, width, height),
                 Content::Animation { frames, frame, .. } => {
                     ascii::render(&frames[*frame].0, width, height)
@@ -231,7 +234,11 @@ impl Media {
                 ),
                 Content::Video(video) => match (&video.error, &video.frame) {
                     (Some(error), _) => message(error, height),
-                    (None, Some(frame)) => ascii::render(frame, width, height),
+                    // Made with the frame in the background, unless the tab changed size.
+                    (None, Some(frame)) => match video.drawn.take() {
+                        Some((cells, lines)) if cells == (width, height) => lines,
+                        _ => ascii::render(frame, width, height),
+                    },
                     (None, None) => message("Loading the video...", height),
                 },
             };
@@ -246,6 +253,16 @@ impl Media {
 pub fn sample_video() -> Media {
     Media {
         content: Content::Video(Box::new(video::sample())),
+        version: 0,
+        drawn: None,
+    }
+}
+
+/// That video with one green frame on its way from `ffmpeg`.
+#[cfg(test)]
+pub fn sample_video_with_a_frame() -> Media {
+    Media {
+        content: Content::Video(Box::new(video::sample_with_a_frame())),
         version: 0,
         drawn: None,
     }

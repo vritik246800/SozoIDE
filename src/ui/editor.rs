@@ -1,5 +1,6 @@
 use ratatui::{
     Frame,
+    buffer::CellDiffOption,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -8,7 +9,7 @@ use ratatui::{
         ScrollbarState,
     },
 };
-use ratatui_image::{Resize, StatefulImage};
+use ratatui_image::{Resize, StatefulImage, protocol::StatefulProtocol};
 use tui_term::widget::{Cursor, PseudoTerminal};
 
 use crate::{
@@ -646,25 +647,33 @@ pub(super) fn render_media(
         let [picture, progress, buttons] = video_areas(area);
         render_video_controls(frame, video, progress, buttons);
         frame.render_widget(block, area);
-        match file.image.as_mut().filter(|_| video.error.is_none()) {
-            // ponytail: each frame is scaled to the pane and sent whole; encode in a
-            // thread (ratatui-image `thread`) if it slows the keys in Sixel terminals.
-            Some(image) => frame.render_stateful_widget(
-                StatefulImage::new().resize(Resize::Scale(None)),
-                picture,
-                image,
-            ),
-            None => {
-                let lines = media.lines(picture.width, picture.height).to_vec();
-                frame.render_widget(Paragraph::new(lines), picture);
-            }
-        }
+        let lines = media.lines(picture.width, picture.height).to_vec();
+        frame.render_widget(Paragraph::new(lines), picture);
         return true;
     }
     let inner = block.inner(area);
     let lines = media.lines(inner.width, inner.height).to_vec();
     frame.render_widget(Paragraph::new(lines).block(block), area);
     true
+}
+
+/// A picture in the terminal's picture protocol. In Kitty each row of it, and the picture
+/// itself on the first frame, is text in the row's first cell; ratatui counts that text as that
+/// many columns and skips as many cells after it, so the rest of the screen stayed undrawn
+/// until another tab redrew it (E35). One column it is.
+pub(super) fn render_picture(
+    frame: &mut Frame,
+    image: &mut StatefulProtocol,
+    area: Rect,
+    resize: Resize,
+) {
+    frame.render_stateful_widget(StatefulImage::new().resize(resize), area, image);
+    let buffer = frame.buffer_mut();
+    for y in area.top()..area.bottom() {
+        if let Some(cell) = buffer.cell_mut((area.x, y)) {
+            cell.set_diff_option(CellDiffOption::ForcedWidth(std::num::NonZeroU16::MIN));
+        }
+    }
 }
 
 /// Under a video: the time, the progress bar and the length; then the buttons, with the
@@ -719,7 +728,7 @@ fn render_file(
                 block.title_top(Line::from(format!(" Page {}/{pages} ", page + 1)).right_aligned());
         }
         let inner = block.inner(area);
-        frame.render_stateful_widget(StatefulImage::new().resize(Resize::Fit(None)), inner, image);
+        render_picture(frame, image, inner, Resize::Fit(None));
         frame.render_widget(block, area);
         return;
     }

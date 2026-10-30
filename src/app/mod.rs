@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::picker::Picker;
 
 use crate::{
     database::controller::DatabaseController,
@@ -257,20 +257,14 @@ impl App {
         for index in due {
             self.save_file(index);
         }
-        // GIFs and videos move on, also in the pane that is not focused. A video frame goes
-        // to the terminal's picture protocol when it has one, else it is half blocks (F23).
-        let protocol = self.picker.protocol_type() != ProtocolType::Halfblocks;
-        for file in &mut self.open_files {
-            let Some(media) = &mut file.media else {
-                continue;
-            };
-            if media.tick(now) && protocol {
-                let frame = media.video().and_then(|video| video.frame.clone());
-                file.image = frame.map(|frame| {
-                    self.picker
-                        .new_resize_protocol(image::DynamicImage::ImageRgba8(frame))
-                });
-            }
+        // GIFs and videos move on, also in the pane that is not focused. Videos are half
+        // blocks in every terminal, without its picture protocol (F23).
+        for media in self
+            .open_files
+            .iter_mut()
+            .filter_map(|file| file.media.as_mut())
+        {
+            media.tick(now);
         }
         if now.duration_since(self.watched) >= WATCH_INTERVAL {
             self.watched = now;

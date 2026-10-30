@@ -1,20 +1,29 @@
 //! Videos through the system's `ffmpeg` (F23, Q41): a thread reads its frames, small and in
 //! RGB, and the tab shows each when its time comes; `ffplay` plays the sound (Q51). Nothing links
 //! FFmpeg into `sozo`; without the command the tab says how to get it. Seeking, the volume and
-//! the speed start the processes again from the position on screen.
+//! the speed start the processes again from the position on screen. Frames are half blocks in
+//! every terminal, made off the UI thread: up to `BUFFERED` at once with `rayon`, in order.
 
 use std::{
+    collections::VecDeque,
     io::Read,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel},
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+        mpsc::{Receiver, SyncSender, TryRecvError, sync_channel},
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use image::{RgbImage, RgbaImage};
+use ratatui::text::Line;
 
 pub const FPS: u32 = 15;
+/// Frames made at once, and frames waiting to show.
+const BUFFERED: usize = 10;
 /// The largest frame asked of `ffmpeg`: small frames (Modo 2) are quick to send to a terminal.
 const LARGEST: (u32, u32) = (320, 180);
 /// The speeds `[` and `]` step through.
@@ -50,14 +59,27 @@ struct Info {
     sound: bool,
 }
 
+/// A frame from `ffmpeg`, and its half blocks when the size of the tab was known.
+pub struct Frame {
+    picture: RgbaImage,
+    drawn: Option<Drawn>,
+}
+
+/// Half blocks for `(width, height)` cells.
+pub type Drawn = ((u16, u16), Vec<Line<'static>>);
+
 pub struct Video {
     path: PathBuf,
     info: Option<Info>,
-    frames: Option<Receiver<RgbaImage>>,
+    frames: Option<Receiver<Frame>>,
     child: Option<Child>,
     /// `ffplay`, while the sound plays.
     sound: Option<Child>,
     pub frame: Option<RgbaImage>,
+    /// The half blocks of `frame`, made with it.
+    pub drawn: Option<Drawn>,
+    /// The cells the tab draws in, width and height in one number, for the frames being made.
+    cells: Arc<AtomicU32>,
     /// Where `ffmpeg` started, when, and the frames shown since: frame `n` is due `n / FPS`
     /// after `started`.
     from: Duration,
@@ -96,6 +118,8 @@ impl Video {
             child: None,
             sound: None,
             frame: None,
+            drawn: None,
+            cells: Arc::new(AtomicU32::new(0)),
             from: Duration::ZERO,
             started: Instant::now(),
             shown: 0,
@@ -149,10 +173,10 @@ impl Video {
                 return;
             }
         };
-        let (sender, receiver) = sync_channel(2);
+        let (sender, receiver) = sync_channel(BUFFERED);
         if let Some(stdout) = child.stdout.take() {
-            let size = info.size;
-            thread::spawn(move || read_frames(stdout, size, &sender));
+            let (size, cells) = (info.size, Arc::clone(&self.cells));
+            thread::spawn(move || read_frames(stdout, size, &cells, &sender));
         }
         self.frames = Some(receiver);
         self.child = Some(child);
@@ -239,7 +263,8 @@ impl Video {
             }
             match frames.try_recv() {
                 Ok(frame) => {
-                    self.frame = Some(frame);
+                    self.frame = Some(frame.picture);
+                    self.drawn = frame.drawn;
                     self.shown += 1;
                     changed = true;
                 }
@@ -255,6 +280,12 @@ impl Video {
             }
         }
         changed
+    }
+
+    /// The tab draws in `width` × `height` cells: the frames being made fit them.
+    pub fn draw_in(&self, width: u16, height: u16) {
+        let cells = u32::from(width) << 16 | u32::from(height);
+        self.cells.store(cells, Ordering::Relaxed);
     }
 
     /// Does what a key or a button asks; false for what the video does not do itself.
@@ -480,17 +511,57 @@ fn fit((width, height): (u32, u32), (most_width, most_height): (u32, u32)) -> (u
     (even(width as f32 * scale), even(height as f32 * scale))
 }
 
-fn read_frames(mut stdout: impl Read, (width, height): (u32, u32), sender: &SyncSender<RgbaImage>) {
+/// Reads `ffmpeg`'s frames and has each made in `rayon`'s threads, up to `BUFFERED` at once:
+/// while one is made the next ones start. They are sent on in the order they came.
+fn read_frames(
+    mut stdout: impl Read,
+    (width, height): (u32, u32),
+    cells: &AtomicU32,
+    sender: &SyncSender<Frame>,
+) {
+    let mut making = VecDeque::new();
     let mut bytes = vec![0; (width * height * 3) as usize];
-    while stdout.read_exact(&mut bytes).is_ok() {
-        let Some(frame) = RgbImage::from_raw(width, height, bytes.clone()) else {
-            return;
-        };
-        let frame = image::DynamicImage::ImageRgb8(frame).to_rgba8();
-        if sender.send(frame).is_err() {
+    loop {
+        let read = stdout.read_exact(&mut bytes).is_ok();
+        if read {
+            let (bytes, cells) = (bytes.clone(), cells.load(Ordering::Relaxed));
+            let (done, made) = sync_channel(1);
+            rayon::spawn(move || {
+                let _ = done.send(make_frame(bytes, (width, height), cells));
+            });
+            making.push_back(made);
+        }
+        while let Some(made) = making.front() {
+            let frame = match made.try_recv() {
+                Ok(frame) => frame,
+                Err(TryRecvError::Empty) if read && making.len() < BUFFERED => break,
+                Err(TryRecvError::Empty) => made.recv().ok().flatten(),
+                Err(TryRecvError::Disconnected) => None,
+            };
+            making.pop_front();
+            if frame.is_none_or(|frame| sender.send(frame).is_err()) {
+                return;
+            }
+        }
+        if !read {
             return;
         }
     }
+}
+
+/// A frame from its RGB bytes, with its half blocks when `cells` (width and height in one
+/// number) says the size of the tab.
+fn make_frame(bytes: Vec<u8>, (width, height): (u32, u32), cells: u32) -> Option<Frame> {
+    let picture = RgbImage::from_raw(width, height, bytes)?;
+    let picture = image::DynamicImage::ImageRgb8(picture).to_rgba8();
+    let (columns, rows) = ((cells >> 16) as u16, cells as u16);
+    let drawn = (columns > 0 && rows > 0).then(|| {
+        (
+            (columns, rows),
+            super::ascii::render(&picture, columns, rows),
+        )
+    });
+    Some(Frame { picture, drawn })
 }
 
 /// What `ffprobe` says of a 75.5 s video with sound, for the tests.
@@ -504,19 +575,36 @@ pub fn sample() -> Video {
     Video::new(Path::new("clip.mp4"), parse_probe(PROBE))
 }
 
+/// That video with one green frame on its way from `ffmpeg`.
+#[cfg(test)]
+pub fn sample_with_a_frame() -> Video {
+    let (sender, receiver) = sync_channel(1);
+    let picture = RgbaImage::from_pixel(32, 18, image::Rgba([0, 255, 0, 255]));
+    let _ = sender.send(Frame {
+        picture,
+        drawn: None,
+    });
+    let mut video = sample();
+    video.frames = Some(receiver);
+    video
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// A video of 75.5 s whose frames come from `frames` instead of `ffmpeg`.
-    fn video(frames: Receiver<RgbaImage>) -> Video {
+    fn video(frames: Receiver<Frame>) -> Video {
         let mut video = sample();
         video.frames = Some(frames);
         video
     }
 
-    fn frame(value: u8) -> RgbaImage {
-        RgbaImage::from_pixel(2, 2, image::Rgba([value, 0, 0, 255]))
+    fn frame(value: u8) -> Frame {
+        Frame {
+            picture: RgbaImage::from_pixel(2, 2, image::Rgba([value, 0, 0, 255])),
+            drawn: None,
+        }
     }
 
     #[test]
@@ -532,11 +620,46 @@ mod tests {
         let mut pipe = vec![255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 255, 0];
         pipe.extend([1, 2]);
         let (sender, receiver) = sync_channel(4);
-        read_frames(pipe.as_slice(), (2, 1), &sender);
+        read_frames(pipe.as_slice(), (2, 1), &AtomicU32::new(0), &sender);
         drop(sender);
         let frames = receiver.iter().collect::<Vec<_>>();
         assert_eq!(frames.len(), 2);
-        assert_eq!(frames[1].get_pixel(1, 0).0, [0, 255, 0, 255]);
+        assert_eq!(frames[1].picture.get_pixel(1, 0).0, [0, 255, 0, 255]);
+        assert!(
+            frames[0].drawn.is_none(),
+            "the size of the tab is not known yet"
+        );
+    }
+
+    #[test]
+    fn many_frames_are_made_at_once_and_come_out_in_order_drawn() {
+        // 3 × BUFFERED frames of 2 × 2 pixels, each of its own red.
+        let count = 3 * BUFFERED as u8;
+        let pipe = (0..count)
+            .flat_map(|value| [value, 0, 0].repeat(4))
+            .collect::<Vec<_>>();
+        let (sender, receiver) = sync_channel(usize::from(count));
+        let cells = AtomicU32::new(4 << 16 | 2);
+        read_frames(pipe.as_slice(), (2, 2), &cells, &sender);
+        drop(sender);
+        let frames = receiver.iter().collect::<Vec<_>>();
+        let reds = frames
+            .iter()
+            .map(|frame| frame.picture.get_pixel(0, 0).0[0])
+            .collect::<Vec<_>>();
+        assert_eq!(reds, (0..count).collect::<Vec<_>>());
+        let (size, lines) = frames[5].drawn.as_ref().unwrap();
+        assert_eq!(*size, (4, 2));
+        assert!(lines.iter().any(|line| line.to_string().contains('▀')));
+
+        // The video shows the half blocks made with the frame.
+        let (sender, receiver) = sync_channel(1);
+        sender.send(frames.into_iter().nth(5).unwrap()).unwrap();
+        let mut video = video(receiver);
+        video.draw_in(4, 2);
+        assert_eq!(video.cells.load(Ordering::Relaxed), 4 << 16 | 2);
+        assert!(video.tick(video.started));
+        assert_eq!(video.drawn.as_ref().unwrap().0, (4, 2));
     }
 
     #[test]
