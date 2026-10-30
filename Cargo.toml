@@ -1,6 +1,6 @@
 [package]
 name = "SozoIDE"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 authors = ["Vritik Valabdas"]
 description = "A terminal-native integrated development environment"
