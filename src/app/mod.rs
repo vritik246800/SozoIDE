@@ -6,14 +6,14 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use ratatui_image::picker::Picker;
 
 use crate::{
     database::controller::DatabaseController,
     editor::{OpenFile, SearchState},
     git::controller::GitController,
-    terminal::Terminal,
+    terminal::Terminals,
     update::{Notes, UpdateState, Updater, Welcome, notes_since},
 };
 
@@ -21,18 +21,28 @@ mod debugging;
 mod explorer;
 mod input;
 mod intellisense;
+mod keys;
 mod layout;
 mod motion;
 mod session;
 
 pub use explorer::{EntryAction, EntryMenu, FileEntry, NamePrompt};
 pub use intellisense::{Completion, SHOWN_ITEMS};
+pub use keys::{Action, KeyEditor, Keymap};
 use layout::{DragTarget, TabDrag, inner_size};
-pub use layout::{DropZone, Focus, Overlay, Regions, Split, SplitDirection, TabBar, video_areas};
+pub use layout::{
+    DropZone, Focus, Overlay, Regions, Split, SplitDirection, TabBar, TerminalSelection,
+    video_areas,
+};
 pub(crate) use motion::AppMotion;
 
 /// How often the open files and the Explorer are compared with the disk.
 const WATCH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The bottom terminal opens up to three shells, each in a tab; the right one always has two
+/// (F04, Q59).
+pub const BOTTOM_TERMINALS: usize = 3;
+pub const RIGHT_TERMINALS: usize = 2;
 
 /// Pages of the first-start tutorial (`ui::overlays` writes them).
 pub const TUTORIAL_STEPS: usize = 6;
@@ -51,6 +61,8 @@ pub struct App {
     pub entries: Vec<FileEntry>,
     pub selected_entry: usize,
     pub explorer_scroll: usize,
+    /// The columns the Explorer is scrolled sideways by (F01).
+    pub explorer_scroll_x: usize,
     pub open_files: Vec<OpenFile>,
     pub active_tab: Option<usize>,
     pub focus: Focus,
@@ -64,8 +76,16 @@ pub struct App {
     pub explorer_width: u16,
     pub right_terminal_width: u16,
     pub bottom_terminal_height: u16,
-    pub bottom_terminal: Terminal,
-    pub right_terminal: Terminal,
+    pub bottom_terminal: Terminals,
+    pub right_terminal: Terminals,
+    /// Text chosen with the mouse in a terminal, and whether the mouse still holds it (Q57).
+    pub terminal_selection: Option<TerminalSelection>,
+    terminal_dragging: bool,
+    /// The key of each command (F29), where the changed ones are kept, and what Help does
+    /// with them.
+    pub keys: Keymap,
+    keys_path: Option<PathBuf>,
+    pub key_editor: KeyEditor,
     pub regions: Regions,
     pub status: String,
     pub should_quit: bool,
@@ -134,8 +154,9 @@ impl App {
     }
 
     pub fn with_picker(root: PathBuf, picker: Picker, splash: bool) -> Result<Self> {
-        let bottom_terminal = Terminal::new(&root).context("Could not open the bottom terminal")?;
-        let right_terminal = Terminal::new(&root).context("Could not open the right terminal")?;
+        let bottom_terminal = Terminals::new(&root, 1);
+        let right_terminal = Terminals::new(&root, RIGHT_TERMINALS);
+        let keys_path = keys::keys_path();
         let git = GitController::new(root.clone());
         let now = Instant::now();
         let updater = Updater::new(crate::update::enabled());
@@ -154,6 +175,7 @@ impl App {
             entries: Vec::new(),
             selected_entry: 0,
             explorer_scroll: 0,
+            explorer_scroll_x: 0,
             open_files: Vec::new(),
             active_tab: None,
             focus: Focus::Explorer,
@@ -169,6 +191,11 @@ impl App {
             bottom_terminal_height: 12,
             bottom_terminal,
             right_terminal,
+            terminal_selection: None,
+            terminal_dragging: false,
+            keys: Keymap::load(keys_path.as_deref(), std::env::consts::OS),
+            keys_path,
+            key_editor: KeyEditor::default(),
             regions: Regions::default(),
             status: "Ready".to_string(),
             should_quit: false,
@@ -419,10 +446,38 @@ impl App {
             Ok(line) => {
                 self.show_bottom_terminal = true;
                 self.focus = Focus::BottomTerminal;
-                self.bottom_terminal.send_text(&format!("{line}\r"));
+                self.bottom_terminal
+                    .current_mut()
+                    .send_text(&format!("{line}\r"));
                 self.status = format!("Running {}", file.display());
             }
             Err(error) => self.status = error,
+        }
+    }
+
+    /// `+` on the bottom terminal: another shell in a tab of its own, up to three (F04).
+    pub(super) fn add_terminal(&mut self) {
+        if self.bottom_terminal.tabs.len() < BOTTOM_TERMINALS {
+            self.bottom_terminal.add(&self.root);
+        }
+        self.show_bottom_terminal = true;
+        self.focus = Focus::BottomTerminal;
+        self.terminal_selection = None;
+    }
+
+    /// `x` on a tab of the bottom terminal closes it with its shell; the last one stays.
+    pub(super) fn close_terminal(&mut self, index: usize) {
+        self.bottom_terminal.close(index);
+        self.focus = Focus::BottomTerminal;
+        self.terminal_selection = None;
+    }
+
+    /// The terminals of the panel `focus` names.
+    pub fn terminals(&mut self, focus: Focus) -> &mut Terminals {
+        if focus == Focus::RightTerminal {
+            &mut self.right_terminal
+        } else {
+            &mut self.bottom_terminal
         }
     }
 

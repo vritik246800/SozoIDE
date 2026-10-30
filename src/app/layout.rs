@@ -83,6 +83,22 @@ pub(super) struct TabDrag {
     pub zone: Option<DropZone>,
 }
 
+/// Text chosen with the mouse in a terminal (Q57): the cells (row, column inside its border)
+/// where the drag started and where it is, in the tab on screen of the panel `panel` names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalSelection {
+    pub panel: Focus,
+    pub anchor: (u16, u16),
+    pub end: (u16, u16),
+}
+
+impl TerminalSelection {
+    /// The first and the last cell, in reading order.
+    pub fn bounds(&self) -> ((u16, u16), (u16, u16)) {
+        (self.anchor.min(self.end), self.anchor.max(self.end))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DragTarget {
     Explorer,
@@ -126,6 +142,13 @@ pub struct Regions {
     pub search_next: Rect,
     pub tab_items: Vec<(usize, Rect, Rect)>,
     pub entry_menu_items: Vec<(super::EntryAction, Rect)>,
+    /// The tabs of the terminals: panel, tab, the tab and its `x` (empty when it has none).
+    pub terminal_tabs: Vec<(Focus, usize, Rect, Rect)>,
+    /// The `+` of the bottom terminal.
+    pub terminal_add: Rect,
+    /// The keys Help lets change (F29), and its Reset button.
+    pub help_keys: Vec<(super::Action, Rect)>,
+    pub help_reset: Rect,
 }
 
 /// A video's tab inside its border: the picture, then the progress row and the button row

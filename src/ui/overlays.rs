@@ -8,14 +8,14 @@ use ratatui::{
 
 use crate::{
     animation::spinner,
-    app::{App, AppMotion, TUTORIAL_STEPS},
+    app::{Action, App, AppMotion, KeyEditor, Keymap, TUTORIAL_STEPS},
     branding::{self, ASCII_LOGO, ASCII_LOGO_LARGE},
     editor::{MAX_MATCHES, SearchMatch, SearchScope, file_icon},
     update::{NOTES, UpdateState},
 };
 
 use super::{
-    ACTIVE, BORDER, MATCH, MUTED, TEXT, bar, centered, components::key_for, key, panel_block,
+    ACTIVE, BORDER, MATCH, MUTED, TEXT, bar, centered, components::key_for, panel_block,
     render_dialog, scale_length, sweep_bar, unfold,
 };
 
@@ -86,7 +86,8 @@ pub(super) fn render_search(frame: &mut Frame, app: &mut App, area: Rect) {
             return;
         }
         frame.render_widget(Clear, visible);
-        let block = panel_block(format!(" Find in file [{}] ", key("Ctrl+P")), true);
+        let label = app.keys.label(Action::FindInFile);
+        let block = panel_block(format!(" Find in file [{label}] "), true);
         let inner = block.inner(bar).intersection(visible);
         frame.render_widget(block, visible);
         app.regions.search_match_items.clear();
@@ -98,7 +99,10 @@ pub(super) fn render_search(frame: &mut Frame, app: &mut App, area: Rect) {
         frame,
         centered(area, 84, 70),
         progress,
-        format!(" Find in workspace [{}] ", key("Ctrl+Shift+P")),
+        format!(
+            " Find in workspace [{}] ",
+            app.keys.label(Action::FindInWorkspace)
+        ),
         |frame, inner| render_search_results(frame, app, inner),
     );
 }
@@ -310,41 +314,53 @@ pub(super) fn match_line(found: &SearchMatch, selected: bool, width: usize) -> L
     Line::from(spans)
 }
 
+/// A key in Help: written as it is, or the key a command has now, which a click changes (F29).
+#[derive(Clone, Copy)]
+enum HelpKey {
+    Fixed(&'static str),
+    Bound(Action),
+}
+
 /// One area of the Help: its title and colour, and its keys with what they do. An empty key
 /// carries the line above on.
 struct HelpSection {
     title: &'static str,
     color: Color,
-    keys: Vec<(&'static str, &'static str)>,
+    keys: Vec<(HelpKey, &'static str)>,
+}
+
+/// A command's key with what it does.
+fn bound(action: Action) -> (HelpKey, &'static str) {
+    (HelpKey::Bound(action), action.title())
 }
 
 /// The Help for `os` (`std::env::consts::OS`): the keys that reach SozoIDE differ per system.
 fn help_sections(os: &str) -> Vec<HelpSection> {
+    use HelpKey::Fixed;
     let mac = os == "macos";
-    let key = |label| key_for(os, label);
     let mut panels = vec![
-        ("Ctrl+B", "Explorer"),
-        ("Ctrl+J", "Bottom terminal"),
-        (key("Ctrl+Shift+B"), "Right terminal"),
+        bound(Action::Explorer),
+        bound(Action::BottomTerminal),
+        bound(Action::RightTerminal),
     ];
     if mac {
         panels.push((
-            "",
+            Fixed(""),
             "with Option as Meta: Terminal > Settings > Profiles > Keyboard, or iTerm2 > \
              Profiles > Keys > Left Option key: Esc+",
         ));
     }
     panels.extend([
-        ("Ctrl+G", "Source Control"),
-        ("Ctrl+D", "Database"),
-        ("Drag a divider", "Resize the panels"),
-        ("Mouse wheel", "Scroll a panel or terminal history"),
+        bound(Action::SourceControl),
+        bound(Action::Database),
+        (Fixed("Drag a divider"), "Resize the panels"),
+        (Fixed("Mouse wheel"), "Scroll a panel or terminal history"),
         (
-            if mac {
+            Fixed(if mac {
                 "fn+Up/fn+Down"
             } else {
                 "PageUp/PageDown"
-            },
+            }),
             "Scroll the editor or terminal",
         ),
     ]);
@@ -355,61 +371,78 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             keys: panels,
         },
         HelpSection {
+            title: "Terminals",
+            color: Color::LightYellow,
+            keys: vec![
+                bound(Action::NextTerminal),
+                bound(Action::PreviousTerminal),
+                (
+                    Fixed("+ / x on the tabs"),
+                    "New / close a bottom terminal (1 to 3)",
+                ),
+                (Fixed("Drag the mouse"), "Select text; letting go copies it"),
+                (Fixed("Shift+Enter"), "New line without running it"),
+            ],
+        },
+        HelpSection {
             title: "Files and tabs",
             color: Color::Blue,
             keys: vec![
-                ("Enter", "Open a file or a folder"),
-                ("Right-click", "New, rename, delete (Explorer)"),
-                ("Ctrl+X/C/V", "Cut, copy, paste (Explorer)"),
-                ("Ctrl+W", "Close the tab"),
-                ("Ctrl+R", "Run the file or its project"),
-                ("Wheel on the tabs", "Scroll the tabs, or click < and >"),
-                ("Drag a tab", "To an editor edge: split the editor"),
-                ("", "To the other pane: move it there"),
+                (Fixed("Enter"), "Open a file or a folder"),
+                (Fixed("Right-click"), "New, rename, delete (Explorer)"),
+                (Fixed("Ctrl+X/C/V"), "Cut, copy, paste (Explorer)"),
+                bound(Action::CloseTab),
+                bound(Action::Run),
+                (
+                    Fixed("Wheel on the tabs"),
+                    "Scroll the tabs, or click < and >",
+                ),
+                (Fixed("Drag a tab"), "To an editor edge: split the editor"),
+                (Fixed(""), "To the other pane: move it there"),
             ],
         },
         HelpSection {
             title: "Editing",
             color: Color::Green,
             keys: vec![
-                ("Type or paste", "Edit the file; it saves by itself"),
+                (Fixed("Type or paste"), "Edit the file; it saves by itself"),
                 (
-                    if mac {
+                    Fixed(if mac {
                         "Arrows/fn+Arrows"
                     } else {
                         "Arrows/Home/End"
-                    },
+                    }),
                     "Move the cursor",
                 ),
-                ("Shift+arrows", "Select, or drag with the mouse"),
-                ("Ctrl+A", "Select all"),
-                ("Ctrl+Z", "Undo the last edit"),
-                ("Ctrl+C / Ctrl+X", "Copy / cut the selection"),
-                ("Ctrl+V", "Paste"),
-                ("Ctrl+Space", "Suggestions (language server)"),
-                ("F12", "Go to the definition"),
-                ("Right-click", "Cut, copy, paste the text"),
+                (Fixed("Shift+arrows"), "Select, or drag with the mouse"),
+                (Fixed("Ctrl+A"), "Select all"),
+                (Fixed("Ctrl+Z"), "Undo the last edit"),
+                (Fixed("Ctrl+C / Ctrl+X"), "Copy / cut the selection"),
+                (Fixed("Ctrl+V"), "Paste"),
+                bound(Action::Suggestions),
+                bound(Action::Definition),
+                (Fixed("Right-click"), "Cut, copy, paste the text"),
                 (
-                    if mac {
+                    Fixed(if mac {
                         "Delete/fn+Delete"
                     } else {
                         "Backspace/Delete"
-                    },
+                    }),
                     "Delete before / after the cursor",
                 ),
-                ("Shift+wheel", "Scroll sideways"),
-                ("Autosave", "After 2 idle seconds or a focus change"),
+                (Fixed("Shift+wheel"), "Scroll sideways (editor, Explorer)"),
+                (Fixed("Autosave"), "After 2 idle seconds or a focus change"),
             ],
         },
         HelpSection {
             title: "Search",
             color: Color::Yellow,
             keys: vec![
-                ("Ctrl+P", "Find in the file"),
-                ("Ctrl+Shift+P", "Find in the workspace"),
-                ("Up/Down or < >", "Previous / next result"),
-                ("Enter", "Open the result, selected"),
-                ("Esc", "Close a dialog or a panel"),
+                bound(Action::FindInFile),
+                bound(Action::FindInWorkspace),
+                (Fixed("Up/Down or < >"), "Previous / next result"),
+                (Fixed("Enter"), "Open the result, selected"),
+                (Fixed("Esc"), "Close a dialog or a panel"),
             ],
         },
         HelpSection {
@@ -417,101 +450,105 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             color: Color::Red,
             keys: vec![
                 (
-                    if mac {
+                    Fixed(if mac {
                         "fn+Down / Right"
                     } else {
                         "PageDown / Right"
-                    },
+                    }),
                     "Next page, or the wheel",
                 ),
                 (
-                    if mac { "fn+Up / Left" } else { "PageUp / Left" },
+                    Fixed(if mac { "fn+Up / Left" } else { "PageUp / Left" }),
                     "Previous page",
                 ),
                 (
-                    if mac {
+                    Fixed(if mac {
                         "fn+Left / fn+Right"
                     } else {
                         "Home / End"
-                    },
+                    }),
                     "First / last page",
                 ),
-                ("Shift+arrows", "Select in a page of text"),
+                (Fixed("Shift+arrows"), "Select in a page of text"),
             ],
         },
         HelpSection {
             title: "Debug",
             color: Color::LightRed,
             keys: vec![
-                ("F9", "Breakpoint on the line"),
-                ("F5", "Build and debug, or continue"),
-                ("F10 / F11", "Step over / into"),
-                ("Shift+F5", "Stop and close the panel"),
+                bound(Action::Breakpoint),
+                bound(Action::Debug),
+                bound(Action::StepOver),
+                bound(Action::StepInto),
+                bound(Action::StopDebug),
             ],
         },
         HelpSection {
             title: "3D models",
             color: Color::LightMagenta,
             keys: vec![
-                ("Left / Right", "Turn the model"),
-                ("Up / Down", "Tilt the model"),
-                ("+ / - or wheel", "Zoom in / out"),
-                ("Drag", "Turn it with the mouse"),
+                (Fixed("Left / Right"), "Turn the model"),
+                (Fixed("Up / Down"), "Tilt the model"),
+                (Fixed("+ / - or wheel"), "Zoom in / out"),
+                (Fixed("Drag"), "Turn it with the mouse"),
             ],
         },
         HelpSection {
             title: "Videos",
             color: Color::LightCyan,
             keys: vec![
-                ("Space or click", "Play / pause"),
-                ("S", "Stop at the start"),
-                ("Left / Right", "Back / forward 5 s"),
-                ("Shift+Left / Right", "Back / forward 30 s"),
-                ("- / + or wheel", "Volume down / up"),
-                ("M", "Mute"),
-                ("[ / ]", "Slower / faster"),
-                ("F", "Full screen"),
-                ("Esc", "Leave full screen, close"),
-                ("Click the bar", "Go to that time"),
+                (Fixed("Space or click"), "Play / pause"),
+                (Fixed("S"), "Stop at the start"),
+                (Fixed("Left / Right"), "Back / forward 5 s"),
+                (Fixed("Shift+Left / Right"), "Back / forward 30 s"),
+                (Fixed("- / + or wheel"), "Volume down / up"),
+                (Fixed("M"), "Mute"),
+                (Fixed("[ / ]"), "Slower / faster"),
+                (Fixed("F"), "Full screen"),
+                (Fixed("Esc"), "Leave full screen, close"),
+                (Fixed("Click the bar"), "Go to that time"),
             ],
         },
         HelpSection {
             title: "Source Control",
             color: Color::Magenta,
             keys: vec![
-                ("Tab", "Next tab: Changes, Graph, Branches..."),
-                ("Enter", "Diff, commit files, or switch branch"),
-                ("Click a commit", "Its files; Enter on one: its diff"),
-                ("Esc", "Back from the diff, the files"),
-                ("Click a branch", "Switch to it, after asking"),
-                ("s / u / c", "Stage, unstage, commit"),
-                ("n / p", "Next / previous hunk in the Diff"),
-                ("[ / ]", "Previous / next changed file"),
-                ("v", "Side by side or unified diff"),
-                ("o", "Open the file in the editor"),
+                (Fixed("Tab"), "Next tab: Changes, Graph, Branches..."),
+                (Fixed("Enter"), "Diff, commit files, or switch branch"),
+                (Fixed("Click a commit"), "Its files; Enter on one: its diff"),
+                (Fixed("Esc"), "Back from the diff, the files"),
+                (Fixed("Click a branch"), "Switch to it, after asking"),
+                (Fixed("s / u / c"), "Stage, unstage, commit"),
+                (Fixed("n / p"), "Next / previous hunk in the Diff"),
+                (Fixed("[ / ]"), "Previous / next changed file"),
+                (Fixed("v"), "Side by side or unified diff"),
+                (Fixed("o"), "Open the file in the editor"),
             ],
         },
         HelpSection {
             title: "Database",
             color: Color::LightBlue,
             keys: vec![
-                ("Ctrl+D", "Connections, then tables and views"),
-                ("Enter / Space", "Add a table, tick a column, change"),
-                ("", "a cell of the builder"),
                 (
-                    if mac { "fn+F6" } else { "F6" },
+                    HelpKey::Bound(Action::Database),
+                    "Connections, then tables and views",
+                ),
+                (Fixed("Enter / Space"), "Add a table, tick a column, change"),
+                (Fixed(""), "a cell of the builder"),
+                (
+                    Fixed(if mac { "fn+F6" } else { "F6" }),
                     "Tables, tab, results: next part",
                 ),
-                ("Delete", "Remove the builder row"),
+                (Fixed("Delete"), "Remove the builder row"),
                 (
-                    if mac {
+                    Fixed(if mac {
                         "Ctrl+Enter/fn+F5"
                     } else {
                         "Ctrl+Enter/F5"
-                    },
+                    }),
                     "Run the query",
                 ),
-                ("Shift+wheel", "Scroll the results sideways"),
+                (Fixed("Shift+wheel"), "Scroll the results sideways"),
             ],
         },
         HelpSection {
@@ -519,56 +556,95 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             color: Color::LightGreen,
             keys: vec![
                 (
-                    "Enter / U",
+                    Fixed("Enter / U"),
                     match os {
                         "macos" => "Install it (replaces SozoIDE.app)",
                         "windows" => "Install it (runs the MSI installer)",
                         _ => "Install it (DEB/RPM ask for sudo)",
                     },
                 ),
-                ("S", "Skip that version"),
-                ("Esc", "Later, or cancel the download"),
+                (Fixed("S"), "Skip that version"),
+                (Fixed("Esc"), "Later, or cancel the download"),
             ],
         },
         HelpSection {
             title: "Application",
             color: Color::LightMagenta,
             keys: vec![
-                (key("F1"), "Help"),
-                (key("F2"), "About"),
-                ("G (in About)", "Open the repository to contribute"),
-                ("U (in About)", "Check for updates now"),
-                ("Ctrl+Q", "Quit"),
+                bound(Action::Help),
+                bound(Action::About),
+                (Fixed("G (in About)"), "Open the repository to contribute"),
+                (Fixed("U (in About)"), "Check for updates now"),
+                bound(Action::Quit),
             ],
         },
     ]
 }
 
+/// What the key column of a row shows: its text, the key its command has now, or the prompt
+/// while Help waits for the new keys.
+fn help_key(key: HelpKey, keys: &Keymap, editor: &KeyEditor) -> String {
+    match key {
+        HelpKey::Fixed(text) => text.to_string(),
+        HelpKey::Bound(action) if editor.capturing && editor.selected == Some(action) => {
+            "Press keys".to_string()
+        }
+        HelpKey::Bound(action) => keys.label(action),
+    }
+}
+
 /// A section in a box of `width` columns: the title and the keys in the section colour, what
-/// they do in the text colour.
-fn help_box(section: &HelpSection, width: usize) -> Vec<Line<'static>> {
+/// they do in the text colour; a command's key underlined (a click changes it), in reverse when
+/// chosen. Each row comes with the command whose key it shows.
+fn help_box(
+    section: &HelpSection,
+    width: usize,
+    keys: &Keymap,
+    editor: &KeyEditor,
+) -> Vec<(Line<'static>, Option<Action>)> {
     let border = Style::default().fg(BORDER);
     let accent = Style::default()
         .fg(section.color)
         .add_modifier(Modifier::BOLD);
     let inner = width.saturating_sub(4);
-    let keys = section
+    let labels = section
         .keys
         .iter()
-        .map(|(key, _)| Line::from(*key).width())
+        .map(|(key, _)| help_key(*key, keys, editor))
+        .collect::<Vec<_>>();
+    let column = labels
+        .iter()
+        .map(|label| Line::from(label.as_str()).width())
         .max()
         .unwrap_or(0);
     let title = Line::from(section.title).width();
-    let mut lines = vec![Line::from(vec![
-        Span::styled("╭─ ", border),
-        Span::styled(section.title, accent),
-        Span::styled(
-            format!(" {}╮", "─".repeat(width.saturating_sub(title + 5))),
-            border,
-        ),
-    ])];
-    let room = inner.saturating_sub(keys + 2).max(1);
-    for (key, description) in &section.keys {
+    let mut lines = vec![(
+        Line::from(vec![
+            Span::styled("╭─ ", border),
+            Span::styled(section.title, accent),
+            Span::styled(
+                format!(" {}╮", "─".repeat(width.saturating_sub(title + 5))),
+                border,
+            ),
+        ]),
+        None,
+    )];
+    let room = inner.saturating_sub(column + 2).max(1);
+    for ((key, description), label) in section.keys.iter().zip(labels) {
+        let action = match key {
+            HelpKey::Bound(action) => Some(*action),
+            HelpKey::Fixed(_) => None,
+        };
+        let style = match action {
+            Some(action) if editor.capturing && editor.selected == Some(action) => Style::default()
+                .fg(ACTIVE)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            Some(action) if editor.selected == Some(action) => {
+                accent.add_modifier(Modifier::REVERSED)
+            }
+            Some(_) => accent.add_modifier(Modifier::UNDERLINED),
+            None => accent,
+        };
         // Long descriptions go on under themselves, with the key column empty.
         let mut parts = vec![String::new()];
         for word in description.split_whitespace() {
@@ -583,35 +659,60 @@ fn help_box(section: &HelpSection, width: usize) -> Vec<Line<'static>> {
             }
         }
         for (index, part) in parts.into_iter().enumerate() {
-            let key = if index == 0 { *key } else { "" };
+            let shown = if index == 0 { label.as_str() } else { "" };
+            let pad = column.saturating_sub(Line::from(shown).width());
             let fill = room.saturating_sub(Line::from(part.as_str()).width());
-            lines.push(Line::from(vec![
-                Span::styled("│ ", border),
-                Span::styled(format!("{key:<keys$}"), accent),
-                Span::raw(format!("  {part}{}", " ".repeat(fill))),
-                Span::styled(" │", border),
-            ]));
+            lines.push((
+                Line::from(vec![
+                    Span::styled("│ ", border),
+                    Span::styled(shown.to_string(), style),
+                    Span::raw(format!("{}  {part}{}", " ".repeat(pad), " ".repeat(fill))),
+                    Span::styled(" │", border),
+                ]),
+                action.filter(|_| index == 0),
+            ));
         }
     }
-    lines.push(Line::styled(
-        format!("╰{}╯", "─".repeat(width.saturating_sub(2))),
-        border,
+    lines.push((
+        Line::styled(format!("╰{}╯", "─".repeat(width.saturating_sub(2))), border),
+        None,
     ));
     lines
 }
 
+/// Where a command's key is in the Help page: line, column and width of its row.
+type KeyPlace = (usize, u16, u16, Action);
+
 /// The Help sections in boxes, in two columns of `width` when `two` fit, the shorter column
-/// taking the next box.
-fn help_page(os: &str, width: usize, two: bool) -> Vec<Line<'static>> {
+/// taking the next box; and where each command's key is: line, column and width of its row.
+fn help_page(
+    os: &str,
+    width: usize,
+    two: bool,
+    keys: &Keymap,
+    editor: &KeyEditor,
+) -> (Vec<Line<'static>>, Vec<KeyPlace>) {
     let boxes = help_sections(os)
         .iter()
-        .map(|section| help_box(section, width))
+        .map(|section| help_box(section, width, keys, editor))
         .collect::<Vec<_>>();
+    let mut places = Vec::new();
     if !two {
-        return boxes.into_iter().flatten().collect();
+        let lines = boxes
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(row, (line, action))| {
+                if let Some(action) = action {
+                    places.push((row, 0, width as u16, action));
+                }
+                line
+            });
+        let lines = lines.collect();
+        return (lines, places);
     }
     let total = boxes.iter().map(Vec::len).sum::<usize>();
-    let mut columns: [Vec<Line<'static>>; 2] = [Vec::new(), Vec::new()];
+    let mut columns: [Vec<(Line<'static>, Option<Action>)>; 2] = [Vec::new(), Vec::new()];
     for lines in boxes {
         // Left until it holds half the lines, then right, keeping the order of the areas.
         let column = usize::from(columns[0].len() >= total / 2);
@@ -619,15 +720,23 @@ fn help_page(os: &str, width: usize, two: bool) -> Vec<Line<'static>> {
     }
     let [left, right] = columns;
     let height = left.len().max(right.len());
-    let blank = || Line::from(" ".repeat(width));
-    (0..height)
+    let blank = || (Line::from(" ".repeat(width)), None);
+    let lines = (0..height)
         .map(|row| {
-            let mut spans = left.get(row).cloned().unwrap_or_else(blank).spans;
+            let (left, left_action) = left.get(row).cloned().unwrap_or_else(blank);
+            let (right, right_action) = right.get(row).cloned().unwrap_or_else(blank);
+            for (action, x) in [(left_action, 0), (right_action, width + 1)] {
+                if let Some(action) = action {
+                    places.push((row, x as u16, width as u16, action));
+                }
+            }
+            let mut spans = left.spans;
             spans.push(Span::raw(" "));
-            spans.extend(right.get(row).cloned().unwrap_or_else(blank).spans);
+            spans.extend(right.spans);
             Line::from(spans)
         })
-        .collect()
+        .collect();
+    (lines, places)
 }
 
 pub(super) fn render_help(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -639,22 +748,42 @@ pub(super) fn render_help(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         usize::from(area.width.saturating_sub(6)).clamp(20, BOX)
     };
-    let page = help_page(os, width, two);
+    let (page, places) = help_page(os, width, two, &app.keys, &app.key_editor);
     let content = if two { width * 2 + 1 } else { width };
-    let dialog = dialog_area(area, content as u16 + 4, page.len() as u16 + 4);
-    let visible = dialog.height.saturating_sub(3);
+    let dialog = dialog_area(area, content as u16 + 4, page.len() as u16 + 5);
+    let visible = dialog.height.saturating_sub(4);
     let most = (page.len() as u16).saturating_sub(visible);
+    // Tab brings the chosen command into view.
+    if std::mem::take(&mut app.key_editor.follow)
+        && let Some(row) = places
+            .iter()
+            .find(|place| Some(place.3) == app.key_editor.selected)
+            .map(|place| place.0 as u16)
+    {
+        if row < app.overlay_scroll {
+            app.overlay_scroll = row;
+        } else if row >= app.overlay_scroll + visible {
+            app.overlay_scroll = row + 1 - visible;
+        }
+    }
     app.overlay_scroll = app.overlay_scroll.min(most);
     let scroll = app.overlay_scroll;
     let progress = app.motion.overlay();
+    let editor = app.key_editor.clone();
+    let mut keys = Vec::new();
+    let mut reset = Rect::default();
     render_dialog(
         frame,
         dialog,
         progress,
         format!(" Help - all commands ({}) ", os_name(os)),
         |frame, inner| {
-            let [body, hint] =
-                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+            let [body, edit, hint] = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .areas(inner);
             let body = Rect::new(
                 body.x + 1,
                 body.y,
@@ -662,6 +791,46 @@ pub(super) fn render_help(frame: &mut Frame, app: &mut App, area: Rect) {
                 body.height,
             );
             frame.render_widget(Paragraph::new(page).scroll((scroll, 0)), body);
+            for (row, x, width, action) in &places {
+                let Some(y) = (*row as u16).checked_sub(scroll) else {
+                    continue;
+                };
+                if y < body.height.saturating_sub(1) {
+                    keys.push((*action, Rect::new(body.x + x, body.y + y, *width, 1)));
+                }
+            }
+            // The row of the shortcuts (F29): Reset, then what Help waits for or did.
+            let button = " Reset shortcuts [R] ";
+            reset = Rect::new(edit.x + 1, edit.y, button.len() as u16, 1).intersection(edit);
+            let (text, style) = if editor.confirm_reset {
+                (
+                    "Reset every shortcut to the default? Enter: reset   Esc: cancel".to_string(),
+                    Style::default().fg(Color::Yellow),
+                )
+            } else if let Some(action) = editor.selected.filter(|_| editor.capturing) {
+                (
+                    format!("Press the new keys for {}   Esc: cancel", action.title()),
+                    Style::default().fg(ACTIVE),
+                )
+            } else if let Some(message) = &editor.message {
+                (message.clone(), Style::default().fg(TEXT))
+            } else {
+                (
+                    "Click a key, or Tab and Enter, then press the new keys".to_string(),
+                    Style::default().fg(MUTED),
+                )
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(
+                        button,
+                        Style::default().fg(TEXT).add_modifier(Modifier::REVERSED),
+                    ),
+                    Span::styled(format!("  {text}"), style),
+                ])),
+                edit,
+            );
             let position = if most > 0 {
                 format!(
                     "   {}/{}",
@@ -685,6 +854,8 @@ pub(super) fn render_help(frame: &mut Frame, app: &mut App, area: Rect) {
             );
         },
     );
+    app.regions.help_keys = keys;
+    app.regions.help_reset = reset;
 }
 
 fn os_name(os: &str) -> &'static str {
@@ -797,8 +968,9 @@ pub(super) fn render_about(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// The tutorial pages for `os` (`std::env::consts::OS`): what each panel does and its key.
-fn tutorial_steps(os: &str) -> [(&'static str, String); TUTORIAL_STEPS] {
-    let key = |label| key_for(os, label);
+fn tutorial_steps(os: &str, keys: &Keymap) -> [(&'static str, String); TUTORIAL_STEPS] {
+    let key = |action| keys.label(action);
+    let fixed = |label| key_for(os, label);
     [
         (
             "Welcome to SozoIDE",
@@ -814,7 +986,7 @@ fn tutorial_steps(os: &str) -> [(&'static str, String); TUTORIAL_STEPS] {
                 "{} shows or hides the Explorer. Enter opens a file in a tab and the editor saves \
                  by itself 2 seconds after you stop typing. Drag a tab to an edge of the editor \
                  to split it; each side keeps its own tabs.",
-                key("Ctrl+B")
+                key(Action::Explorer)
             ),
         ),
         (
@@ -822,8 +994,8 @@ fn tutorial_steps(os: &str) -> [(&'static str, String); TUTORIAL_STEPS] {
             format!(
                 "{} opens the bottom terminal and {} the right one. Drag the dividers to resize \
                  the panels; the mouse wheel scrolls the history.",
-                key("Ctrl+J"),
-                key("Ctrl+Shift+B")
+                key(Action::BottomTerminal),
+                key(Action::RightTerminal)
             ),
         ),
         (
@@ -831,7 +1003,7 @@ fn tutorial_steps(os: &str) -> [(&'static str, String); TUTORIAL_STEPS] {
             format!(
                 "{} opens changes, diffs, the commit graph, branches and history. Stage, commit, \
                  pull and push are one click away, and risky steps ask first.",
-                key("Ctrl+G")
+                key(Action::SourceControl)
             ),
         ),
         (
@@ -839,9 +1011,9 @@ fn tutorial_steps(os: &str) -> [(&'static str, String); TUTORIAL_STEPS] {
             format!(
                 "{} connects to SQLite, PostgreSQL or MySQL. Write a query and run it with \
                  {} or {}.",
-                key("Ctrl+D"),
-                key("Ctrl+Enter"),
-                key("F5")
+                key(Action::Database),
+                fixed("Ctrl+Enter"),
+                fixed("F5")
             ),
         ),
         (
@@ -849,11 +1021,11 @@ fn tutorial_steps(os: &str) -> [(&'static str, String); TUTORIAL_STEPS] {
             format!(
                 "{} finds in the open file and {} in the whole folder. {} lists every command, \
                  {} shows About and {} quits.",
-                key("Ctrl+P"),
-                key("Ctrl+Shift+P"),
-                key("F1"),
-                key("F2"),
-                key("Ctrl+Q")
+                key(Action::FindInFile),
+                key(Action::FindInWorkspace),
+                key(Action::Help),
+                key(Action::About),
+                key(Action::Quit)
             ),
         ),
     ]
@@ -861,7 +1033,7 @@ fn tutorial_steps(os: &str) -> [(&'static str, String); TUTORIAL_STEPS] {
 
 /// The first start (F17): one page at a time, with Next and Skip always in reach.
 pub(super) fn render_tutorial(frame: &mut Frame, app: &mut App, area: Rect) {
-    let steps = tutorial_steps(std::env::consts::OS);
+    let steps = tutorial_steps(std::env::consts::OS, &app.keys);
     let step = app.tutorial_step.min(TUTORIAL_STEPS - 1);
     let (title, text) = &steps[step];
     let last = step + 1 == TUTORIAL_STEPS;
@@ -1166,16 +1338,17 @@ fn render_update_state(frame: &mut Frame, app: &mut App, inner: Rect) {
 mod tests {
     use super::*;
 
-    fn help_text(os: &str) -> String {
+    fn help_text(os: &'static str) -> String {
+        let keys = Keymap::defaults(os);
         help_sections(os)
             .iter()
             .flat_map(|section| {
-                std::iter::once(section.title.to_owned()).chain(
-                    section
-                        .keys
-                        .iter()
-                        .map(|(key, description)| format!("{key} = {description}")),
-                )
+                std::iter::once(section.title.to_owned()).chain(section.keys.iter().map(
+                    |(key, description)| {
+                        let key = help_key(*key, &keys, &KeyEditor::default());
+                        format!("{key} = {description}")
+                    },
+                ))
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -1218,7 +1391,9 @@ mod tests {
 
     #[test]
     fn help_boxes_line_up_in_two_columns() {
-        let page = help_page("linux", 52, true);
+        let keys = Keymap::defaults("linux");
+        let editor = KeyEditor::default();
+        let (page, places) = help_page("linux", 52, true, &keys, &editor);
         let widths = page.iter().map(Line::width).collect::<Vec<_>>();
         assert!(
             widths.iter().all(|width| *width == 52 * 2 + 1),
@@ -1235,9 +1410,26 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(text[0].starts_with("╭─ Panels "), "{}", text[0]);
         assert!(text.iter().any(|line| line.contains("╭─ Source Control ")));
-        let single = help_page("linux", 40, false);
+        // Each command's key is on its row, in the left or the right column.
+        let row = |action| {
+            let (row, x, ..) = places.iter().find(|place| place.3 == action).unwrap();
+            (&text[*row], *x as usize)
+        };
+        let (line, x) = row(Action::Explorer);
+        assert!(line[x..].starts_with("│ Ctrl+B"), "{line}");
+        let (line, x) = row(Action::Quit);
+        assert!(
+            line.chars()
+                .skip(x)
+                .collect::<String>()
+                .starts_with("│ Ctrl+Q"),
+            "{line}"
+        );
+        assert_eq!(places.len(), 22, "21 commands and Database twice");
+        let (single, places) = help_page("linux", 40, false, &keys, &editor);
         assert!(single.len() > page.len());
         assert!(single.iter().all(|line| line.width() == 40));
+        assert!(places.iter().all(|place| place.1 == 0));
     }
 
     #[test]
@@ -1272,17 +1464,18 @@ mod tests {
 
     #[test]
     fn the_tutorial_names_the_keys_of_each_system() {
-        let mac = tutorial_steps("macos").map(|(_, text)| text).join("\n");
+        let steps = |os| tutorial_steps(os, &Keymap::defaults(os));
+        let mac = steps("macos").map(|(_, text)| text).join("\n");
         assert!(mac.contains("Ctrl+Option+B") && mac.contains("fn+F1"));
-        let linux = tutorial_steps("linux").map(|(_, text)| text).join("\n");
+        let linux = steps("linux").map(|(_, text)| text).join("\n");
         assert!(linux.contains("Ctrl+Alt+B") && !linux.contains("fn+"));
-        let windows = tutorial_steps("windows").map(|(_, text)| text).join("\n");
+        let windows = steps("windows").map(|(_, text)| text).join("\n");
         assert!(windows.contains("Ctrl+Shift+B"));
     }
 
     #[test]
     fn the_tutorial_says_what_was_counted() {
-        let (_, welcome) = &tutorial_steps("linux")[0];
+        let (_, welcome) = &tutorial_steps("linux", &Keymap::defaults("linux"))[0];
         assert!(welcome.contains("anonymously") && welcome.contains("SOZO_NO_TELEMETRY=1"));
     }
 }

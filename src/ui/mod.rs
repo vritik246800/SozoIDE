@@ -10,7 +10,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::app::{App, Overlay, Regions};
+use crate::app::{Action, App, Focus, Overlay, Regions};
 
 pub(crate) use components::{
     ACTIVE, BORDER, CURRENT_MATCH, MATCH, MUTED, TEXT, bar, busy, centered, key, panel_block,
@@ -113,9 +113,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         regions.editor = body;
         regions.editor_body = body;
         if app.show_database {
-            crate::database::view::render(frame, &mut app.database, body);
+            let key = app.keys.label(Action::Database);
+            crate::database::view::render(frame, &mut app.database, body, &key);
         } else {
-            crate::git::view::render(frame, &mut app.git, body);
+            let key = app.keys.label(Action::SourceControl);
+            crate::git::view::render(frame, &mut app.git, body, &key);
         }
     } else {
         render_editor(frame, app, &mut regions, editor_area);
@@ -123,11 +125,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let content_area = regions.editor;
     if bottom_terminal_height > 0 {
         render_handle(frame, regions.bottom_handle, false);
-        render_terminal(frame, app, regions.bottom_terminal, true);
+        let area = regions.bottom_terminal;
+        render_terminal(frame, app, &mut regions, area, Focus::BottomTerminal);
     }
     if right_terminal_width > 0 {
         render_handle(frame, regions.right_handle, true);
-        render_terminal(frame, app, regions.right_terminal, false);
+        let area = regions.right_terminal;
+        render_terminal(frame, app, &mut regions, area, Focus::RightTerminal);
     }
     render_footer(frame, app, vertical[2]);
     app.regions = regions;
@@ -189,10 +193,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_header(frame: &mut Frame, app: &App, regions: &mut Regions, area: Rect) {
-    let help_label = format!(" Help {} ", key("F1"));
-    let about_label = format!(" About {} ", key("F2"));
-    let about_width = about_label.len() as u16;
-    let help_width = help_label.len() as u16;
+    let help_label = format!(" Help {} ", app.keys.label(Action::Help));
+    let about_label = format!(" About {} ", app.keys.label(Action::About));
+    let about_width = Line::from(about_label.as_str()).width() as u16;
+    let help_width = Line::from(help_label.as_str()).width() as u16;
     let about = Rect::new(
         area.right().saturating_sub(about_width),
         area.y,
@@ -233,20 +237,23 @@ fn render_header(frame: &mut Frame, app: &App, regions: &mut Regions, area: Rect
 /// The keys on the left; on the right the problem on the cursor's line (F26) or the last thing
 /// that happened (`app.status`).
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let footer = Line::from(vec![
-        Span::styled(" Ctrl+B ", Style::default().fg(ACTIVE)),
-        Span::raw("Explorer  "),
-        Span::styled("Ctrl+J ", Style::default().fg(ACTIVE)),
-        Span::raw("Terminal  "),
-        Span::styled("Ctrl+G ", Style::default().fg(ACTIVE)),
-        Span::raw("Git  "),
-        Span::styled("Ctrl+D ", Style::default().fg(ACTIVE)),
-        Span::raw("Database  "),
-        Span::styled(format!("{} ", key("F1")), Style::default().fg(ACTIVE)),
-        Span::raw("Help  "),
-        Span::styled("Ctrl+Q ", Style::default().fg(ACTIVE)),
-        Span::raw("Quit"),
-    ]);
+    // The keys the user gave these commands (F29).
+    let mut footer = vec![Span::raw(" ")];
+    for (action, name) in [
+        (Action::Explorer, "Explorer  "),
+        (Action::BottomTerminal, "Terminal  "),
+        (Action::SourceControl, "Git  "),
+        (Action::Database, "Database  "),
+        (Action::Help, "Help  "),
+        (Action::Quit, "Quit"),
+    ] {
+        footer.push(Span::styled(
+            format!("{} ", app.keys.label(action)),
+            Style::default().fg(ACTIVE),
+        ));
+        footer.push(Span::raw(name));
+    }
+    let footer = Line::from(footer);
     let problem = app
         .active_tab
         .and_then(|index| app.open_files.get(index))
@@ -407,7 +414,7 @@ mod tests {
     fn panel_transition_defers_pty_resize_until_the_final_frame() {
         let mut app = App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap();
         app.show_bottom_terminal = true;
-        let initial_size = app.bottom_terminal.size();
+        let initial_size = app.bottom_terminal.current().size();
         let start = std::time::Instant::now();
         app.tick_at(start);
         let backend = TestBackend::new(140, 40);
@@ -415,20 +422,20 @@ mod tests {
 
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert_eq!(app.regions.bottom_terminal.height, 0);
-        assert_eq!(app.bottom_terminal.size(), initial_size);
+        assert_eq!(app.bottom_terminal.current().size(), initial_size);
 
         app.tick_at(start + std::time::Duration::from_millis(60));
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(app.regions.bottom_terminal.height > 0);
         assert!(app.regions.bottom_terminal.height < app.bottom_terminal_height);
-        assert_eq!(app.bottom_terminal.size(), initial_size);
+        assert_eq!(app.bottom_terminal.current().size(), initial_size);
 
         app.tick_at(start + crate::animation::PANEL.open);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let area = app.regions.bottom_terminal;
         assert_eq!(area.height, app.bottom_terminal_height);
         assert_eq!(
-            app.bottom_terminal.size(),
+            app.bottom_terminal.current().size(),
             (
                 area.width.saturating_sub(2).max(1),
                 area.height.saturating_sub(2).max(1),
@@ -1987,6 +1994,218 @@ mod tests {
         ] {
             assert!(text.contains(part), "{part}\n{text}");
         }
+    }
+
+    /// The columns `area` covers on row `y`.
+    fn cut(buffer: &ratatui::buffer::Buffer, y: u16, area: Rect) -> String {
+        (area.x..area.right())
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
+    #[test]
+    fn terminal_tabs_sit_in_the_border_and_answer_to_the_mouse() {
+        let mut app = App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        app.show_bottom_terminal = true;
+        app.show_right_terminal = true;
+        settle(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(150, 40)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let (bottom, right) = (app.regions.bottom_terminal, app.regions.right_terminal);
+        let top = |terminal: &Terminal<TestBackend>, area: Rect| {
+            cut(terminal.backend().buffer(), area.y, area)
+        };
+        let border = top(&terminal, bottom);
+        assert!(
+            border.contains("Bottom terminal [") && border.ends_with(" 1 ─ + ─╮"),
+            "{border}"
+        );
+        let border = top(&terminal, right);
+        assert!(
+            border.contains("Right terminal") && border.ends_with(" 1 ─ 2 ─╮"),
+            "{border}"
+        );
+        assert!(!border.contains('+') && !border.contains(" x "), "{border}");
+        assert_eq!(app.regions.terminal_tabs.len(), 3);
+
+        // + opens a second and a third shell; then it goes, and each tab has its x.
+        let left = crossterm::event::MouseButton::Left;
+        for count in [2, 3] {
+            let add = app.regions.terminal_add;
+            click(
+                &mut app,
+                crossterm::event::MouseEventKind::Down(left),
+                add.x + 1,
+                add.y,
+            );
+            assert_eq!(app.bottom_terminal.tabs.len(), count);
+            assert_eq!(app.bottom_terminal.active, count - 1);
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        }
+        let border = top(&terminal, bottom);
+        assert!(border.ends_with(" 1 x ─ 2 x ─ 3 x ─╮"), "{border}");
+        assert_eq!(app.regions.terminal_add, Rect::default());
+        assert_eq!(app.focus, Focus::BottomTerminal);
+        // The x of the first tab closes it; a tab shows its shell.
+        let (_, _, _, close) = app.regions.terminal_tabs[0];
+        click(
+            &mut app,
+            crossterm::event::MouseEventKind::Down(left),
+            close.x,
+            close.y,
+        );
+        assert_eq!(
+            (app.bottom_terminal.tabs.len(), app.bottom_terminal.active),
+            (2, 1)
+        );
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let (panel, index, tab, close) = app.regions.terminal_tabs[3];
+        assert_eq!(
+            (panel, index, close),
+            (Focus::RightTerminal, 1, Rect::default())
+        );
+        click(
+            &mut app,
+            crossterm::event::MouseEventKind::Down(left),
+            tab.x,
+            tab.y,
+        );
+        assert_eq!(
+            (app.right_terminal.active, app.focus),
+            (1, Focus::RightTerminal)
+        );
+
+        // A choice of text is drawn in reverse over the shell's own colours.
+        let cell = |terminal: &Terminal<TestBackend>| {
+            terminal.backend().buffer()[(right.x + 2, right.y + 1)].modifier
+        };
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let plain = cell(&terminal);
+        app.terminal_selection = Some(crate::app::TerminalSelection {
+            panel: Focus::RightTerminal,
+            anchor: (0, 3),
+            end: (0, 0),
+        });
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert_ne!(
+            cell(&terminal).contains(Modifier::REVERSED),
+            plain.contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
+    fn the_explorer_draws_long_names_scrolled_sideways_with_its_bar() {
+        let directory = tempfile::tempdir().unwrap();
+        let long = "a_very_long_file_name_that_does_not_fit_in_the_explorer.txt";
+        std::fs::write(directory.path().join(long), "").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        settle(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let explorer = app.regions.explorer;
+        let line =
+            |terminal: &Terminal<TestBackend>, y| cut(terminal.backend().buffer(), y, explorer);
+        assert!(line(&terminal, explorer.y + 1).contains("a_very_long"));
+        assert!(
+            line(&terminal, explorer.bottom() - 1).contains('━'),
+            "the bar shows"
+        );
+        app.explorer_scroll_x = 1000;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let row = line(&terminal, explorer.y + 1);
+        assert!(
+            row.contains("not_fit_in_the_explorer.txt│") && !row.contains("a_very"),
+            "{row}"
+        );
+        let bar = line(&terminal, explorer.bottom() - 1);
+        assert!(
+            bar.trim_end_matches('╯').ends_with('━'),
+            "the thumb at the end: {bar}"
+        );
+    }
+
+    #[test]
+    fn help_shows_the_users_keys_the_one_being_changed_and_reset() {
+        let mut app = App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(140, 50)).unwrap();
+        let press = |app: &mut App, code, modifiers| {
+            app.handle_key(crossterm::event::KeyEvent::new(code, modifiers));
+        };
+        let none = crossterm::event::KeyModifiers::NONE;
+        press(&mut app, crossterm::event::KeyCode::F(1), none);
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Reset shortcuts [R]") && text.contains("Click a key, or Tab"));
+        assert!(text.contains("Next terminal tab") && text.contains("Shift+Enter"));
+        let reset = app.regions.help_reset;
+        assert_eq!(
+            cut(terminal.backend().buffer(), reset.y, reset),
+            " Reset shortcuts [R] "
+        );
+        // Each key on screen is where a click finds its command, also with Help scrolled.
+        for scroll in [0, 12] {
+            app.overlay_scroll = scroll;
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            assert!(app.regions.help_keys.len() > 4, "{scroll}");
+            for (action, area) in &app.regions.help_keys {
+                let shown = cut(terminal.backend().buffer(), area.y, *area);
+                assert!(
+                    shown.starts_with(&format!("│ {} ", app.keys.label(*action))),
+                    "{action:?}: {shown}"
+                );
+            }
+        }
+        app.overlay_scroll = 0;
+
+        // Tab twice chooses the bottom terminal; Enter waits for its keys.
+        press(&mut app, crossterm::event::KeyCode::Tab, none);
+        press(&mut app, crossterm::event::KeyCode::Tab, none);
+        press(&mut app, crossterm::event::KeyCode::Enter, none);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("Press the new keys for Bottom terminal"));
+        let (_, area) = app
+            .regions
+            .help_keys
+            .iter()
+            .find(|(action, _)| *action == Action::BottomTerminal)
+            .copied()
+            .unwrap();
+        assert!(cut(terminal.backend().buffer(), area.y, area).starts_with("│ Press keys"));
+        press(
+            &mut app,
+            crossterm::event::KeyCode::Char('t'),
+            crossterm::event::KeyModifiers::ALT,
+        );
+        let label = app.keys.label(Action::BottomTerminal);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains(&format!("Bottom terminal: {label}")),
+            "{label}"
+        );
+
+        // The new key is the one written everywhere: footer and the terminal's title.
+        press(&mut app, crossterm::event::KeyCode::Esc, none);
+        settle(&mut app);
+        press(
+            &mut app,
+            crossterm::event::KeyCode::Char('t'),
+            crossterm::event::KeyModifiers::ALT,
+        );
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(row(buffer, buffer.area.height - 1).contains(&format!("{label} Terminal")));
+        let bottom = app.regions.bottom_terminal;
+        assert!(cut(buffer, bottom.y, bottom).contains(&format!("Bottom terminal [{label}]")));
+
+        // R asks before it resets them all.
+        press(&mut app, crossterm::event::KeyCode::F(1), none);
+        press(&mut app, crossterm::event::KeyCode::Char('r'), none);
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("Reset every shortcut to the default?"));
     }
 
     fn settle(app: &mut App) {

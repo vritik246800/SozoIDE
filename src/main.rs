@@ -80,6 +80,12 @@ fn image_picker() -> Picker {
     if tmux_terminal() && !tmux_passthrough_reaches_a_client() {
         return Picker::halfblocks();
     }
+    // A Windows console only reads the question once its VT processing is on; one that cannot
+    // turn it on would print the question as text (E37).
+    #[cfg(windows)]
+    if !crossterm::ansi_support::supports_ansi() {
+        return Picker::halfblocks();
+    }
     Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())
 }
 
@@ -170,11 +176,14 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                 Event::Paste(text) if app.focus == app::Focus::Editor => {
                     app.editor_paste(&text);
                 }
-                Event::Paste(text) => match app.focus {
-                    app::Focus::BottomTerminal => app.bottom_terminal.send_text(&text),
-                    app::Focus::RightTerminal => app.right_terminal.send_text(&text),
-                    _ => {}
-                },
+                Event::Paste(text) => {
+                    if matches!(
+                        app.focus,
+                        app::Focus::BottomTerminal | app::Focus::RightTerminal
+                    ) {
+                        app.terminals(app.focus).current_mut().send_text(&text);
+                    }
+                }
                 _ => {}
             }
         }

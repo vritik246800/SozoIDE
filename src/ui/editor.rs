@@ -13,7 +13,10 @@ use ratatui_image::{Resize, StatefulImage, protocol::StatefulProtocol};
 use tui_term::widget::{Cursor, PseudoTerminal};
 
 use crate::{
-    app::{App, DropZone, EntryAction, Focus, Regions, SHOWN_ITEMS, SplitDirection, video_areas},
+    app::{
+        Action, App, BOTTOM_TERMINALS, DropZone, EntryAction, Focus, Keymap, Regions, SHOWN_ITEMS,
+        SplitDirection, video_areas,
+    },
     branding::ASCII_LOGO,
     editor::{OpenFile, file_icon},
     lsp::{Diagnostic, char_column},
@@ -21,13 +24,17 @@ use crate::{
 };
 
 use super::{
-    ACTIVE, BORDER, CURRENT_MATCH, MATCH, MUTED, TEXT, key, mark_columns, panel_block,
-    select_columns, skip_columns,
+    ACTIVE, BORDER, CURRENT_MATCH, MATCH, MUTED, TEXT, mark_columns, panel_block, select_columns,
+    skip_columns,
 };
 
 pub(super) fn render_explorer(frame: &mut Frame, app: &App, area: Rect) {
     let title = format!(" {} Explorer ", app.icon("custom-folder"));
     let height = area.height.saturating_sub(2) as usize;
+    // Long names scroll sideways (F01); the scroll never passes the widest one.
+    let room = usize::from(area.width.saturating_sub(2));
+    let widest = app.explorer_width_needed();
+    let scroll_x = app.explorer_scroll_x.min(widest.saturating_sub(room));
     let lines = app
         .entries
         .iter()
@@ -51,23 +58,56 @@ pub(super) fn render_explorer(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 " "
             };
-            if index == app.selected_entry {
+            let spans = if index == app.selected_entry {
                 let style = Style::default().fg(ACTIVE).add_modifier(Modifier::REVERSED);
-                return Line::from(Span::styled(
+                vec![Span::styled(
                     format!("{indentation}{marker} {icon} {}", entry.name),
                     style,
-                ));
-            }
-            Line::from(vec![
-                Span::styled(format!("{indentation}{marker} "), Style::default().fg(TEXT)),
-                Span::styled(icon.to_string(), Style::default().fg(color)),
-                Span::styled(format!(" {}", entry.name), Style::default().fg(TEXT)),
-            ])
+                )]
+            } else {
+                vec![
+                    Span::styled(format!("{indentation}{marker} "), Style::default().fg(TEXT)),
+                    Span::styled(icon.to_string(), Style::default().fg(color)),
+                    Span::styled(format!(" {}", entry.name), Style::default().fg(TEXT)),
+                ]
+            };
+            Line::from(skip_columns(spans, scroll_x))
         })
         .collect::<Vec<_>>();
+    let focused = app.focus == Focus::Explorer;
     frame.render_widget(
-        Paragraph::new(lines).block(panel_block(title, app.focus == Focus::Explorer)),
+        Paragraph::new(lines).block(panel_block(title, focused)),
         area,
+    );
+    if widest > room && area.height > 2 {
+        let track = Rect::new(area.x + 1, area.bottom() - 1, room as u16, 1);
+        render_sideways_bar(frame, track, widest, scroll_x, focused);
+    }
+}
+
+/// The horizontal scroll bar on a bottom border: `━` over `─`, for `content` columns seen
+/// `track.width` at a time from `position`.
+fn render_sideways_bar(
+    frame: &mut Frame,
+    track: Rect,
+    content: usize,
+    position: usize,
+    focused: bool,
+) {
+    let view = usize::from(track.width);
+    let mut state = ScrollbarState::new(content + 1 - view.min(content))
+        .position(position)
+        .viewport_content_length(view);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::HorizontalBottom)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("─"))
+            .thumb_symbol("━")
+            .track_style(Style::default().fg(BORDER))
+            .thumb_style(Style::default().fg(if focused { ACTIVE } else { MUTED })),
+        track,
+        &mut state,
     );
 }
 
@@ -377,7 +417,7 @@ pub(super) fn render_editor(frame: &mut Frame, app: &mut App, regions: &mut Regi
                     render_completion(frame, app, index, body);
                 }
             }
-            None => render_empty(frame, focused, body),
+            None => render_empty(frame, &app.keys, focused, body),
         }
     }
     regions.editor_body = if split.is_some() {
@@ -391,7 +431,7 @@ pub(super) fn render_editor(frame: &mut Frame, app: &mut App, regions: &mut Regi
     }
 }
 
-fn render_empty(frame: &mut Frame, focused: bool, area: Rect) {
+fn render_empty(frame: &mut Frame, keys: &Keymap, focused: bool, area: Rect) {
     let block = panel_block(" Editor ".to_string(), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -399,10 +439,10 @@ fn render_empty(frame: &mut Frame, focused: bool, area: Rect) {
         "Select a file in Explorer".to_string(),
         format!(
             "{}: search file  |  {}: search workspace",
-            key("Ctrl+P"),
-            key("Ctrl+Shift+P")
+            keys.label(Action::FindInFile),
+            keys.label(Action::FindInWorkspace)
         ),
-        format!("{}: all commands", key("F1")),
+        format!("{}: all commands", keys.label(Action::Help)),
     ];
     let logo_width = ASCII_LOGO.iter().map(|line| line.len()).max().unwrap_or(0) as u16;
     let logo_fits =
@@ -836,20 +876,7 @@ fn render_file(
             text_width as u16,
             1,
         );
-        let mut state = ScrollbarState::new(file.max_width + 1 - text_width)
-            .position(scroll_x)
-            .viewport_content_length(text_width);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::HorizontalBottom)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_symbol(Some("─"))
-                .thumb_symbol("━")
-                .track_style(Style::default().fg(BORDER))
-                .thumb_style(Style::default().fg(if focused { ACTIVE } else { MUTED })),
-            track,
-            &mut state,
-        );
+        render_sideways_bar(frame, track, file.max_width, scroll_x, focused);
     }
     if focused {
         let column = file.cursor_x().checked_sub(scroll_x);
@@ -868,30 +895,63 @@ fn render_file(
     }
 }
 
-pub(super) fn render_terminal(frame: &mut Frame, app: &App, area: Rect, bottom: bool) {
-    let (terminal, focused, title) = if bottom {
+/// A terminal panel: the shell of the tab on screen, its tabs on the right of the top border
+/// (F04, Q59) and the text chosen with the mouse in reverse (Q57).
+pub(super) fn render_terminal(
+    frame: &mut Frame,
+    app: &App,
+    regions: &mut Regions,
+    area: Rect,
+    panel: Focus,
+) {
+    let bottom = panel == Focus::BottomTerminal;
+    let (terminals, name, action) = if bottom {
         (
             &app.bottom_terminal,
-            app.focus == Focus::BottomTerminal,
-            " Bottom terminal [Ctrl+J] ".to_string(),
+            "Bottom terminal",
+            Action::BottomTerminal,
         )
     } else {
-        (
-            &app.right_terminal,
-            app.focus == Focus::RightTerminal,
-            format!(" Right terminal [{}] ", key("Ctrl+Shift+B")),
-        )
+        (&app.right_terminal, "Right terminal", Action::RightTerminal)
     };
+    let focused = app.focus == panel;
+    let terminal = terminals.current();
+    // ` 1 x `, ` 2 x ` and ` + ` below three shells at the bottom; ` 1 ` and ` 2 ` on the right.
+    let count = terminals.tabs.len();
+    let closable = bottom && count > 1;
+    let labels = (1..=count)
+        .map(|number| {
+            if closable {
+                format!(" {number} x ")
+            } else {
+                format!(" {number} ")
+            }
+        })
+        .collect::<Vec<_>>();
+    let add = bottom && count < BOTTOM_TERMINALS;
+    let tabs_width = labels
+        .iter()
+        .map(|label| label.len() as u16 + 1)
+        .sum::<u16>()
+        + if add { 4 } else { 0 };
+    let scrollback = terminal.scrollback();
+    let icon = app.icon("dev-terminal");
+    let history = if scrollback > 0 {
+        format!(" [history: {scrollback}]")
+    } else {
+        String::new()
+    };
+    // The title gives way to the tabs: without its key, then only the icon.
+    let room = usize::from(area.width.saturating_sub(tabs_width + 3));
+    let title = [
+        format!(" {icon} {name} [{}]{history} ", app.keys.label(action)),
+        format!(" {icon} {name}{history} "),
+        format!(" {icon} "),
+    ]
+    .into_iter()
+    .find(|title| Line::from(title.as_str()).width() <= room)
+    .unwrap_or_default();
     if let Ok(parser) = terminal.parser.read() {
-        let scrollback = terminal.scrollback();
-        let title = if scrollback > 0 {
-            format!(
-                " {} {title} [history: {scrollback}] ",
-                app.icon("dev-terminal")
-            )
-        } else {
-            format!(" {} {title}", app.icon("dev-terminal"))
-        };
         let cursor = Cursor::default().visibility(focused && scrollback == 0);
         frame.render_widget(
             PseudoTerminal::new(parser.screen())
@@ -899,5 +959,58 @@ pub(super) fn render_terminal(frame: &mut Frame, app: &App, area: Rect, bottom: 
                 .cursor(cursor),
             area,
         );
+    }
+    if let Some(selection) = app
+        .terminal_selection
+        .filter(|chosen| chosen.panel == panel)
+    {
+        let inner = Rect::new(
+            area.x + 1,
+            area.y + 1,
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
+        let (start, end) = selection.bounds();
+        let buffer = frame.buffer_mut();
+        for row in start.0..=end.0.min(inner.height.saturating_sub(1)) {
+            let from = if row == start.0 { start.1 } else { 0 };
+            let to = if row == end.0 { end.1 } else { inner.width };
+            for column in from..=to.min(inner.width.saturating_sub(1)) {
+                buffer[(inner.x + column, inner.y + row)]
+                    .modifier
+                    .toggle(Modifier::REVERSED);
+            }
+        }
+    }
+    if area.height == 0 || area.width < tabs_width + 4 {
+        return;
+    }
+    let mut x = area.right() - 1 - tabs_width;
+    let button = Style::default().fg(TEXT).add_modifier(Modifier::REVERSED);
+    let shown = Style::default()
+        .fg(ACTIVE)
+        .add_modifier(Modifier::BOLD | Modifier::REVERSED);
+    for (index, label) in labels.iter().enumerate() {
+        let width = label.len() as u16;
+        let style = if index == terminals.active {
+            shown
+        } else {
+            button
+        };
+        frame.buffer_mut().set_string(x, area.y, label, style);
+        let (tab, close) = if closable {
+            (
+                Rect::new(x, area.y, width - 2, 1),
+                Rect::new(x + width - 2, area.y, 2, 1),
+            )
+        } else {
+            (Rect::new(x, area.y, width, 1), Rect::default())
+        };
+        regions.terminal_tabs.push((panel, index, tab, close));
+        x += width + 1;
+    }
+    if add {
+        frame.buffer_mut().set_string(x, area.y, " + ", button);
+        regions.terminal_add = Rect::new(x, area.y, 3, 1);
     }
 }
