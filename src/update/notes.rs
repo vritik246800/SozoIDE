@@ -10,6 +10,20 @@ pub struct Notes {
 
 pub const NOTES: &[Notes] = &[
     Notes {
+        version: "0.7.3",
+        new: &[
+            "The bottom terminal opens up to three shells, each in a tab: + adds one, x closes one; the right terminal has two tabs; Ctrl+PageDown and Ctrl+PageUp switch them",
+            "Drag the mouse in a terminal to select its text; letting go copies it",
+            "Shift+Enter in a terminal writes a new line without running it (zsh, fish and tools like Claude Code)",
+            "Change any shortcut in Help: click it, or Tab and Enter, then press the new keys; Reset shortcuts [R] brings back the ones SozoIDE came with",
+            "The Explorer scrolls sideways with Shift and the wheel, for long names",
+        ],
+        fixed: &[
+            "On Windows before 10 version 1809, SozoIDE opens and the terminals say why they cannot start, instead of crashing",
+            "A Windows console no longer shows escape codes when SozoIDE starts",
+        ],
+    },
+    Notes {
         version: "0.7.2",
         new: &[
             "Videos are drawn in half blocks in every terminal, frames made ahead on every core for smoother playback",
