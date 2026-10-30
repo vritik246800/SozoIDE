@@ -10,6 +10,17 @@ pub struct Notes {
 
 pub const NOTES: &[Notes] = &[
     Notes {
+        version: "0.7.2",
+        new: &[
+            "Videos are drawn in half blocks in every terminal, frames made ahead on every core for smoother playback",
+            "PDF: the pages around the one on screen are made in the background, so turning a page is instant",
+        ],
+        fixed: &[
+            "A folder left with a video, picture, 3D model or PDF open opens again instead of crashing",
+            "In kitty, videos and PDF pages update without switching tabs",
+        ],
+    },
+    Notes {
         version: "0.7.1",
         new: &[
             "PDF: a page with only text shows its text, to select, copy and search with Ctrl+P; a page with a picture or a drawing shows whole as a small picture",
