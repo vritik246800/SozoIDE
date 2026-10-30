@@ -8,10 +8,10 @@ use ratatui::{
 
 use crate::{
     animation::spinner,
-    app::{Action, App, AppMotion, KeyEditor, Keymap, TUTORIAL_STEPS},
+    app::{Action, App, AppMotion, KeyEditor, Keymap, NotesFilter, TUTORIAL_STEPS},
     branding::{self, ASCII_LOGO, ASCII_LOGO_LARGE},
     editor::{MAX_MATCHES, SearchMatch, SearchScope, file_icon},
-    update::{NOTES, UpdateState},
+    update::{NOTES, Notes, UpdateState},
 };
 
 use super::{
@@ -575,6 +575,10 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
                 bound(Action::About),
                 (Fixed("G (in About)"), "Open the repository to contribute"),
                 (Fixed("U (in About)"), "Check for updates now"),
+                (
+                    Fixed("N (in About)"),
+                    "Notes of every version; Tab: new or fixed",
+                ),
                 bound(Action::Quit),
             ],
         },
@@ -900,6 +904,7 @@ fn bloom(art: &[&str], progress: f32) -> Vec<String> {
 pub(super) fn render_about(frame: &mut Frame, app: &mut App, area: Rect) {
     let button = " Contribute on GitHub [G] ";
     let update = " Check for updates [U] ";
+    let notes = " Release notes [N] ";
     let tagline = "A terminal-native integrated development environment";
     let button_style = Style::default()
         .fg(ACTIVE)
@@ -921,7 +926,12 @@ pub(super) fn render_about(frame: &mut Frame, app: &mut App, area: Rect) {
         Line::from(tagline),
         Line::from(""),
         Line::from(Span::styled(button, button_style)),
-        Line::from(Span::styled(update, button_style)),
+        // Two buttons on one row: About keeps its height, and the large flower its room.
+        Line::from(vec![
+            Span::styled(update, button_style),
+            Span::raw("  "),
+            Span::styled(notes, button_style),
+        ]),
         Line::from(Span::styled(last, Style::default().fg(MUTED))),
     ];
     // The dialog takes a row over the flower, the borders and a spare row, and keeps one row
@@ -962,7 +972,18 @@ pub(super) fn render_about(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             };
             app.regions.about_repository = centred(button, button_row);
-            app.regions.about_update = centred(update, button_row + 1);
+            let pair = centred(&format!("{update}  {notes}"), button_row + 1);
+            app.regions.about_update = Rect {
+                width: (update.len() as u16).min(pair.width),
+                ..pair
+            };
+            app.regions.about_notes = Rect::new(
+                pair.x + update.len() as u16 + 2,
+                pair.y,
+                notes.len() as u16,
+                1,
+            )
+            .intersection(pair);
         },
     );
 }
@@ -1086,23 +1107,31 @@ pub(super) fn render_tutorial(frame: &mut Frame, app: &mut App, area: Rect) {
 
 /// After an update (F18): what each version since the one that ran before brings and fixes,
 /// newest first; the list scrolls when it does not fit.
-pub(super) fn render_whats_new(frame: &mut Frame, app: &mut App, area: Rect) {
-    let notes = if app.notes.is_empty() {
-        vec![&NOTES[0]]
-    } else {
-        app.notes.clone()
-    };
-    let mut lines = vec![Line::from(Span::styled(
-        format!("SozoIDE is now on version {}", branding::VERSION),
-        Style::default().add_modifier(Modifier::BOLD),
-    ))];
-    if notes.len() > 1 {
-        lines.push(Line::from(Span::styled(
-            format!("{} versions since the one you had", notes.len()),
-            Style::default().fg(MUTED),
-        )));
-    }
-    for version in &notes {
+/// The notes of `notes` that `filter` lets through, version by version, newest first; a
+/// version with none of them is left out.
+fn note_lines(notes: &[&Notes], filter: NotesFilter) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for version in notes {
+        let sections = [
+            (
+                "New",
+                version.new,
+                Color::Green,
+                filter != NotesFilter::Fixed,
+            ),
+            (
+                "Fixed",
+                version.fixed,
+                Color::Yellow,
+                filter != NotesFilter::New,
+            ),
+        ];
+        if sections
+            .iter()
+            .all(|(_, items, _, shown)| !shown || items.is_empty())
+        {
+            continue;
+        }
         lines.extend([
             Line::from(""),
             Line::from(Span::styled(
@@ -1110,11 +1139,8 @@ pub(super) fn render_whats_new(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
             )),
         ]);
-        for (title, items, color) in [
-            ("New", version.new, Color::Green),
-            ("Fixed", version.fixed, Color::Yellow),
-        ] {
-            if items.is_empty() {
+        for (title, items, color, shown) in sections {
+            if !shown || items.is_empty() {
                 continue;
             }
             lines.push(Line::from(Span::styled(
@@ -1124,6 +1150,48 @@ pub(super) fn render_whats_new(frame: &mut Frame, app: &mut App, area: Rect) {
             lines.extend(items.iter().map(|item| Line::from(format!("    - {item}"))));
         }
     }
+    if lines.is_empty() {
+        lines.extend([
+            Line::from(""),
+            Line::from(Span::styled(
+                format!(
+                    "Nothing {} in these versions",
+                    filter.label().to_lowercase()
+                ),
+                Style::default().fg(MUTED),
+            )),
+        ]);
+    }
+    lines
+}
+
+/// What's new after an update (F18), or the notes of every version from About's Release
+/// notes; All, New and Fixed on top choose which notes.
+pub(super) fn render_whats_new(frame: &mut Frame, app: &mut App, area: Rect) {
+    let notes = if app.notes.is_empty() {
+        vec![&NOTES[0]]
+    } else {
+        app.notes.clone()
+    };
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut lines = vec![if app.all_notes {
+        Line::from(Span::styled(
+            format!("SozoIDE {}: the notes of every version", branding::VERSION),
+            bold,
+        ))
+    } else {
+        Line::from(Span::styled(
+            format!("SozoIDE is now on version {}", branding::VERSION),
+            bold,
+        ))
+    }];
+    if notes.len() > 1 && !app.all_notes {
+        lines.push(Line::from(Span::styled(
+            format!("{} versions since the one you had", notes.len()),
+            Style::default().fg(MUTED),
+        )));
+    }
+    lines.extend(note_lines(&notes, app.notes_filter));
     // Long notes wrap: the rows they take inside the borders, counted as the paragraph wraps
     // them (an estimate scrolled past the end once the notes grew, E32).
     let inner = 80
@@ -1133,33 +1201,65 @@ pub(super) fn render_whats_new(frame: &mut Frame, app: &mut App, area: Rect) {
     let rows = Paragraph::new(lines.clone())
         .wrap(Wrap { trim: false })
         .line_count(inner) as u16;
-    let dialog = dialog_area(area, 80, rows + 4);
-    let visible = dialog.height.saturating_sub(4);
+    let dialog = dialog_area(area, 80, rows + 5);
+    let visible = dialog.height.saturating_sub(5);
     let most = rows.saturating_sub(visible);
     app.overlay_scroll = app.overlay_scroll.min(most);
     let scroll = app.overlay_scroll;
     let close = " Close [Enter] ";
     let progress = app.motion.overlay();
+    let chosen = app.notes_filter;
+    let title = if app.all_notes {
+        " Release notes "
+    } else {
+        " What's new "
+    };
     render_dialog(
         frame,
         dialog,
         progress,
-        " What's new ".to_string(),
+        title.to_string(),
         |frame, inner| {
-            let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+            let rows = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+            // All, New and Fixed, like the tabs of Source Control: Tab or a click.
+            let mut x = rows[0].x + 1;
+            for filter in NotesFilter::ALL {
+                let label = format!(" {} ", filter.label());
+                let style = if filter == chosen {
+                    Style::default()
+                        .fg(ACTIVE)
+                        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                } else {
+                    Style::default().fg(TEXT).add_modifier(Modifier::REVERSED)
+                };
+                let width = label.len() as u16;
+                let button = Rect::new(x, rows[0].y, width, 1).intersection(rows[0]);
+                frame.render_widget(Paragraph::new(label).style(style), button);
+                app.regions.notes_filters.push((filter, button));
+                x += width + 1;
+            }
+            frame.render_widget(
+                Paragraph::new(" Tab: filter").style(Style::default().fg(MUTED)),
+                Rect::new(x, rows[0].y, rows[0].right().saturating_sub(x), 1).intersection(rows[0]),
+            );
             frame.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: false })
                     .scroll((scroll, 0)),
-                rows[0],
+                rows[1],
             );
-            let (close_area, _) = buttons(frame, rows[1], close, "");
+            let (close_area, _) = buttons(frame, rows[2], close, "");
             app.regions.dialog_next = close_area;
             if most > 0 {
                 let hint = Rect::new(
                     close_area.right() + 2,
-                    rows[1].y,
-                    rows[1].width.saturating_sub(close_area.width + 2),
+                    rows[2].y,
+                    rows[2].width.saturating_sub(close_area.width + 2),
                     1,
                 );
                 frame.render_widget(
@@ -1477,5 +1577,52 @@ mod tests {
     fn the_tutorial_says_what_was_counted() {
         let (_, welcome) = &tutorial_steps("linux", &Keymap::defaults("linux"))[0];
         assert!(welcome.contains("anonymously") && welcome.contains("SOZO_NO_TELEMETRY=1"));
+    }
+
+    #[test]
+    fn notes_are_shown_all_new_or_fixed_without_empty_versions() {
+        const BOTH: Notes = Notes {
+            version: "9.1.0",
+            new: &["a new thing"],
+            fixed: &["a fixed thing"],
+        };
+        const NEW_ONLY: Notes = Notes {
+            version: "9.0.0",
+            new: &["an older new thing"],
+            fixed: &[],
+        };
+        let text = |notes: &[&Notes], filter| {
+            note_lines(notes, filter)
+                .iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let all = text(&[&BOTH, &NEW_ONLY], NotesFilter::All);
+        for shown in [
+            "Version 9.1.0",
+            "  New",
+            "a new thing",
+            "  Fixed",
+            "a fixed thing",
+            "Version 9.0.0",
+            "an older new thing",
+        ] {
+            assert!(all.contains(shown), "{shown}");
+        }
+        let new = text(&[&BOTH, &NEW_ONLY], NotesFilter::New);
+        assert!(new.contains("a new thing") && new.contains("an older new thing"));
+        assert!(!new.contains("Fixed") && !new.contains("a fixed thing"));
+        // A version with nothing fixed is left out.
+        let fixed = text(&[&BOTH, &NEW_ONLY], NotesFilter::Fixed);
+        assert!(fixed.contains("a fixed thing") && !fixed.contains("New"));
+        assert!(!fixed.contains("Version 9.0.0"));
+        assert_eq!(
+            text(&[&NEW_ONLY], NotesFilter::Fixed).trim(),
+            "Nothing fixed in these versions"
+        );
+        assert_eq!(NotesFilter::All.step(true), NotesFilter::New);
+        assert_eq!(NotesFilter::All.step(false), NotesFilter::Fixed);
+        assert_eq!(NotesFilter::Fixed.step(true), NotesFilter::All);
     }
 }

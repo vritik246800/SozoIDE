@@ -10,8 +10,8 @@ use crate::{
 };
 
 use super::{
-    Action, App, DragTarget, DropZone, EntryAction, Focus, Overlay, TUTORIAL_STEPS, TabDrag,
-    TerminalSelection, video_areas,
+    Action, App, DragTarget, DropZone, EntryAction, Focus, NotesFilter, Overlay, TUTORIAL_STEPS,
+    TabDrag, TerminalSelection, video_areas,
 };
 
 impl App {
@@ -339,6 +339,12 @@ impl App {
                 self.close_overlay()
             }
             (Overlay::About, KeyCode::Char('g' | 'G')) => self.open_repository(),
+            (Overlay::About, KeyCode::Char('n' | 'N')) => self.open_release_notes(),
+            // The notes dialog: Tab and BackTab go through All, New and Fixed (F18).
+            (Overlay::WhatsNew, KeyCode::Tab | KeyCode::BackTab) => {
+                let forward = code == KeyCode::Tab && !key.modifiers.contains(KeyModifiers::SHIFT);
+                self.filter_notes(self.notes_filter.step(forward));
+            }
             // A check from About also offers a version skipped before (F16).
             (Overlay::About, KeyCode::Char('u' | 'U')) => self.updater.check_now(),
             _ if closes => self.close_overlay(),
@@ -377,6 +383,20 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// About's Release notes [N] (F18): the notes of every version, in About's place.
+    fn open_release_notes(&mut self) {
+        self.notes = crate::update::NOTES.iter().collect();
+        self.all_notes = true;
+        self.notes_filter = NotesFilter::All;
+        self.open_overlay(Overlay::WhatsNew);
+    }
+
+    /// Tab, BackTab or a click on All, New or Fixed: those notes, from the top.
+    fn filter_notes(&mut self, filter: NotesFilter) {
+        self.notes_filter = filter;
+        self.overlay_scroll = 0;
     }
 
     pub(super) fn open_overlay(&mut self, overlay: Overlay) {
@@ -724,12 +744,26 @@ impl App {
                     }
                     return;
                 }
+                if self.overlay == Overlay::WhatsNew
+                    && !self.motion.overlay_closing()
+                    && let Some((filter, _)) = self
+                        .regions
+                        .notes_filters
+                        .iter()
+                        .find(|(_, area)| contains(*area, point))
+                        .copied()
+                {
+                    self.filter_notes(filter);
+                    return;
+                }
                 if self.overlay != Overlay::None && !self.motion.overlay_closing() {
                     let regions = &self.regions;
                     let key = if contains(regions.about_repository, point) {
                         Some(KeyCode::Char('g'))
                     } else if contains(regions.about_update, point) {
                         Some(KeyCode::Char('u'))
+                    } else if contains(regions.about_notes, point) {
+                        Some(KeyCode::Char('n'))
                     } else if contains(regions.dialog_next, point) {
                         Some(KeyCode::Enter)
                     } else if contains(regions.dialog_skip, point) {
@@ -2619,5 +2653,53 @@ mod tests {
         app.focus = Focus::Editor;
         press(&mut app, KeyCode::PageDown, KeyModifiers::CONTROL);
         assert_eq!(app.right_terminal.active, 1);
+    }
+
+    #[test]
+    fn about_opens_the_notes_of_every_version_and_tab_or_a_click_filters_them() {
+        let mut app = test_app();
+        press(&mut app, KeyCode::F(2), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::WhatsNew);
+        assert!(app.all_notes);
+        assert_eq!(app.notes.len(), crate::update::NOTES.len());
+        assert_eq!(app.notes_filter, NotesFilter::All);
+        // Tab and BackTab go round All, New and Fixed, from the top each time.
+        app.overlay_scroll = 9;
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(
+            (app.notes_filter, app.overlay_scroll),
+            (NotesFilter::New, 0)
+        );
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.notes_filter, NotesFilter::Fixed);
+        press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(app.notes_filter, NotesFilter::New);
+        app.regions.notes_filters = vec![(NotesFilter::All, Rect::new(10, 5, 5, 1))];
+        mouse(
+            &mut app,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            12,
+            5,
+        );
+        assert_eq!(app.notes_filter, NotesFilter::All);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.motion.overlay_closing());
+
+        // The button of About does the same, and What's new after an update shows all its notes.
+        app.tick_at(std::time::Instant::now() + std::time::Duration::from_secs(1));
+        press(&mut app, KeyCode::F(2), KeyModifiers::NONE);
+        app.notes_filter = NotesFilter::Fixed;
+        app.regions.about_notes = Rect::new(40, 21, 19, 1);
+        mouse(
+            &mut app,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            45,
+            21,
+        );
+        assert_eq!(
+            (app.overlay, app.notes_filter),
+            (Overlay::WhatsNew, NotesFilter::All)
+        );
     }
 }

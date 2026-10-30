@@ -31,8 +31,8 @@ pub use intellisense::{Completion, SHOWN_ITEMS};
 pub use keys::{Action, KeyEditor, Keymap};
 use layout::{DragTarget, TabDrag, inner_size};
 pub use layout::{
-    DropZone, Focus, Overlay, Regions, Split, SplitDirection, TabBar, TerminalSelection,
-    video_areas,
+    DropZone, Focus, NotesFilter, Overlay, Regions, Split, SplitDirection, TabBar,
+    TerminalSelection, video_areas,
 };
 pub(crate) use motion::AppMotion;
 
@@ -102,6 +102,9 @@ pub struct App {
     pub tutorial_step: usize,
     /// The notes What's new lists: every version since the one that ran before.
     pub notes: Vec<&'static Notes>,
+    /// The notes dialog shows every version (About's Release notes) and which of its notes.
+    pub all_notes: bool,
+    pub notes_filter: NotesFilter,
     /// The first row of a dialog taller than the screen (Help, What's new).
     pub overlay_scroll: u16,
     /// Text copied in the editor, for `main` to hand to the terminal (OSC 52).
@@ -209,6 +212,8 @@ impl App {
             welcome,
             tutorial_step: 0,
             notes: Vec::new(),
+            all_notes: false,
+            notes_filter: NotesFilter::All,
             overlay_scroll: 0,
             clipboard: None,
             dependencies,
@@ -383,6 +388,8 @@ impl App {
             let overlay = match std::mem::replace(&mut self.welcome, Welcome::None) {
                 Welcome::WhatsNew(seen) => {
                     self.notes = notes_since(&seen);
+                    self.all_notes = false;
+                    self.notes_filter = NotesFilter::All;
                     Overlay::WhatsNew
                 }
                 _ => Overlay::Tutorial,

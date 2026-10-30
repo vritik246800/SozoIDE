@@ -104,7 +104,7 @@ Connect to SQLite, PostgreSQL and MySQL and the tables and views appear on the l
 
 ### A guided start
 
-A short tutorial on the first start (skip it with `Esc`), and after an update a note with what is new in every version since the one you had. `F1` lists every key in boxed sections; the footer shows what just happened.
+A short tutorial on the first start (skip it with `Esc`), and after an update a note with what is new in every version since the one you had. In About, `Release notes [N]` shows the notes of every version; `Tab` shows only what is new or only what was fixed. `F1` lists every key in boxed sections; the footer shows what just happened.
 
 ## Install
 
@@ -206,6 +206,7 @@ These are the keys SozoIDE comes with; change them in Help.
 | `Up` / `Down` or the mouse wheel (Help, What's new) | Scroll a dialog taller than the terminal |
 | `G` (in About) | Open the repository to contribute |
 | `U` (in About) | Check for updates now, also a version you skipped |
+| `N` (in About) | The notes of every version; `Tab` shows only what is new or only what was fixed |
 
 ### Motion
 

@@ -993,6 +993,14 @@ mod tests {
         assert_eq!(update.y, button.y + 1);
         let text = row(terminal.backend().buffer(), update.y);
         assert!(text.contains("Check for updates [U]"), "{text}");
+        // Release notes beside it, on the same row: About keeps its height.
+        let notes = app.regions.about_notes;
+        assert_eq!((notes.y, notes.x), (update.y, update.right() + 2));
+        let buffer = terminal.backend().buffer();
+        let label = (notes.x..notes.right())
+            .map(|x| buffer[(x, notes.y)].symbol())
+            .collect::<String>();
+        assert_eq!(label, " Release notes [N] ");
         app.updater.checked = Some("You have the latest version (0.7.0)".to_string());
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let text = row(terminal.backend().buffer(), update.y + 1);
@@ -2228,5 +2236,57 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn release_notes_show_every_version_and_the_filter_chooses_new_or_fixed() {
+        use crate::update::NOTES;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+        let mut app = App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        settle(&mut app);
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Release notes") && text.contains("the notes of every version"));
+        assert!(text.contains(" All ") && text.contains(" New ") && text.contains(" Fixed "));
+        assert!(!text.contains("versions since the one you had"));
+        // The first words of a note, short enough not to wrap.
+        let start = |note: &str| {
+            note.split_whitespace()
+                .take(4)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let (new, fixed) = (start(NOTES[0].new[0]), start(NOTES[0].fixed[0]));
+        assert!(text.contains(&new) && text.contains(&fixed));
+        let filters = app.regions.notes_filters.clone();
+        assert_eq!(filters.len(), 3);
+
+        // A click on Fixed: only what was fixed, from the top.
+        let (_, area) = filters[2];
+        click(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + 1,
+            area.y,
+        );
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains(&fixed) && !text.contains(&new), "{text}");
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer[(area.x + 1, area.y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert_eq!(buffer[(area.x + 1, area.y)].fg, ACTIVE);
+        // BackTab: New, without the fixed notes.
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains(&new) && !text.contains(&fixed));
     }
 }

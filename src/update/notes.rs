@@ -17,6 +17,7 @@ pub const NOTES: &[Notes] = &[
             "Shift+Enter in a terminal writes a new line without running it (zsh, fish and tools like Claude Code)",
             "Change any shortcut in Help: click it, or Tab and Enter, then press the new keys; Reset shortcuts [R] brings back the ones SozoIDE came with",
             "The Explorer scrolls sideways with Shift and the wheel, for long names",
+            "About: Release notes [N] shows the notes of every version; Tab shows only what is new or only what was fixed",
         ],
         fixed: &[
             "On Windows before 10 version 1809, SozoIDE opens and the terminals say why they cannot start, instead of crashing",
