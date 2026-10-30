@@ -2033,7 +2033,11 @@ mod tests {
             border.contains("Right terminal") && border.ends_with(" 1 ─ 2 ─╮"),
             "{border}"
         );
-        assert!(!border.contains('+') && !border.contains(" x "), "{border}");
+        // No + button nor x: the + of a key in the title (Ctrl+Alt+B on Linux) is not one.
+        assert!(
+            !border.contains(" + ") && !border.contains(" x "),
+            "{border}"
+        );
         assert_eq!(app.regions.terminal_tabs.len(), 3);
 
         // + opens a second and a third shell; then it goes, and each tab has its x.
