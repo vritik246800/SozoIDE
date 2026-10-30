@@ -30,6 +30,7 @@
 - Every file and folder with an icon for its type, in your terminal's colours.
 - Right-click to create a file (its icon follows the extension you type) or a folder, to rename, to delete (it asks first), and to cut, copy and paste files and folders; `Ctrl+X`, `Ctrl+C` and `Ctrl+V` do the same on the selected entry. A copy in the same folder becomes `name copy`, `name copy 2`…; a move never overwrites anything.
 - The tree follows other programs: what they create, rename or delete shows up within a second.
+- Long names scroll sideways with `Shift` and the mouse wheel (or a sideways wheel), with a bar along the bottom.
 - Each folder opens as you left it, like VS Code: the folders you had open, your tabs with their cursors, the active tab and the panels.
 
 ### Editor
@@ -85,9 +86,13 @@ Problems underlined in red (errors) or yellow (warnings), with the message of th
 - 3D models (`.glb`, `.gltf`) open in a tab, lit and with their colours: `←`/`→` turn them, `↑`/`↓` tilt them, `+`/`-` or the wheel zoom, and a drag turns them with the mouse.
 - PDF files open one page at a time. A page with only text shows its text, sharp, to select, copy and search with `Ctrl+P`; a page with a picture, a diagram or another drawing shows whole as a small picture through your terminal's picture protocol (Sixel, Kitty or iTerm2), or half blocks without one.
 
-### Two terminals
+### Terminals
 
-A bottom and a right terminal, each with its own shell, with scrollback on the mouse wheel or Page Up and Page Down. Drag the dividers to resize every panel.
+A bottom and a right terminal, each with its own shell, with scrollback on the mouse wheel or Page Up and Page Down. The bottom one opens up to three shells, each in a tab: click `+` for another one and the `x` of a tab to close it (one always stays). The right one always has two tabs. `Ctrl+PageDown` and `Ctrl+PageUp` switch tabs. Drag the mouse over a terminal to select its text: letting go copies it. `Shift+Enter` writes a new line without running it, as zsh, fish and tools like Claude Code expect (your terminal has to tell SozoIDE about Shift: kitty, WezTerm, Ghostty, iTerm2 and Windows do). Drag the dividers to resize every panel. On Windows the terminals need Windows 10 version 1809 or newer; on an older one SozoIDE opens without them.
+
+### Your own shortcuts
+
+Every command that works anywhere or in the editor can have the key you choose: open Help (`F1`), click its key (or move to it with `Tab` and press `Enter`), then press the new keys, with `Ctrl`, `Alt` (`Option` on a Mac) or a function key. A key that another command had swaps with it, so no command is left without one. Your keys are saved in `keys.toml` in SozoIDE's settings folder and show everywhere: the footer, the panel titles, the tutorial and Help. `Reset shortcuts [R]` brings back the ones SozoIDE came with.
 
 ### Source Control
 
@@ -99,7 +104,7 @@ Connect to SQLite, PostgreSQL and MySQL and the tables and views appear on the l
 
 ### A guided start
 
-A short tutorial on the first start (skip it with `Esc`), and after an update a note with what is new in every version since the one you had. `F1` lists every key in boxed sections; the footer shows what just happened.
+A short tutorial on the first start (skip it with `Esc`), and after an update a note with what is new in every version since the one you had. In About, `Release notes [N]` shows the notes of every version; `Tab` shows only what is new or only what was fixed. `F1` lists every key in boxed sections; the footer shows what just happened.
 
 ## Install
 
@@ -147,11 +152,17 @@ sozo --help
 sozo --version
 ```
 
+These are the keys SozoIDE comes with; change them in Help.
+
 | Key | Action |
 | --- | --- |
 | `Ctrl+B` | Show or hide the Explorer |
 | `Ctrl+J` | Show or hide the bottom terminal |
 | `Ctrl+Shift+B` (macOS: `Ctrl+Option+B`, Linux: `Ctrl+Alt+B`) | Show or hide the right terminal |
+| `Ctrl+PageDown` / `Ctrl+PageUp` (terminal) | Next / previous tab of the terminal |
+| Click `+` / `x` (bottom terminal) | Another shell in a tab, up to three / close that tab |
+| Drag the mouse (terminal) | Select text; letting go copies it |
+| `Shift+Enter` (terminal) | New line without running it |
 | `Ctrl+G` | Open or close Source Control |
 | `Ctrl+D` | Open or close Database |
 | `Ctrl+P` | Search the open file |
@@ -162,6 +173,7 @@ sozo --version
 | `Ctrl+W` | Close the active tab |
 | `Ctrl+Enter` or `F5` | Run the SQL query |
 | `F1` | Help with every command |
+| Click a key, or `Tab` and `Enter` (Help) | Change that shortcut: press the new keys; `Esc` gives up, `R` then `Enter` resets them all |
 | `F2` | About, with the version |
 | `Ctrl+Q` | Quit and restore the terminal |
 | `Tab` / `Shift+Tab` | Move between tabs or fields |
@@ -169,7 +181,7 @@ sozo --version
 | `Esc` | Close the dialog or panel |
 | `Page Up` / `Page Down` | Scroll the editor or the terminal history |
 | Mouse wheel | Scroll panels and terminal history |
-| `Shift` + mouse wheel | Scroll the editor sideways |
+| `Shift` + mouse wheel | Scroll the editor or the Explorer sideways |
 | Mouse wheel on the tabs, `‹` / `›` | Scroll the tab bar |
 | Drag a divider | Resize the Explorer and the terminals |
 | Drag a tab | To an edge of the editor: split it, each side with its own tabs; to the other side: move it there (a side without tabs closes) |
@@ -194,6 +206,7 @@ sozo --version
 | `Up` / `Down` or the mouse wheel (Help, What's new) | Scroll a dialog taller than the terminal |
 | `G` (in About) | Open the repository to contribute |
 | `U` (in About) | Check for updates now, also a version you skipped |
+| `N` (in About) | The notes of every version; `Tab` shows only what is new or only what was fixed |
 
 ### Motion
 
@@ -248,13 +261,13 @@ npm run dev
 
 ```text
 src/          the application:
-  app/        state, keys, mouse, Explorer, IntelliSense list, each folder's session
+  app/        state, keys and your own shortcuts, mouse, Explorer, IntelliSense list, each folder's session
   editor/     text, highlighting, Markdown, Mermaid, PDF, search
   lsp/        language server client (JSON-RPC over stdio)
   run/        the command Ctrl+R runs
   debug/      the debugger client (Debug Adapter Protocol)
   media/      pictures, GIFs, videos and 3D models in half blocks
-  terminal/   the two PTY terminals
+  terminal/   the PTY terminals and their tabs
   git/        Source Control
   database/   SQLite, PostgreSQL and MySQL
   update/     updates and the tools installed in the background

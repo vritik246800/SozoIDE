@@ -20,6 +20,35 @@ pub enum Overlay {
     WhatsNew,
 }
 
+/// Which notes the notes dialog shows (F18): all of them, only what is new or only what was
+/// fixed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NotesFilter {
+    #[default]
+    All,
+    New,
+    Fixed,
+}
+
+impl NotesFilter {
+    pub const ALL: [Self; 3] = [Self::All, Self::New, Self::Fixed];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::New => "New",
+            Self::Fixed => "Fixed",
+        }
+    }
+
+    /// The next filter, or the previous one, round the ends (Tab and BackTab).
+    pub fn step(self, forward: bool) -> Self {
+        let index = Self::ALL.iter().position(|filter| *filter == self);
+        let index = index.unwrap_or_default() + if forward { 1 } else { 2 };
+        Self::ALL[index % Self::ALL.len()]
+    }
+}
+
 /// Two editor panes: side by side (`Columns`) or stacked (`Rows`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitDirection {
@@ -83,6 +112,22 @@ pub(super) struct TabDrag {
     pub zone: Option<DropZone>,
 }
 
+/// Text chosen with the mouse in a terminal (Q57): the cells (row, column inside its border)
+/// where the drag started and where it is, in the tab on screen of the panel `panel` names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalSelection {
+    pub panel: Focus,
+    pub anchor: (u16, u16),
+    pub end: (u16, u16),
+}
+
+impl TerminalSelection {
+    /// The first and the last cell, in reading order.
+    pub fn bounds(&self) -> ((u16, u16), (u16, u16)) {
+        (self.anchor.min(self.end), self.anchor.max(self.end))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DragTarget {
     Explorer,
@@ -107,6 +152,9 @@ pub struct Regions {
     pub update_skip: Rect,
     pub about_repository: Rect,
     pub about_update: Rect,
+    /// About's Release notes, and the All, New and Fixed of the notes dialog (F18).
+    pub about_notes: Rect,
+    pub notes_filters: Vec<(NotesFilter, Rect)>,
     pub dialog_next: Rect,
     pub dialog_skip: Rect,
     /// Both editor panes together; `editor` is the text area of the active pane.
@@ -126,6 +174,13 @@ pub struct Regions {
     pub search_next: Rect,
     pub tab_items: Vec<(usize, Rect, Rect)>,
     pub entry_menu_items: Vec<(super::EntryAction, Rect)>,
+    /// The tabs of the terminals: panel, tab, the tab and its `x` (empty when it has none).
+    pub terminal_tabs: Vec<(Focus, usize, Rect, Rect)>,
+    /// The `+` of the bottom terminal.
+    pub terminal_add: Rect,
+    /// The keys Help lets change (F29), and its Reset button.
+    pub help_keys: Vec<(super::Action, Rect)>,
+    pub help_reset: Rect,
 }
 
 /// A video's tab inside its border: the picture, then the progress row and the button row

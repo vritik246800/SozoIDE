@@ -29,14 +29,15 @@ const TABLE_COLOURS: [Color; 6] = [
     Color::Red,
 ];
 
-pub fn render(frame: &mut Frame, controller: &mut DatabaseController, area: Rect) {
+/// `key` is the key the user gave the Database (F29).
+pub fn render(frame: &mut Frame, controller: &mut DatabaseController, area: Rect, key: &str) {
     controller.regions.area = area;
     controller.regions.content = Rect::default();
     controller.regions.objects = Rect::default();
     controller.regions.results = Rect::default();
     controller.regions.actions.clear();
     controller.regions.form_fields.clear();
-    let block = panel_block(" Database [Ctrl+D] ".into(), true);
+    let block = panel_block(format!(" Database [{key}] "), true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let [tabs, toolbar, body, status] = Layout::vertical([

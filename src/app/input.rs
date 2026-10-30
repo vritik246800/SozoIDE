@@ -10,21 +10,23 @@ use crate::{
 };
 
 use super::{
-    App, DragTarget, DropZone, EntryAction, Focus, Overlay, TUTORIAL_STEPS, TabDrag, video_areas,
+    Action, App, DragTarget, DropZone, EntryAction, Focus, NotesFilter, Overlay, TUTORIAL_STEPS,
+    TabDrag, TerminalSelection, video_areas,
 };
 
 impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        // macOS and Linux terminals send Ctrl+Shift+B as Ctrl+B (E11, E18), so they use
-        // Ctrl+Option+B and Ctrl+Alt+B.
-        let right_terminal_modifier = if cfg!(any(target_os = "macos", target_os = "linux")) {
-            key.modifiers.contains(KeyModifiers::ALT)
-        } else {
-            shift
-        };
-        if ctrl && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
+        // Help waiting for the new keys of a command takes every key first, Ctrl+Q too (F29).
+        if self.overlay == Overlay::Help
+            && !self.motion.overlay_closing()
+            && (self.key_editor.capturing || self.key_editor.confirm_reset)
+        {
+            self.edit_shortcut(key);
+            return;
+        }
+        // The commands go by the keys the user gave them (`keys.toml`, F29).
+        let action = self.keys.action(key);
+        if action == Some(Action::Quit) {
             self.flush_all_files();
             self.save_session();
             self.should_quit = true;
@@ -54,37 +56,31 @@ impl App {
         }
         if self.overlay != Overlay::None {
             if self.motion.overlay_closing() {
-                match key.code {
-                    KeyCode::F(1) => self.open_overlay(Overlay::Help),
-                    KeyCode::F(2) => self.open_overlay(Overlay::About),
-                    KeyCode::Char('p') | KeyCode::Char('P') if ctrl => {
-                        let scope = if shift {
-                            SearchScope::Workspace
-                        } else {
-                            SearchScope::CurrentFile
-                        };
-                        self.open_search(scope);
-                    }
+                match action {
+                    Some(Action::Help) => self.open_overlay(Overlay::Help),
+                    Some(Action::About) => self.open_overlay(Overlay::About),
+                    Some(Action::FindInFile) => self.open_search(SearchScope::CurrentFile),
+                    Some(Action::FindInWorkspace) => self.open_search(SearchScope::Workspace),
                     _ => {}
                 }
             } else {
-                self.handle_overlay_key(key.code);
+                self.handle_overlay_key(key);
             }
             return;
         }
 
-        match key.code {
-            KeyCode::F(1) => {
+        match action {
+            Some(Action::Help) => {
                 self.flush_active_file();
                 self.open_overlay(Overlay::Help);
                 return;
             }
-            KeyCode::F(2) => {
+            Some(Action::About) => {
                 self.flush_active_file();
                 self.open_overlay(Overlay::About);
                 return;
             }
-            KeyCode::Char('g') | KeyCode::Char('G') if ctrl => {
+            Some(Action::SourceControl) => {
                 self.flush_active_file();
                 self.show_git = !self.show_git;
                 self.show_database = false;
@@ -96,7 +92,7 @@ impl App {
                 };
                 return;
             }
-            KeyCode::Char('d') | KeyCode::Char('D') if ctrl => {
+            Some(Action::Database) => {
                 self.flush_active_file();
                 self.show_database = !self.show_database;
                 self.show_git = false;
@@ -107,9 +103,9 @@ impl App {
                 };
                 return;
             }
-            KeyCode::Char('p') | KeyCode::Char('P') if ctrl => {
+            Some(Action::FindInFile | Action::FindInWorkspace) => {
                 self.flush_active_file();
-                let scope = if shift {
+                let scope = if action == Some(Action::FindInWorkspace) {
                     SearchScope::Workspace
                 } else {
                     SearchScope::CurrentFile
@@ -117,7 +113,7 @@ impl App {
                 self.open_search(scope);
                 return;
             }
-            KeyCode::Char('b') | KeyCode::Char('B') if ctrl && right_terminal_modifier => {
+            Some(Action::RightTerminal) => {
                 self.flush_active_file();
                 self.show_right_terminal = !self.show_right_terminal;
                 self.focus = if self.show_right_terminal {
@@ -127,7 +123,7 @@ impl App {
                 };
                 return;
             }
-            KeyCode::Char('b') | KeyCode::Char('B') if ctrl => {
+            Some(Action::Explorer) => {
                 self.flush_active_file();
                 self.show_explorer = !self.show_explorer;
                 self.focus = if self.show_explorer {
@@ -137,7 +133,7 @@ impl App {
                 };
                 return;
             }
-            KeyCode::Char('j') | KeyCode::Char('J') if ctrl => {
+            Some(Action::BottomTerminal) => {
                 self.flush_active_file();
                 self.show_bottom_terminal = !self.show_bottom_terminal;
                 self.focus = if self.show_bottom_terminal {
@@ -147,14 +143,26 @@ impl App {
                 };
                 return;
             }
+            // The tabs of the terminal with the focus (F04).
+            Some(Action::NextTerminal | Action::PreviousTerminal)
+                if matches!(self.focus, Focus::BottomTerminal | Focus::RightTerminal) =>
+            {
+                self.terminals(self.focus)
+                    .step(action == Some(Action::NextTerminal));
+                self.terminal_selection = None;
+                return;
+            }
             _ => {}
         }
 
         match self.focus {
             Focus::Explorer => self.handle_explorer_key(key),
             Focus::Editor => self.handle_editor_key(key),
-            Focus::BottomTerminal => self.bottom_terminal.send_key(key),
-            Focus::RightTerminal => self.right_terminal.send_key(key),
+            Focus::BottomTerminal | Focus::RightTerminal => {
+                // Typing leaves the text chosen with the mouse.
+                self.terminal_selection = None;
+                self.terminals(self.focus).current_mut().send_key(key);
+            }
             Focus::Database => {
                 if !self.database.handle_key(key) {
                     self.show_database = false;
@@ -172,14 +180,10 @@ impl App {
 
     fn handle_search_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if ctrl && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
-            let scope = if key.modifiers.contains(KeyModifiers::SHIFT) {
-                SearchScope::Workspace
-            } else {
-                SearchScope::CurrentFile
-            };
-            self.open_search(scope);
-            return;
+        match self.keys.action(key) {
+            Some(Action::FindInFile) => return self.open_search(SearchScope::CurrentFile),
+            Some(Action::FindInWorkspace) => return self.open_search(SearchScope::Workspace),
+            _ => {}
         }
         if self.motion.search_closing() {
             return;
@@ -311,9 +315,15 @@ impl App {
         self.preview_match();
     }
 
-    /// Esc, F1 and F2 close every dialog; the tutorial pages with Enter and the arrows, About
-    /// opens the repository with G.
-    fn handle_overlay_key(&mut self, code: KeyCode) {
+    /// Esc and the keys of Help and About close every dialog; the tutorial pages with Enter
+    /// and the arrows, About opens the repository with G, Help changes shortcuts (F29).
+    fn handle_overlay_key(&mut self, key: KeyEvent) {
+        if self.overlay == Overlay::Help && self.handle_shortcut_key(key) {
+            return;
+        }
+        let code = key.code;
+        let closes = code == KeyCode::Esc
+            || matches!(self.keys.action(key), Some(Action::Help | Action::About));
         match (self.overlay, code) {
             (Overlay::Tutorial, KeyCode::Enter | KeyCode::Right | KeyCode::Char(' ')) => {
                 if self.tutorial_step + 1 < TUTORIAL_STEPS {
@@ -329,9 +339,15 @@ impl App {
                 self.close_overlay()
             }
             (Overlay::About, KeyCode::Char('g' | 'G')) => self.open_repository(),
+            (Overlay::About, KeyCode::Char('n' | 'N')) => self.open_release_notes(),
+            // The notes dialog: Tab and BackTab go through All, New and Fixed (F18).
+            (Overlay::WhatsNew, KeyCode::Tab | KeyCode::BackTab) => {
+                let forward = code == KeyCode::Tab && !key.modifiers.contains(KeyModifiers::SHIFT);
+                self.filter_notes(self.notes_filter.step(forward));
+            }
             // A check from About also offers a version skipped before (F16).
             (Overlay::About, KeyCode::Char('u' | 'U')) => self.updater.check_now(),
-            (_, KeyCode::Esc | KeyCode::F(1) | KeyCode::F(2)) => self.close_overlay(),
+            _ if closes => self.close_overlay(),
             (Overlay::Help | Overlay::WhatsNew, code) => {
                 // The dialog clamps the scroll when it draws.
                 let scroll = self.overlay_scroll;
@@ -369,11 +385,26 @@ impl App {
         }
     }
 
+    /// About's Release notes [N] (F18): the notes of every version, in About's place.
+    fn open_release_notes(&mut self) {
+        self.notes = crate::update::NOTES.iter().collect();
+        self.all_notes = true;
+        self.notes_filter = NotesFilter::All;
+        self.open_overlay(Overlay::WhatsNew);
+    }
+
+    /// Tab, BackTab or a click on All, New or Fixed: those notes, from the top.
+    fn filter_notes(&mut self, filter: NotesFilter) {
+        self.notes_filter = filter;
+        self.overlay_scroll = 0;
+    }
+
     pub(super) fn open_overlay(&mut self, overlay: Overlay) {
         let now = std::time::Instant::now();
         if overlay == Overlay::About && self.overlay != Overlay::About {
             self.motion.restart_bloom(now);
         }
+        self.reset_key_editor(overlay);
         self.overlay = overlay;
         self.overlay_scroll = 0;
         self.motion.open_overlay(now);
@@ -399,10 +430,7 @@ impl App {
     fn handle_explorer_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('c' | 'C') if ctrl => self.hold_selected_entry(false),
-            KeyCode::Char('x' | 'X') if ctrl => self.hold_selected_entry(true),
-            KeyCode::Char('v' | 'V') if ctrl => self.paste_selected_entry(),
-            KeyCode::Char('r' | 'R') if ctrl => {
+            _ if self.keys.is(Action::Run, key) => {
                 if let Some(entry) = self
                     .entries
                     .get(self.selected_entry)
@@ -412,6 +440,9 @@ impl App {
                     self.run_file(path);
                 }
             }
+            KeyCode::Char('c' | 'C') if ctrl => self.hold_selected_entry(false),
+            KeyCode::Char('x' | 'X') if ctrl => self.hold_selected_entry(true),
+            KeyCode::Char('v' | 'V') if ctrl => self.paste_selected_entry(),
             KeyCode::Up => self.selected_entry = self.selected_entry.saturating_sub(1),
             KeyCode::Down => {
                 self.selected_entry =
@@ -428,11 +459,11 @@ impl App {
             return;
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if ctrl && matches!(key.code, KeyCode::Char('w' | 'W')) {
+        if self.keys.is(Action::CloseTab, key) {
             self.close_tab(active);
             return;
         }
-        if ctrl && matches!(key.code, KeyCode::Char('r' | 'R')) {
+        if self.keys.is(Action::Run, key) {
             let path = self.open_files[active].path.clone();
             return self.run_file(path);
         }
@@ -531,23 +562,15 @@ impl App {
         if self.completion.is_some() && self.handle_completion_key(key) {
             return;
         }
-        if ctrl && key.code == KeyCode::Char(' ') {
-            self.request_completion();
-            return;
-        }
-        if key.code == KeyCode::F(12) {
-            self.go_to_definition();
-            return;
-        }
-        // Debugging (F27); Shift+F5 also arrives as F17.
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        match key.code {
-            KeyCode::F(5) if shift => return self.debug_stop(),
-            KeyCode::F(17) => return self.debug_stop(),
-            KeyCode::F(5) => return self.debug_start_or_continue(),
-            KeyCode::F(9) => return self.toggle_breakpoint(),
-            KeyCode::F(10) => return self.debug_step("next"),
-            KeyCode::F(11) => return self.debug_step("stepIn"),
+        // IntelliSense (F26) and debugging (F27); Shift+F5 also arrives as F17 (`Binding`).
+        match self.keys.action(key) {
+            Some(Action::Suggestions) => return self.request_completion(),
+            Some(Action::Definition) => return self.go_to_definition(),
+            Some(Action::StopDebug) => return self.debug_stop(),
+            Some(Action::Debug) => return self.debug_start_or_continue(),
+            Some(Action::Breakpoint) => return self.toggle_breakpoint(),
+            Some(Action::StepOver) => return self.debug_step("next"),
+            Some(Action::StepInto) => return self.debug_step("stepIn"),
             _ => {}
         }
         let file = &mut self.open_files[active];
@@ -630,6 +653,7 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 self.selecting = false;
+                self.terminal_selection = None;
                 if self.name_prompt.is_some() {
                     return;
                 }
@@ -702,12 +726,44 @@ impl App {
                     }
                     return;
                 }
+                if self.overlay == Overlay::Help && !self.motion.overlay_closing() {
+                    // A command's key waits for new keys; Reset asks first (F29).
+                    if contains(self.regions.help_reset, point) {
+                        self.ask_to_reset_shortcuts();
+                    } else if let Some((action, _)) = self
+                        .regions
+                        .help_keys
+                        .iter()
+                        .find(|(_, area)| contains(*area, point))
+                        .copied()
+                    {
+                        self.choose_shortcut(action);
+                    } else {
+                        self.key_editor.capturing = false;
+                        self.key_editor.confirm_reset = false;
+                    }
+                    return;
+                }
+                if self.overlay == Overlay::WhatsNew
+                    && !self.motion.overlay_closing()
+                    && let Some((filter, _)) = self
+                        .regions
+                        .notes_filters
+                        .iter()
+                        .find(|(_, area)| contains(*area, point))
+                        .copied()
+                {
+                    self.filter_notes(filter);
+                    return;
+                }
                 if self.overlay != Overlay::None && !self.motion.overlay_closing() {
                     let regions = &self.regions;
                     let key = if contains(regions.about_repository, point) {
                         Some(KeyCode::Char('g'))
                     } else if contains(regions.about_update, point) {
                         Some(KeyCode::Char('u'))
+                    } else if contains(regions.about_notes, point) {
+                        Some(KeyCode::Char('n'))
                     } else if contains(regions.dialog_next, point) {
                         Some(KeyCode::Enter)
                     } else if contains(regions.dialog_skip, point) {
@@ -716,7 +772,7 @@ impl App {
                         None
                     };
                     if let Some(key) = key {
-                        self.handle_overlay_key(key);
+                        self.handle_overlay_key(KeyEvent::from(key));
                     }
                     return;
                 }
@@ -767,11 +823,29 @@ impl App {
                         });
                         self.select_tab(index);
                     }
+                } else if let Some((panel, index, _, close)) = self
+                    .regions
+                    .terminal_tabs
+                    .iter()
+                    .find(|(_, _, tab, close)| contains(*tab, point) || contains(*close, point))
+                    .copied()
+                {
+                    // A terminal's tab shows its shell; its `x` closes it (F04).
+                    if contains(close, point) {
+                        self.close_terminal(index);
+                    } else {
+                        self.terminals(panel).select(index);
+                        self.focus = panel;
+                    }
+                } else if contains(self.regions.terminal_add, point) {
+                    self.add_terminal();
                 } else if self.show_bottom_terminal && contains(self.regions.bottom_terminal, point)
                 {
                     self.focus = Focus::BottomTerminal;
+                    self.start_terminal_selection(Focus::BottomTerminal, point);
                 } else if self.show_right_terminal && contains(self.regions.right_terminal, point) {
                     self.focus = Focus::RightTerminal;
+                    self.start_terminal_selection(Focus::RightTerminal, point);
                 } else if contains(self.regions.editor_body, point) {
                     self.focus = Focus::Editor;
                     if self.show_git || self.show_database {
@@ -862,6 +936,13 @@ impl App {
                     media.drag(columns, i32::from(point.1) - i32::from(row));
                 }
             }
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) if self.terminal_dragging => {
+                if let Some(selection) = self.terminal_selection {
+                    let area = self.terminal_area(selection.panel);
+                    let end = clamped_cell(area, point);
+                    self.terminal_selection = Some(TerminalSelection { end, ..selection });
+                }
+            }
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) if self.selecting => {
                 let area = self.regions.pane_bodies[self.active_pane()];
                 if let Some(file) = self
@@ -928,6 +1009,9 @@ impl App {
                 self.drag = None;
                 self.selecting = false;
                 self.turning = None;
+                if std::mem::take(&mut self.terminal_dragging) {
+                    self.copy_terminal_selection();
+                }
                 if let Some(drag) = self.tab_drag.take()
                     && let Some(zone) = drag.zone
                 {
@@ -959,6 +1043,15 @@ impl App {
             self.database.scroll(point, up, sideways);
         } else if self.show_git && contains(self.git.regions.content, point) {
             self.git.scroll(up);
+        } else if contains(self.regions.explorer, point) && sideways {
+            // Long names scroll sideways, as far as the widest one (F01).
+            let room = usize::from(self.regions.explorer.width.saturating_sub(2));
+            let most = self.explorer_width_needed().saturating_sub(room);
+            self.explorer_scroll_x = if up {
+                self.explorer_scroll_x.saturating_sub(6)
+            } else {
+                self.explorer_scroll_x.saturating_add(6).min(most)
+            };
         } else if contains(self.regions.explorer, point) {
             self.explorer_scroll = if up {
                 self.explorer_scroll.saturating_sub(3)
@@ -967,10 +1060,12 @@ impl App {
                     .saturating_add(3)
                     .min(self.entries.len().saturating_sub(1))
             };
-        } else if contains(self.regions.bottom_terminal, point) {
-            self.bottom_terminal.scroll(up, 3);
-        } else if contains(self.regions.right_terminal, point) {
-            self.right_terminal.scroll(up, 3);
+        } else if let Some(panel) = [Focus::BottomTerminal, Focus::RightTerminal]
+            .into_iter()
+            .find(|panel| contains(self.terminal_area(*panel), point))
+        {
+            self.terminal_selection = None;
+            self.terminals(panel).current().scroll(up, 3);
         } else if let Some(index) = self.pane_at(point) {
             // The wheel zooms a model; pictures and videos do not scroll.
             if let Some(media) = &mut self.open_files[index].media {
@@ -1070,6 +1165,58 @@ impl App {
         }
     }
 
+    /// The area of the terminal panel `panel` names.
+    fn terminal_area(&self, panel: Focus) -> Rect {
+        if panel == Focus::RightTerminal {
+            self.regions.right_terminal
+        } else {
+            self.regions.bottom_terminal
+        }
+    }
+
+    /// A press inside a terminal's border starts choosing its text (Q57).
+    fn start_terminal_selection(&mut self, panel: Focus, point: (u16, u16)) {
+        let inner = inner_area(self.terminal_area(panel));
+        if contains(inner, point) {
+            let cell = (point.1 - inner.y, point.0 - inner.x);
+            self.terminal_selection = Some(TerminalSelection {
+                panel,
+                anchor: cell,
+                end: cell,
+            });
+            self.terminal_dragging = true;
+        }
+    }
+
+    /// Letting go after a drag in a terminal copies the text it chose; a click chooses nothing.
+    fn copy_terminal_selection(&mut self) {
+        let Some(selection) = self.terminal_selection else {
+            return;
+        };
+        if selection.anchor == selection.end {
+            self.terminal_selection = None;
+            return;
+        }
+        let text = self
+            .terminals(selection.panel)
+            .current()
+            .text_between(selection.anchor, selection.end);
+        // The empty rows under the output are not copied.
+        self.copy(text.trim_end_matches('\n').to_string());
+    }
+
+    /// The width of the widest row of the Explorer, as `ui::editor` draws it.
+    pub fn explorer_width_needed(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|entry| {
+                // Indentation, the `+`/`-` marker, the icon and the spaces between them.
+                2 * entry.depth + 4 + ratatui::text::Line::from(entry.name.as_str()).width()
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Moves a tab bar by one tab; it stops at the last one.
     fn scroll_tabs(&mut self, pane: usize, right: bool) {
         let count = self.pane_tabs(pane).len();
@@ -1122,6 +1269,29 @@ fn text_position(file: &crate::editor::OpenFile, area: Rect, point: (u16, u16)) 
     let text_start = area.x.saturating_add(1).saturating_add(gutter as u16);
     let column = point.0.saturating_sub(text_start) as usize + file.scroll_x as usize;
     (row, column)
+}
+
+/// `area` inside its border.
+fn inner_area(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    )
+}
+
+/// The cell (row, column) of a terminal under `point`, kept inside its border while a drag
+/// goes past it.
+fn clamped_cell(area: Rect, point: (u16, u16)) -> (u16, u16) {
+    let inner = inner_area(area);
+    let row = point
+        .1
+        .clamp(inner.y, inner.bottom().saturating_sub(1).max(inner.y));
+    let column = point
+        .0
+        .clamp(inner.x, inner.right().saturating_sub(1).max(inner.x));
+    (row - inner.y, column - inner.x)
 }
 
 fn contains(area: Rect, point: (u16, u16)) -> bool {
@@ -2254,5 +2424,282 @@ mod tests {
         app.updater.state = UpdateState::Ready(directory.path().join("SozoIDE-macos-arm64.dmg"));
         app.tick();
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn changed_shortcuts_run_their_commands_and_the_old_keys_do_not() {
+        use super::super::keys::Binding;
+        let mut app = test_app();
+        let key = |text| Binding::parse(text).unwrap();
+        app.keys.set(Action::Explorer, key("Ctrl+E"));
+        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        assert!(!app.show_explorer);
+        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
+        assert!(!app.show_explorer, "Ctrl+B is nobody's key now");
+        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        assert!(app.show_explorer);
+
+        // The editor's commands follow too: Alt+W closes the tab and F7 marks a breakpoint.
+        let path = app.root.join("Cargo.toml");
+        app.open_file(path.clone()).unwrap();
+        app.keys.set(Action::CloseTab, key("Alt+W"));
+        app.keys.set(Action::Breakpoint, key("F7"));
+        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
+        assert!(
+            app.breakpoints
+                .get(&path)
+                .is_none_or(|rows| rows.is_empty())
+        );
+        press(&mut app, KeyCode::F(7), KeyModifiers::NONE);
+        assert!(app.breakpoints[&path].contains(&0));
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(app.open_files.len(), 1);
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::ALT);
+        assert!(app.open_files.is_empty());
+
+        app.keys.set(Action::Quit, key("Alt+Q"));
+        press(&mut app, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        assert!(!app.should_quit);
+        press(&mut app, KeyCode::Char('q'), KeyModifiers::ALT);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn help_changes_a_shortcut_by_tab_or_a_click_keeps_it_and_resets_them_all() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("keys.toml");
+        let mut app = test_app();
+        app.keys_path = Some(path.clone());
+        press(&mut app, KeyCode::F(1), KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::Help);
+        press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(app.key_editor.selected, Some(Action::Quit));
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.key_editor.selected, Some(Action::Explorer));
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.key_editor.capturing);
+        // Keys that type or edit are refused and Help keeps waiting.
+        press(&mut app, KeyCode::Char('e'), KeyModifiers::NONE);
+        assert!(app.key_editor.capturing);
+        assert!(app.key_editor.message.as_deref().unwrap().contains("types"));
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(app.key_editor.message.as_deref(), Some("Ctrl+C stays copy"));
+        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        assert!(!app.key_editor.capturing);
+        assert_eq!(app.keys.label(Action::Explorer), "Ctrl+E");
+        assert_eq!(app.key_editor.message.as_deref(), Some("Explorer: Ctrl+E"));
+        let kept = std::fs::read_to_string(&path).unwrap();
+        assert!(kept.contains("explorer = \"Ctrl+E\""), "{kept}");
+
+        // A click on Source Control's key, then the key the Explorer took: they swap.
+        app.regions.help_keys = vec![(Action::SourceControl, Rect::new(10, 10, 52, 1))];
+        mouse(
+            &mut app,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            12,
+            10,
+        );
+        assert!(app.key_editor.capturing);
+        assert_eq!(app.key_editor.selected, Some(Action::SourceControl));
+        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        assert_eq!(app.keys.label(Action::SourceControl), "Ctrl+E");
+        assert_eq!(app.keys.label(Action::Explorer), "Ctrl+G");
+        assert_eq!(
+            app.key_editor.message.as_deref(),
+            Some("Source Control: Ctrl+E; Explorer took Ctrl+G")
+        );
+
+        // While Help waits, Ctrl+Q is a key like the others; Esc gives up and Help stays.
+        app.choose_shortcut(Action::Run);
+        press(&mut app, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        assert!(!app.should_quit);
+        assert_eq!(app.keys.label(Action::Run), "Ctrl+Q");
+        assert_eq!(app.keys.label(Action::Quit), "Ctrl+R");
+        app.choose_shortcut(Action::Run);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.key_editor.capturing);
+        assert!(app.overlay == Overlay::Help && !app.motion.overlay_closing());
+
+        // R asks first: Esc keeps the keys, Enter puts every default back and the file goes.
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
+        assert!(app.key_editor.confirm_reset);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.key_editor.confirm_reset);
+        assert_eq!(app.keys.label(Action::Explorer), "Ctrl+G");
+        app.regions.help_reset = Rect::new(2, 30, 21, 1);
+        mouse(
+            &mut app,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            3,
+            30,
+        );
+        assert!(app.key_editor.confirm_reset);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.keys, crate::app::Keymap::defaults(std::env::consts::OS));
+        assert!(!path.exists());
+        assert_eq!(
+            app.key_editor.message.as_deref(),
+            Some("Every shortcut is back to the default")
+        );
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.motion.overlay_closing());
+    }
+
+    #[test]
+    fn dragging_over_a_terminal_chooses_its_text_and_letting_go_copies_it() {
+        use crate::terminal::Terminal;
+        let mut app = test_app();
+        app.show_bottom_terminal = true;
+        app.bottom_terminal.tabs = vec![Terminal::unavailable("hello world\r\nsecond line".into())];
+        // Inside the border the text starts at column 31, row 23.
+        app.regions.bottom_terminal = Rect::new(30, 22, 60, 10);
+        let left = crossterm::event::MouseButton::Left;
+        mouse(&mut app, MouseEventKind::Down(left), 31, 23);
+        mouse(&mut app, MouseEventKind::Drag(left), 35, 23);
+        mouse(&mut app, MouseEventKind::Up(left), 35, 23);
+        assert_eq!(app.focus, Focus::BottomTerminal);
+        assert_eq!(app.clipboard.take().as_deref(), Some("hello"));
+        assert_eq!(app.status, "Copied 5 characters");
+        assert!(
+            app.terminal_selection.is_some(),
+            "the choice stays on screen"
+        );
+        // A key goes to the shell and the choice goes.
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(app.terminal_selection, None);
+
+        // Backwards over two rows.
+        mouse(&mut app, MouseEventKind::Down(left), 36, 24);
+        mouse(&mut app, MouseEventKind::Drag(left), 37, 23);
+        mouse(&mut app, MouseEventKind::Up(left), 37, 23);
+        assert_eq!(app.clipboard.take().as_deref(), Some("world\nsecond"));
+        // Past the border the drag stays inside it; the empty rows are left out.
+        mouse(&mut app, MouseEventKind::Down(left), 31, 23);
+        mouse(&mut app, MouseEventKind::Drag(left), 200, 100);
+        mouse(&mut app, MouseEventKind::Up(left), 200, 100);
+        assert_eq!(
+            app.clipboard.take().as_deref(),
+            Some("hello world\nsecond line")
+        );
+        assert_eq!(
+            app.terminal_selection.map(|selection| selection.end),
+            Some((7, 57))
+        );
+        // The wheel scrolls the history and the choice goes; a click chooses nothing.
+        mouse(&mut app, MouseEventKind::ScrollUp, 40, 25);
+        assert_eq!(app.terminal_selection, None);
+        mouse(&mut app, MouseEventKind::Down(left), 40, 25);
+        mouse(&mut app, MouseEventKind::Up(left), 40, 25);
+        assert_eq!((app.clipboard.take(), app.terminal_selection), (None, None));
+    }
+
+    #[test]
+    fn the_explorer_scrolls_sideways_up_to_its_widest_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let long = "a_very_long_file_name_that_does_not_fit_in_the_explorer.txt";
+        std::fs::write(directory.path().join(long), "").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.regions.explorer = Rect::new(0, 1, 30, 20);
+        let wheel = |app: &mut App, kind, modifiers| {
+            app.handle_mouse(MouseEvent {
+                kind,
+                column: 5,
+                row: 4,
+                modifiers,
+            });
+        };
+        wheel(&mut app, MouseEventKind::ScrollDown, KeyModifiers::SHIFT);
+        assert_eq!(app.explorer_scroll_x, 6);
+        // Never past the end of the widest name: 4 columns before it and the name, 28 in view.
+        for _ in 0..20 {
+            wheel(&mut app, MouseEventKind::ScrollRight, KeyModifiers::NONE);
+        }
+        assert_eq!(app.explorer_scroll_x, 4 + long.len() - 28);
+        wheel(&mut app, MouseEventKind::ScrollLeft, KeyModifiers::NONE);
+        assert_eq!(app.explorer_scroll_x, 4 + long.len() - 28 - 6);
+        // The wheel alone still scrolls down the tree.
+        wheel(&mut app, MouseEventKind::ScrollDown, KeyModifiers::NONE);
+        assert_eq!(app.explorer_scroll_x, 4 + long.len() - 34);
+    }
+
+    #[test]
+    fn terminal_tabs_add_close_and_switch_with_their_keys() {
+        let mut app = test_app();
+        app.show_bottom_terminal = true;
+        app.focus = Focus::BottomTerminal;
+        for _ in 0..4 {
+            app.add_terminal();
+        }
+        assert_eq!(app.bottom_terminal.tabs.len(), 3, "three at most");
+        assert_eq!(app.bottom_terminal.active, 2);
+        press(&mut app, KeyCode::PageDown, KeyModifiers::CONTROL);
+        assert_eq!(app.bottom_terminal.active, 0);
+        press(&mut app, KeyCode::PageUp, KeyModifiers::CONTROL);
+        assert_eq!(app.bottom_terminal.active, 2);
+        for _ in 0..4 {
+            app.close_terminal(0);
+        }
+        assert_eq!(app.bottom_terminal.tabs.len(), 1, "the last one stays");
+        // The right terminal always has its two tabs.
+        assert_eq!(app.right_terminal.tabs.len(), 2);
+        app.show_right_terminal = true;
+        app.focus = Focus::RightTerminal;
+        press(&mut app, KeyCode::PageDown, KeyModifiers::CONTROL);
+        assert_eq!(
+            (app.right_terminal.active, app.bottom_terminal.active),
+            (1, 0)
+        );
+        // Outside a terminal the keys reach the editor.
+        app.focus = Focus::Editor;
+        press(&mut app, KeyCode::PageDown, KeyModifiers::CONTROL);
+        assert_eq!(app.right_terminal.active, 1);
+    }
+
+    #[test]
+    fn about_opens_the_notes_of_every_version_and_tab_or_a_click_filters_them() {
+        let mut app = test_app();
+        press(&mut app, KeyCode::F(2), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::WhatsNew);
+        assert!(app.all_notes);
+        assert_eq!(app.notes.len(), crate::update::NOTES.len());
+        assert_eq!(app.notes_filter, NotesFilter::All);
+        // Tab and BackTab go round All, New and Fixed, from the top each time.
+        app.overlay_scroll = 9;
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(
+            (app.notes_filter, app.overlay_scroll),
+            (NotesFilter::New, 0)
+        );
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.notes_filter, NotesFilter::Fixed);
+        press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(app.notes_filter, NotesFilter::New);
+        app.regions.notes_filters = vec![(NotesFilter::All, Rect::new(10, 5, 5, 1))];
+        mouse(
+            &mut app,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            12,
+            5,
+        );
+        assert_eq!(app.notes_filter, NotesFilter::All);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.motion.overlay_closing());
+
+        // The button of About does the same, and What's new after an update shows all its notes.
+        app.tick_at(std::time::Instant::now() + std::time::Duration::from_secs(1));
+        press(&mut app, KeyCode::F(2), KeyModifiers::NONE);
+        app.notes_filter = NotesFilter::Fixed;
+        app.regions.about_notes = Rect::new(40, 21, 19, 1);
+        mouse(
+            &mut app,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            45,
+            21,
+        );
+        assert_eq!(
+            (app.overlay, app.notes_filter),
+            (Overlay::WhatsNew, NotesFilter::All)
+        );
     }
 }

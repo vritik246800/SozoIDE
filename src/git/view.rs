@@ -17,11 +17,12 @@ use crate::{
 
 use super::controller::{GitController, GitMode, GitUiAction, TimelineStage};
 
-pub fn render(frame: &mut Frame, controller: &mut GitController, area: Rect) {
+/// `key` is the key the user gave Source Control (F29).
+pub fn render(frame: &mut Frame, controller: &mut GitController, area: Rect, key: &str) {
     controller.regions.area = area;
     controller.regions.content = Rect::default();
     controller.regions.actions.clear();
-    let block = panel_block(" Source Control [Ctrl+G] ".into(), true);
+    let block = panel_block(format!(" Source Control [{key}] "), true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let [tabs, toolbar, content, status] = Layout::vertical([

@@ -10,16 +10,89 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use vt100::Parser;
 
+/// A PTY and the shell running in it.
+type Shell = (Box<dyn MasterPty + Send>, Box<dyn Child>);
+
 pub struct Terminal {
     pub parser: Arc<RwLock<Parser>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    master: Box<dyn MasterPty + Send>,
-    child: Box<dyn Child>,
+    /// The PTY and its shell, or why this system could not open them (E36).
+    shell: std::result::Result<Shell, String>,
     size: (u16, u16),
 }
 
+/// The shells of a terminal panel, one per tab (F04): `active` is the one on screen.
+pub struct Terminals {
+    pub tabs: Vec<Terminal>,
+    pub active: usize,
+}
+
+impl Terminals {
+    pub fn new(cwd: &Path, count: usize) -> Self {
+        Self {
+            tabs: (0..count.max(1)).map(|_| Terminal::new(cwd)).collect(),
+            active: 0,
+        }
+    }
+
+    pub fn current(&self) -> &Terminal {
+        &self.tabs[self.active]
+    }
+
+    pub fn current_mut(&mut self) -> &mut Terminal {
+        &mut self.tabs[self.active]
+    }
+
+    /// A new shell in a tab of its own, which comes on screen.
+    pub fn add(&mut self, cwd: &Path) {
+        self.tabs.push(Terminal::new(cwd));
+        self.active = self.tabs.len() - 1;
+    }
+
+    /// Closes tab `index` with its shell; the tab after it, or the last one, comes on screen.
+    /// A panel keeps its last shell.
+    pub fn close(&mut self, index: usize) {
+        if self.tabs.len() < 2 || index >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(index);
+        if index < self.active || self.active == self.tabs.len() {
+            self.active -= 1;
+        }
+    }
+
+    pub fn select(&mut self, index: usize) {
+        if index < self.tabs.len() {
+            self.active = index;
+        }
+    }
+
+    /// The next tab, or the previous one, round the ends.
+    pub fn step(&mut self, forward: bool) {
+        let count = self.tabs.len();
+        self.active = (self.active + if forward { 1 } else { count - 1 }) % count;
+    }
+
+    /// Every shell of the panel takes the size of its area.
+    pub fn resize(&mut self, size: (u16, u16)) {
+        for terminal in &mut self.tabs {
+            terminal.resize(size);
+        }
+    }
+}
+
 impl Terminal {
-    pub fn new(cwd: &Path) -> Result<Self> {
+    /// A shell in `cwd`; without one, a terminal that says why (a Windows without ConPTY, E36).
+    pub fn new(cwd: &Path) -> Self {
+        Self::spawn(cwd).unwrap_or_else(|error| Self::unavailable(format!("{error:#}")))
+    }
+
+    fn spawn(cwd: &Path) -> Result<Self> {
+        // portable-pty panics on a Windows without ConPTY instead of failing.
+        #[cfg(windows)]
+        if !conpty_available() {
+            anyhow::bail!("Terminals need Windows 10 version 1809 (October 2018) or newer");
+        }
         let size = PtySize {
             rows: 24,
             cols: 80,
@@ -66,10 +139,40 @@ impl Terminal {
         Ok(Self {
             parser,
             writer,
-            master: pair.master,
-            child,
+            shell: Ok((pair.master, child)),
             size: (size.cols, size.rows),
         })
+    }
+
+    /// A terminal without a shell: it shows `message` and takes no keys.
+    pub fn unavailable(message: String) -> Self {
+        let size = (80, 24);
+        let mut parser = Parser::new(size.1, size.0, 0);
+        parser.process(message.as_bytes());
+        Self {
+            parser: Arc::new(RwLock::new(parser)),
+            writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
+            shell: Err(message),
+            size,
+        }
+    }
+
+    /// The text from cell `start` to cell `end` (row and column on screen, both included, in
+    /// either order), with the rows that wrap joined.
+    pub fn text_between(&self, start: (u16, u16), end: (u16, u16)) -> String {
+        let (start, end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        self.parser
+            .read()
+            .map(|parser| {
+                parser
+                    .screen()
+                    .contents_between(start.0, start.1, end.0, end.1.saturating_add(1))
+            })
+            .unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -82,13 +185,24 @@ impl Terminal {
             return;
         }
         self.size = size;
+        let master = match &self.shell {
+            Ok((master, _)) => master,
+            Err(message) => {
+                // The message wraps again at the new width.
+                if let Ok(mut parser) = self.parser.write() {
+                    *parser = Parser::new(size.1, size.0, 0);
+                    parser.process(message.as_bytes());
+                }
+                return;
+            }
+        };
         let pty_size = PtySize {
             rows: size.1,
             cols: size.0,
             pixel_width: 0,
             pixel_height: 0,
         };
-        let _ = self.master.resize(pty_size);
+        let _ = master.resize(pty_size);
         if let Ok(mut parser) = self.parser.write() {
             parser.screen_mut().set_size(size.1, size.0);
         }
@@ -151,7 +265,29 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        if let Ok((_, child)) = &mut self.shell {
+            let _ = child.kill();
+        }
+    }
+}
+
+/// Whether this Windows has ConPTY: `CreatePseudoConsole` in `kernel32`, which portable-pty
+/// loads with a panic when it is missing (Windows 10 before 1809, E36).
+#[cfg(windows)]
+fn conpty_available() -> bool {
+    use std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+    }
+    let kernel32 = "kernel32.dll\0".encode_utf16().collect::<Vec<_>>();
+    // SAFETY: both names end with a NUL, and kernel32 is loaded in every Windows process.
+    unsafe {
+        let module = GetModuleHandleW(kernel32.as_ptr());
+        !module.is_null()
+            && !GetProcAddress(module, c"CreatePseudoConsole".as_ptr().cast()).is_null()
     }
 }
 
@@ -179,6 +315,8 @@ fn key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
             let mut buffer = [0; 4];
             character.encode_utf8(&mut buffer).as_bytes().to_vec()
         }
+        // Alt+Enter: a new line that does not run, in zsh, fish and command line tools (Q58).
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => b"\x1b\r".to_vec(),
         KeyCode::Enter => b"\r".to_vec(),
         KeyCode::Backspace => b"\x7f".to_vec(),
         KeyCode::Tab => b"\t".to_vec(),
@@ -239,10 +377,87 @@ mod tests {
     }
 
     #[test]
+    fn shift_enter_writes_a_new_line_without_running_it() {
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(key_to_bytes(shift_enter), Some(b"\x1b\r".to_vec()));
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(key_to_bytes(enter), Some(b"\r".to_vec()));
+    }
+
+    #[test]
+    fn a_selection_reads_the_text_between_two_cells() {
+        let terminal = Terminal::unavailable(String::new());
+        terminal
+            .parser
+            .write()
+            .unwrap()
+            .process(b"\x1b[2J\x1b[Hfirst line\r\nsecond line\r\n");
+        // Backwards too, from the end of the first row into the second one.
+        assert_eq!(terminal.text_between((1, 5), (0, 6)), "line\nsecond");
+        assert_eq!(terminal.text_between((0, 0), (0, 4)), "first");
+        // A row that wraps comes back as one line.
+        let terminal = Terminal::unavailable(String::new());
+        {
+            let mut parser = terminal.parser.write().unwrap();
+            parser.screen_mut().set_size(4, 6);
+            parser.process(b"\x1b[2J\x1b[Habcdefghij\r\nk");
+        }
+        assert_eq!(terminal.text_between((0, 2), (2, 0)), "cdefghij\nk");
+    }
+
+    #[test]
+    fn a_terminal_without_a_shell_says_why_and_takes_no_keys() {
+        let message = "Terminals need Windows 10 version 1809 (October 2018) or newer";
+        let mut terminal = Terminal::unavailable(message.to_string());
+        terminal.resize((30, 5));
+        let shown = screen_contents(&terminal);
+        // Wrapped to the width of the panel, whole.
+        assert!(
+            shown.starts_with("Terminals need Windows 10 ver"),
+            "{shown}"
+        );
+        assert_eq!(shown.replace('\n', ""), message);
+        terminal.send_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        terminal.send_text("ls\r");
+        assert_eq!(screen_contents(&terminal).replace('\n', ""), message);
+    }
+
+    #[test]
+    fn a_panel_adds_closes_and_switches_its_shells() {
+        let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut panel = Terminals::new(&cwd, 2);
+        assert_eq!((panel.tabs.len(), panel.active), (2, 0));
+        panel.add(&cwd);
+        assert_eq!((panel.tabs.len(), panel.active), (3, 2));
+        panel.step(true);
+        assert_eq!(panel.active, 0);
+        panel.step(false);
+        assert_eq!(panel.active, 2);
+        // Closing a tab before the one on screen keeps it on screen.
+        panel.select(1);
+        panel.close(0);
+        assert_eq!((panel.tabs.len(), panel.active), (2, 0));
+        // Closing the last tab shows the one before it; the last shell stays.
+        panel.select(1);
+        panel.close(1);
+        assert_eq!((panel.tabs.len(), panel.active), (1, 0));
+        panel.close(0);
+        assert_eq!(panel.tabs.len(), 1);
+        panel.resize((50, 10));
+        assert_eq!(panel.current().size(), (50, 10));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn this_windows_has_conpty() {
+        assert!(conpty_available());
+    }
+
+    #[test]
     fn both_shells_execute_independent_commands_and_resize() {
         let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let mut bottom = Terminal::new(&cwd).unwrap();
-        let mut right = Terminal::new(&cwd).unwrap();
+        let mut bottom = Terminal::new(&cwd);
+        let mut right = Terminal::new(&cwd);
         bottom.resize((81, 24));
         right.resize((81, 24));
 
@@ -266,7 +481,7 @@ mod tests {
     #[test]
     fn scrollback_supports_mouse_keyboard_and_live_return() {
         let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let mut terminal = Terminal::new(&cwd).unwrap();
+        let mut terminal = Terminal::new(&cwd);
         terminal.resize((40, 4));
         {
             let mut parser = terminal.parser.write().unwrap();
