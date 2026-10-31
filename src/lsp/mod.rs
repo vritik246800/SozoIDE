@@ -1,4 +1,5 @@
-//! IntelliSense through language servers (F26): diagnostics, completion and go to definition.
+//! IntelliSense through language servers (F26): diagnostics, completion, hover, definitions and
+//! references (F31).
 //! A server starts the first time a file of its language opens, in its own process; the app
 //! only writes to it and reads what a thread already received, so typing never waits for it.
 
@@ -14,7 +15,7 @@ pub(crate) mod client;
 use client::{Client, Pending};
 
 /// The servers SozoIDE talks to: name (the command), languages by extension and arguments.
-const SERVERS: [(&str, &[&str], &[&str]); 6] = [
+const SERVERS: [(&str, &[&str], &[&str]); 11] = [
     ("rust-analyzer", &["rs"], &[]),
     (
         "clangd",
@@ -29,6 +30,22 @@ const SERVERS: [(&str, &[&str], &[&str]); 6] = [
         &["--stdio"],
     ),
     ("gopls", &["go"], &[]),
+    ("bash-language-server", &["sh", "bash", "zsh"], &["start"]),
+    ("yaml-language-server", &["yaml", "yml"], &["--stdio"]),
+    ("intelephense", &["php"], &["--stdio"]),
+    ("lua-language-server", &["lua"], &[]),
+    // `vscode-langservers-extracted` brings one command per language; HTML stands for them.
+    (
+        "vscode-html-language-server",
+        &["html", "htm"],
+        &["--stdio"],
+    ),
+];
+
+/// The servers of `vscode-langservers-extracted` besides HTML's, by extension.
+const EXTRACTED: [(&str, &[&str]); 2] = [
+    ("vscode-css-language-server", &["css", "scss", "less"]),
+    ("vscode-json-language-server", &["json", "jsonc"]),
 ];
 
 /// The server for `path` and the language id the protocol calls it by.
@@ -36,6 +53,12 @@ pub fn server_for(path: &Path) -> Option<(&'static str, &'static [&'static str],
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     let (name, _, arguments) = SERVERS
         .iter()
+        .map(|(name, extensions, arguments)| (*name, *extensions, *arguments))
+        .chain(
+            EXTRACTED
+                .iter()
+                .map(|(name, extensions)| (*name, *extensions, &["--stdio"][..])),
+        )
         .find(|(_, extensions, _)| extensions.contains(&extension.as_str()))?;
     let language = match extension.as_str() {
         "rs" => "rust",
@@ -47,6 +70,16 @@ pub fn server_for(path: &Path) -> Option<(&'static str, &'static [&'static str],
         "js" | "mjs" | "cjs" => "javascript",
         "jsx" => "javascriptreact",
         "go" => "go",
+        "sh" | "bash" | "zsh" => "shellscript",
+        "yaml" | "yml" => "yaml",
+        "php" => "php",
+        "lua" => "lua",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "scss" => "scss",
+        "less" => "less",
+        "json" => "json",
+        "jsonc" => "jsonc",
         _ => "cpp",
     };
     Some((name, arguments, language))
@@ -71,6 +104,40 @@ pub struct Item {
     pub insert: String,
 }
 
+/// What a list of places is for: go there, show it in a box or list every use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Goal {
+    Definition,
+    Peek,
+    References,
+    Declaration,
+    TypeDefinition,
+    Implementation,
+}
+
+impl Goal {
+    /// The method that asks for it.
+    fn method(self) -> &'static str {
+        match self {
+            Self::Definition | Self::Peek => "textDocument/definition",
+            Self::References => "textDocument/references",
+            Self::Declaration => "textDocument/declaration",
+            Self::TypeDefinition => "textDocument/typeDefinition",
+            Self::Implementation => "textDocument/implementation",
+        }
+    }
+}
+
+/// A place in a file: rows and UTF-16 columns, as the protocol counts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Place {
+    pub path: PathBuf,
+    pub row: usize,
+    pub start: usize,
+    pub end_row: usize,
+    pub end: usize,
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Event {
     /// Suggestions for the cursor at `row` and `column` (characters) of `path`.
@@ -80,11 +147,21 @@ pub enum Event {
         column: usize,
         items: Vec<Item>,
     },
-    /// Where a symbol is defined: a row and a UTF-16 column.
-    Definition {
+    /// What the server says about the symbol at `row` and `column` (characters) of `path` at
+    /// edit `version`, in Markdown; empty when it says nothing.
+    Hover {
         path: PathBuf,
+        version: u64,
         row: usize,
         column: usize,
+        text: String,
+    },
+    /// Where the symbol asked about in `path` at edit `version` is defined or used.
+    Places {
+        path: PathBuf,
+        version: u64,
+        goal: Goal,
+        places: Vec<Place>,
     },
     Message(String),
 }
@@ -99,6 +176,8 @@ pub struct Lsp {
     /// The open documents, with the edit count last sent.
     documents: HashMap<PathBuf, u64>,
     pub diagnostics: HashMap<PathBuf, Vec<Diagnostic>>,
+    /// The requests a disabled `Lsp` (the tests) would have sent: method, file, row, column.
+    pub asked: Vec<(String, PathBuf, usize, usize)>,
 }
 
 impl Lsp {
@@ -110,6 +189,7 @@ impl Lsp {
             failed: HashSet::new(),
             documents: HashMap::new(),
             diagnostics: HashMap::new(),
+            asked: Vec::new(),
         }
     }
 
@@ -125,7 +205,7 @@ impl Lsp {
             let Some(command) = crate::update::deps::server_command(name, arguments) else {
                 self.failed.insert(name);
                 return Err(format!(
-                    "Install {name} for IntelliSense: SozoIDE installs it by itself when it can"
+                    "Install {name} for IntelliSense: Help, then Dependencies"
                 ));
             };
             match Client::start(&command, &self.root) {
@@ -197,20 +277,56 @@ impl Lsp {
         }
     }
 
-    /// Asks for suggestions at the cursor (`column` in characters of `line`).
+    /// Asks for suggestions at the cursor (`column` in characters of `line`); typing asks, so
+    /// nothing is said when no server can answer.
     pub fn complete(&mut self, path: &Path, row: usize, column: usize, line: &str) {
-        self.ask(path, "textDocument/completion", row, column, line, |path| {
-            Pending::Completion { path, row, column }
-        });
+        let pending = Pending::Completion {
+            path: path.to_path_buf(),
+            row,
+            column,
+        };
+        let _ = self.ask(path, "textDocument/completion", row, column, line, pending);
     }
 
-    /// Asks where the symbol at the cursor is defined.
-    pub fn definition(&mut self, path: &Path, row: usize, column: usize, line: &str) {
-        self.ask(path, "textDocument/definition", row, column, line, |_| {
-            Pending::Definition
-        });
+    /// Asks what the symbol at `row` and `column` (characters of `line`) is, at edit `version`.
+    pub fn hover(
+        &mut self,
+        path: &Path,
+        version: u64,
+        row: usize,
+        column: usize,
+        line: &str,
+    ) -> Result<(), String> {
+        let pending = Pending::Hover {
+            path: path.to_path_buf(),
+            version,
+            row,
+            column,
+        };
+        self.ask(path, "textDocument/hover", row, column, line, pending)
     }
 
+    /// Asks where the symbol at `row` and `column` (characters of `line`) is defined, or used.
+    pub fn places(
+        &mut self,
+        goal: Goal,
+        path: &Path,
+        version: u64,
+        row: usize,
+        column: usize,
+        line: &str,
+    ) -> Result<(), String> {
+        let method = goal.method();
+        let pending = Pending::Places {
+            path: path.to_path_buf(),
+            version,
+            goal,
+        };
+        self.ask(path, method, row, column, line, pending)
+    }
+
+    /// Sends `method` for the position, or says why it cannot: no server for the language,
+    /// a server that is not running, or one that does not answer it (its `capabilities`).
     fn ask(
         &mut self,
         path: &Path,
@@ -218,18 +334,53 @@ impl Lsp {
         row: usize,
         column: usize,
         line: &str,
-        pending: impl FnOnce(PathBuf) -> Pending,
-    ) {
+        pending: Pending,
+    ) -> Result<(), String> {
+        let Some((name, ..)) = server_for(path) else {
+            return Err(
+                match path.extension().and_then(|extension| extension.to_str()) {
+                    Some(extension) => format!("No language server for .{extension} files"),
+                    None => "No language server for this file".to_owned(),
+                },
+            );
+        };
+        let character = utf16_column(line, column);
+        if !self.enabled {
+            self.asked
+                .push((method.to_owned(), path.to_path_buf(), row, character));
+            return Ok(());
+        }
         if !self.documents.contains_key(path) {
-            return;
+            return Err(format!("{name} is not running"));
         }
-        if let Ok(Some(client)) = self.client(path) {
-            let params = json!({
-                "textDocument": {"uri": uri::from_path(path)},
-                "position": {"line": row, "character": utf16_column(line, column)},
-            });
-            client.request(method, params, pending(path.to_path_buf()));
+        let client = match self.client(path) {
+            Ok(Some(client)) => client,
+            Ok(None) => return Err(format!("{name} is not running")),
+            Err(message) => return Err(message),
+        };
+        let provider = match method {
+            "textDocument/hover" => ("hoverProvider", "information on symbols"),
+            "textDocument/references" => ("referencesProvider", "references"),
+            "textDocument/definition" => ("definitionProvider", "definitions"),
+            "textDocument/declaration" => ("declarationProvider", "declarations"),
+            "textDocument/typeDefinition" => ("typeDefinitionProvider", "type definitions"),
+            "textDocument/implementation" => ("implementationProvider", "implementations"),
+            _ => ("completionProvider", "suggestions"),
+        };
+        // Before `initialize` is answered the request waits; the server then answers it or
+        // returns an error.
+        if client.ready && !provides(&client.capabilities, provider.0) {
+            return Err(format!("{name} does not give {}", provider.1));
         }
+        let mut params = json!({
+            "textDocument": {"uri": uri::from_path(path)},
+            "position": {"line": row, "character": character},
+        });
+        if method == "textDocument/references" {
+            params["context"] = json!({"includeDeclaration": true});
+        }
+        client.request(method, params, pending);
+        Ok(())
     }
 
     /// What the servers said since the last call; diagnostics go straight to `diagnostics`.
@@ -275,20 +426,11 @@ fn handle(
             let Some(pending) = id.as_i64().and_then(|id| client.pending.remove(&id)) else {
                 return;
             };
-            let result = &message["result"];
-            match pending {
-                Pending::Initialize => client.initialized(),
-                Pending::Completion { path, row, column } => events.push(Event::Completion {
-                    path,
-                    row,
-                    column,
-                    items: completion_items(result),
-                }),
-                Pending::Definition => {
-                    if let Some(event) = definition(result) {
-                        events.push(event);
-                    }
-                }
+            if pending == Pending::Initialize {
+                client.capabilities = message["result"]["capabilities"].clone();
+                client.initialized();
+            } else if let Some(event) = answered(pending, &message) {
+                events.push(event);
             }
         }
         (None, Some("textDocument/publishDiagnostics")) => {
@@ -304,6 +446,45 @@ fn handle(
         }
         _ => {}
     }
+}
+
+/// The event of the answer `message` to a request of the app.
+fn answered(pending: Pending, message: &Value) -> Option<Event> {
+    let result = &message["result"];
+    Some(match pending {
+        Pending::Initialize => return None,
+        Pending::Completion { path, row, column } => Event::Completion {
+            path,
+            row,
+            column,
+            items: completion_items(result),
+        },
+        Pending::Hover {
+            path,
+            version,
+            row,
+            column,
+        } => Event::Hover {
+            path,
+            version,
+            row,
+            column,
+            text: hover_text(&result["contents"]),
+        },
+        Pending::Places {
+            path,
+            version,
+            goal,
+        } => match message["error"]["message"].as_str() {
+            Some(error) => Event::Message(error.to_owned()),
+            None => Event::Places {
+                path,
+                version,
+                goal,
+                places: places(result),
+            },
+        },
+    })
 }
 
 fn position(value: &Value) -> (usize, usize) {
@@ -387,25 +568,66 @@ fn completion_items(result: &Value) -> Vec<Item> {
         .collect()
 }
 
-fn definition(result: &Value) -> Option<Event> {
-    let location = result
-        .as_array()
-        .and_then(|list| list.first())
-        .unwrap_or(result);
-    let uri = location["uri"]
-        .as_str()
-        .or_else(|| location["targetUri"].as_str())?;
-    let range = if location.get("targetSelectionRange").is_some() {
-        &location["targetSelectionRange"]
-    } else {
-        &location["range"]
+/// Whether `capabilities` say the server answers `provider` (`true` or its options).
+pub(crate) fn provides(capabilities: &Value, provider: &str) -> bool {
+    match &capabilities[provider] {
+        Value::Bool(answers) => *answers,
+        Value::Object(_) => true,
+        _ => false,
+    }
+}
+
+/// The Markdown of a hover: `MarkupContent`, a `MarkedString` (text, or code with its
+/// language) or a list of them, one after the other.
+fn hover_text(contents: &Value) -> String {
+    match contents {
+        Value::String(text) => text.trim().to_owned(),
+        Value::Array(list) => list
+            .iter()
+            .map(hover_text)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        Value::Object(_) => {
+            let value = contents["value"].as_str().unwrap_or_default().trim();
+            match contents["language"].as_str() {
+                Some(language) if !value.is_empty() => format!("```{language}\n{value}\n```"),
+                _ => value.to_owned(),
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+/// The places of a `Location`, a list of them or of `LocationLink`s (where the symbol's
+/// name is, not the whole definition).
+fn places(result: &Value) -> Vec<Place> {
+    let list = match result {
+        Value::Array(list) => list.as_slice(),
+        Value::Object(_) => std::slice::from_ref(result),
+        _ => &[],
     };
-    let (row, column) = position(&range["start"]);
-    Some(Event::Definition {
-        path: uri::to_path(uri)?,
-        row,
-        column,
-    })
+    list.iter()
+        .filter_map(|location| {
+            let uri = location["uri"]
+                .as_str()
+                .or_else(|| location["targetUri"].as_str())?;
+            let range = if location.get("targetSelectionRange").is_some() {
+                &location["targetSelectionRange"]
+            } else {
+                &location["range"]
+            };
+            let (row, start) = position(&range["start"]);
+            let (end_row, end) = position(&range["end"]);
+            Some(Place {
+                path: uri::to_path(uri)?,
+                row,
+                start,
+                end_row,
+                end,
+            })
+        })
+        .collect()
 }
 
 /// The UTF-16 units before character `column` of `line` (the protocol's columns).
@@ -514,21 +736,6 @@ mod tests {
         );
         assert_eq!(items[0].detail, "fn(&mut self, T)");
 
-        let place = definition(&json!([{
-            "targetUri": "file:///src/lib.rs",
-            "targetRange": {"start": {"line": 1, "character": 0}},
-            "targetSelectionRange": {"start": {"line": 4, "character": 7}},
-        }]));
-        assert_eq!(
-            place,
-            Some(Event::Definition {
-                path: PathBuf::from("/src/lib.rs"),
-                row: 4,
-                column: 7
-            })
-        );
-        assert_eq!(definition(&Value::Null), None);
-
         let problems = parse_diagnostics(&json!([
             {"range": {"start": {"line": 3, "character": 1}, "end": {"line": 3, "character": 4}},
              "severity": 2, "message": "unused\nmore"},
@@ -538,5 +745,155 @@ mod tests {
         assert_eq!(problems[0].message, "expected `;`");
         assert!(problems[0].error && !problems[1].error);
         assert_eq!(problems[1].message, "unused", "the first line only");
+    }
+
+    #[test]
+    fn hovers_and_places_are_read_from_every_answer_shape() {
+        let markup = json!({"kind": "markdown", "value": " **fn** main() \n"});
+        assert_eq!(hover_text(&markup), "**fn** main()");
+        let marked = json!([{"language": "rust", "value": "fn main()"}, "", "Runs it."]);
+        assert_eq!(hover_text(&marked), "```rust\nfn main()\n```\n\nRuns it.");
+        assert_eq!(hover_text(&Value::Null), "");
+
+        let range = |line, start, end| {
+            json!({"start": {"line": line, "character": start},
+                   "end": {"line": line, "character": end}})
+        };
+        let link = places(&json!([{
+            "targetUri": "file:///src/lib.rs",
+            "targetRange": range(1, 0, 9),
+            "targetSelectionRange": range(4, 7, 13),
+        }]));
+        let place = |path: &str, row, start, end| Place {
+            path: PathBuf::from(path),
+            row,
+            start,
+            end_row: row,
+            end,
+        };
+        assert_eq!(
+            link,
+            [place("/src/lib.rs", 4, 7, 13)],
+            "the name, not the body"
+        );
+        let location = places(&json!({"uri": "file:///a.py", "range": range(2, 4, 8)}));
+        assert_eq!(location, [place("/a.py", 2, 4, 8)]);
+        assert!(places(&Value::Null).is_empty());
+
+        // The version asked at comes back with the answer; an error is said.
+        let answer = answered(
+            Pending::Places {
+                path: PathBuf::from("/a.py"),
+                version: 7,
+                goal: Goal::References,
+            },
+            &json!({"id": 3, "result": [{"uri": "file:///a.py", "range": range(2, 4, 8)}]}),
+        );
+        assert_eq!(
+            answer,
+            Some(Event::Places {
+                path: PathBuf::from("/a.py"),
+                version: 7,
+                goal: Goal::References,
+                places: location,
+            })
+        );
+        let pending = Pending::Hover {
+            path: PathBuf::from("/a.py"),
+            version: 2,
+            row: 1,
+            column: 5,
+        };
+        let hover = answered(pending, &json!({"result": {"contents": "x: int"}}));
+        assert!(
+            matches!(hover, Some(Event::Hover { version: 2, ref text, .. }) if text == "x: int")
+        );
+        let failed = answered(
+            Pending::Places {
+                path: PathBuf::from("/a.py"),
+                version: 1,
+                goal: Goal::Definition,
+            },
+            &json!({"error": {"code": -32601, "message": "Unhandled method"}}),
+        );
+        assert_eq!(failed, Some(Event::Message("Unhandled method".into())));
+
+        assert!(provides(&json!({"hoverProvider": true}), "hoverProvider"));
+        let options = json!({"referencesProvider": {"workDoneProgress": true}});
+        assert!(provides(&options, "referencesProvider"));
+        assert!(!provides(&json!({"hoverProvider": false}), "hoverProvider"));
+        assert!(!provides(&json!({}), "definitionProvider"));
+    }
+
+    #[test]
+    fn requests_say_why_without_a_server_and_ask_in_utf16() {
+        let mut lsp = Lsp::new(PathBuf::from("/project"), false);
+        let notes = Path::new("/project/notes.md");
+        assert_eq!(
+            lsp.hover(notes, 1, 0, 0, "x"),
+            Err("No language server for .md files".into())
+        );
+        let make = Path::new("/project/Makefile");
+        assert_eq!(
+            lsp.places(Goal::References, make, 1, 0, 0, ""),
+            Err("No language server for this file".into())
+        );
+        let rust = Path::new("/project/a.rs");
+        lsp.places(Goal::References, rust, 3, 2, 2, "é😀x").unwrap();
+        lsp.places(Goal::Peek, rust, 3, 0, 1, "ab").unwrap();
+        lsp.hover(Path::new("/project/b.py"), 1, 5, 0, "").unwrap();
+        for goal in [
+            Goal::Declaration,
+            Goal::TypeDefinition,
+            Goal::Implementation,
+        ] {
+            lsp.places(goal, rust, 1, 0, 0, "").unwrap();
+        }
+        let asked = lsp
+            .asked
+            .iter()
+            .map(|(method, path, row, column)| (method.as_str(), path.clone(), *row, *column))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            asked,
+            [
+                ("textDocument/references", rust.to_path_buf(), 2, 3),
+                ("textDocument/definition", rust.to_path_buf(), 0, 1),
+                ("textDocument/hover", PathBuf::from("/project/b.py"), 5, 0),
+                ("textDocument/declaration", rust.to_path_buf(), 0, 0),
+                ("textDocument/typeDefinition", rust.to_path_buf(), 0, 0),
+                ("textDocument/implementation", rust.to_path_buf(), 0, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn more_languages_have_their_servers() {
+        let server = |name: &str| server_for(Path::new(name)).map(|(name, _, id)| (name, id));
+        assert_eq!(
+            server("x.sh"),
+            Some(("bash-language-server", "shellscript"))
+        );
+        assert_eq!(
+            server("x.zsh"),
+            Some(("bash-language-server", "shellscript"))
+        );
+        assert_eq!(server("x.yml"), Some(("yaml-language-server", "yaml")));
+        assert_eq!(server("x.php"), Some(("intelephense", "php")));
+        assert_eq!(server("x.lua"), Some(("lua-language-server", "lua")));
+        assert_eq!(
+            server("x.htm"),
+            Some(("vscode-html-language-server", "html"))
+        );
+        assert_eq!(
+            server("x.scss"),
+            Some(("vscode-css-language-server", "scss"))
+        );
+        assert_eq!(
+            server("x.json"),
+            Some(("vscode-json-language-server", "json"))
+        );
+        assert_eq!(server_for(Path::new("x.json")).unwrap().1, ["--stdio"]);
+        assert_eq!(server("x.toml"), None);
     }
 }

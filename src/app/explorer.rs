@@ -1,9 +1,16 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::{self, Receiver},
+    },
 };
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Local};
+use ignore::WalkState;
 use ratatui::style::Color;
 
 use super::App;
@@ -30,6 +37,10 @@ pub enum EntryAction {
     Cut,
     Copy,
     Paste,
+    /// The metadata of a file or folder (F30).
+    Properties,
+    /// The editor's questions to the language server (F31).
+    Code(crate::lsp::Goal),
 }
 
 impl EntryAction {
@@ -42,6 +53,18 @@ impl EntryAction {
             Self::Cut => "Cut",
             Self::Copy => "Copy",
             Self::Paste => "Paste",
+            Self::Properties => "Properties",
+            Self::Code(goal) => {
+                use crate::lsp::Goal;
+                match goal {
+                    Goal::Definition => "Go to Definition",
+                    Goal::Peek => "Peek Definition",
+                    Goal::Declaration => "Go to Declaration",
+                    Goal::TypeDefinition => "Go to Type Definition",
+                    Goal::Implementation => "Go to Implementations",
+                    Goal::References => "Find References",
+                }
+            }
         }
     }
 }
@@ -63,6 +86,198 @@ pub struct NamePrompt {
     pub target: PathBuf,
     pub name: String,
     pub error: Option<String>,
+}
+
+/// What a Properties dialog shows of a file or folder (F30).
+pub struct Properties {
+    pub path: PathBuf,
+    pub kind: Kind,
+    /// A file's or a link's own size; a folder's is counted (`count_folder`).
+    pub size: Option<u64>,
+    /// In local time; none where the system does not keep it (creation on some Linux).
+    pub created: Option<DateTime<Local>>,
+    pub modified: Option<DateTime<Local>>,
+    pub accessed: Option<DateTime<Local>>,
+    /// `rwxr-xr-x` on Unix, read-only or not on Windows.
+    pub permissions: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    File,
+    Folder,
+    Link,
+}
+
+impl Kind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::File => "File",
+            Self::Folder => "Folder",
+            Self::Link => "Link",
+        }
+    }
+}
+
+/// Reads what Properties shows of `path`; a link is described, not followed.
+pub fn read_properties(path: &Path) -> Result<Properties> {
+    let data =
+        fs::symlink_metadata(path).with_context(|| format!("Could not read {}", path.display()))?;
+    let kind = if data.is_symlink() {
+        Kind::Link
+    } else if data.is_dir() {
+        Kind::Folder
+    } else {
+        Kind::File
+    };
+    let local = |time: std::io::Result<std::time::SystemTime>| time.ok().map(DateTime::from);
+    Ok(Properties {
+        path: path.to_path_buf(),
+        kind,
+        size: (kind != Kind::Folder).then_some(data.len()),
+        created: local(data.created()),
+        modified: local(data.modified()),
+        accessed: local(data.accessed()),
+        permissions: permissions(&data),
+    })
+}
+
+#[cfg(unix)]
+fn permissions(data: &fs::Metadata) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = data.permissions().mode();
+    (0..9)
+        .map(|bit| {
+            if mode & (0o400 >> bit) == 0 {
+                '-'
+            } else {
+                ['r', 'w', 'x'][bit % 3]
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(unix))]
+fn permissions(data: &fs::Metadata) -> String {
+    if data.permissions().readonly() {
+        "Read-only"
+    } else {
+        "Read and write"
+    }
+    .into()
+}
+
+/// What a folder holds, everything below it (F30).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FolderCount {
+    pub files: u64,
+    pub folders: u64,
+    pub bytes: u64,
+    /// Entries that could not be read, such as folders without permission.
+    pub unreadable: u64,
+}
+
+/// The Properties dialog (F30): what was read and, for a folder, its count once it is done
+/// (until then the dialog says «Calculating…»).
+pub struct PropertiesDialog {
+    pub properties: Properties,
+    pub count: Option<FolderCount>,
+    counting: Option<Counting>,
+}
+
+/// A folder being counted in a thread; dropping it (closing the dialog) stops the count.
+pub struct Counting {
+    receiver: Receiver<FolderCount>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Counting {
+    /// The count, once it is done.
+    pub fn result(&self) -> Option<FolderCount> {
+        self.receiver.try_recv().ok()
+    }
+}
+
+impl Drop for Counting {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Counts the files, folders and bytes below `folder` in parallel threads: every entry, hidden
+/// or ignored too, without following links or leaving the folder's file system.
+pub fn count_folder(folder: &Path) -> Counting {
+    let (sender, receiver) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (folder, quit) = (folder.to_path_buf(), stop.clone());
+    std::thread::spawn(move || {
+        let [files, folders, bytes, unreadable] = std::array::from_fn(|_| AtomicU64::new(0));
+        let add = |total: &AtomicU64, amount| total.fetch_add(amount, Ordering::Relaxed);
+        ignore::WalkBuilder::new(&folder)
+            .standard_filters(false)
+            .same_file_system(true)
+            .build_parallel()
+            .run(|| {
+                Box::new(|entry| {
+                    if quit.load(Ordering::Relaxed) {
+                        return WalkState::Quit;
+                    }
+                    match entry.map(|entry| (entry.depth(), entry.metadata())) {
+                        Ok((0, _)) => {}
+                        Ok((_, Ok(data))) if data.is_dir() => {
+                            add(&folders, 1);
+                        }
+                        Ok((_, Ok(data))) => {
+                            add(&files, 1);
+                            add(&bytes, data.len());
+                        }
+                        Ok((_, Err(_))) | Err(_) => {
+                            add(&unreadable, 1);
+                        }
+                    }
+                    WalkState::Continue
+                })
+            });
+        if !quit.load(Ordering::Relaxed) {
+            let _ = sender.send(FolderCount {
+                files: files.into_inner(),
+                folders: folders.into_inner(),
+                bytes: bytes.into_inner(),
+                unreadable: unreadable.into_inner(),
+            });
+        }
+    });
+    Counting { receiver, stop }
+}
+
+/// A size as people read it: bytes below 1 KB, then KB, MB, GB or TB (of 1024) with one
+/// decimal and the exact bytes beside it.
+pub fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut size = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    // 1023.95 would print as 1024.0 of the unit below.
+    while size >= 1023.95 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    format!("{size:.1} {} ({} bytes)", UNITS[unit], grouped(bytes))
+}
+
+/// A count with its thousands apart: `3,354,761`.
+pub fn grouped(number: u64) -> String {
+    let digits = number.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
 }
 
 /// A file or folder name: no separators, not `.` or `..`, not empty.
@@ -284,6 +499,7 @@ impl App {
         if target != self.root {
             actions.extend([EntryAction::Rename, EntryAction::Delete]);
         }
+        actions.push(EntryAction::Properties);
         if let Some(index) = index.filter(|index| *index < self.entries.len()) {
             self.selected_entry = index;
         }
@@ -310,6 +526,7 @@ impl App {
                 return self.hold_entry(menu.target, action == EntryAction::Cut);
             }
             EntryAction::Paste => return self.paste_entry(&menu.target),
+            EntryAction::Properties => return self.open_properties(&menu.target),
             _ => {}
         }
         let name = if action == EntryAction::Rename {
@@ -326,6 +543,31 @@ impl App {
             name,
             error: None,
         });
+    }
+
+    /// Properties of `path`: read now, and a folder counted in the background.
+    fn open_properties(&mut self, path: &Path) {
+        match read_properties(path) {
+            Ok(properties) => {
+                let counting = (properties.kind == Kind::Folder).then(|| count_folder(path));
+                self.properties = Some(PropertiesDialog {
+                    properties,
+                    count: None,
+                    counting,
+                });
+            }
+            Err(error) => self.status = format!("{error:#}"),
+        }
+    }
+
+    /// In the tick: a folder's count, once it arrives.
+    pub(super) fn tick_properties(&mut self) {
+        if let Some(dialog) = &mut self.properties
+            && let Some(count) = dialog.counting.as_ref().and_then(Counting::result)
+        {
+            dialog.count = Some(count);
+            dialog.counting = None;
+        }
     }
 
     /// Creates or renames as the prompt says; on an error the prompt stays with it.
@@ -509,6 +751,95 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn properties_read_a_file_a_folder_and_a_link() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("notes.txt");
+        fs::write(&file, "hello").unwrap();
+        let read = read_properties(&file).unwrap();
+        assert_eq!((read.kind, read.size), (Kind::File, Some(5)));
+        let modified = read.modified.unwrap();
+        assert!((Local::now() - modified).num_seconds().abs() < 60);
+        assert!(read.accessed.is_some());
+        let folder = read_properties(directory.path()).unwrap();
+        assert_eq!((folder.kind, folder.size), (Kind::Folder, None));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+            assert_eq!(read_properties(&file).unwrap().permissions, "rw-r-----");
+            // A link is described, not followed to the folder it points at.
+            let link = directory.path().join("link");
+            std::os::unix::fs::symlink(directory.path(), &link).unwrap();
+            assert_eq!(read_properties(&link).unwrap().kind, Kind::Link);
+        }
+        #[cfg(not(unix))]
+        assert_eq!(read.permissions, "Read and write");
+        assert!(read_properties(&directory.path().join("gone")).is_err());
+    }
+
+    #[test]
+    fn a_folder_is_counted_in_the_background_and_stops_when_dropped() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("sub/deeper")).unwrap();
+        fs::write(root.join("a.txt"), "abc").unwrap();
+        fs::write(root.join(".hidden"), "12").unwrap();
+        fs::write(root.join("sub/b.txt"), "hello").unwrap();
+        // Ignored and hidden files count: they take the space too.
+        fs::write(root.join(".gitignore"), "*.txt\n").unwrap();
+        let wait = |counting: &Counting| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if let Some(count) = counting.result() {
+                    return count;
+                }
+                assert!(std::time::Instant::now() < deadline, "the count never came");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let count = wait(&count_folder(root));
+        let expected = FolderCount {
+            files: 4,
+            folders: 2,
+            bytes: 3 + 2 + 5 + 6,
+            unreadable: 0,
+        };
+        assert_eq!(count, expected);
+        #[cfg(unix)]
+        {
+            // A link counts as itself, never as the folder it points at.
+            let link = root.join("sub/back");
+            std::os::unix::fs::symlink(root, &link).unwrap();
+            let size = fs::symlink_metadata(&link).unwrap().len();
+            let count = wait(&count_folder(root));
+            assert_eq!((count.files, count.bytes), (5, expected.bytes + size));
+        }
+        // Closing the dialog drops the count, which tells the thread to stop.
+        let counting = count_folder(root);
+        let stop = counting.stop.clone();
+        drop(counting);
+        assert!(stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn sizes_read_in_b_kb_mb_gb_and_tb() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(1023), "1023 B");
+        assert_eq!(human_size(1536), "1.5 KB (1,536 bytes)");
+        assert_eq!(human_size(1_572_864), "1.5 MB (1,572,864 bytes)");
+        // Just below a unit rounds up into it, never to 1024.0 of the one below.
+        assert_eq!(human_size(1_048_575), "1.0 MB (1,048,575 bytes)");
+        assert_eq!(human_size(5 << 30), "5.0 GB (5,368,709,120 bytes)");
+        assert_eq!(human_size(3 << 40), "3.0 TB (3,298,534,883,328 bytes)");
+        assert_eq!(
+            human_size(2048 << 40),
+            "2048.0 TB (2,251,799,813,685,248 bytes)"
+        );
+        assert_eq!(grouped(999), "999");
+        assert_eq!(grouped(3_354_761), "3,354,761");
+    }
 
     #[test]
     fn entries_are_created_and_renamed_inside_their_folder() {

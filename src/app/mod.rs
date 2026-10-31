@@ -2,7 +2,7 @@ use std::{
     io::Write,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::mpsc::Receiver,
+    sync::mpsc::{self, Receiver, TryRecvError},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -12,7 +12,7 @@ use ratatui_image::picker::Picker;
 use crate::{
     database::controller::DatabaseController,
     editor::{OpenFile, SearchState},
-    git::controller::GitController,
+    git::{ChangeArea, ExplorerChanges, FileStatus, controller::GitController},
     terminal::Terminals,
     update::{Notes, UpdateState, Updater, Welcome, notes_since},
 };
@@ -25,8 +25,12 @@ mod keys;
 mod layout;
 mod motion;
 mod session;
+mod tasks;
 
-pub use explorer::{EntryAction, EntryMenu, FileEntry, NamePrompt};
+pub use explorer::{
+    EntryAction, EntryMenu, FileEntry, FolderCount, Kind, NamePrompt, PropertiesDialog, grouped,
+    human_size,
+};
 pub use intellisense::{Completion, SHOWN_ITEMS};
 pub use keys::{Action, KeyEditor, Keymap};
 use layout::{DragTarget, TabDrag, inner_size};
@@ -35,6 +39,7 @@ pub use layout::{
     TerminalSelection, video_areas,
 };
 pub(crate) use motion::AppMotion;
+pub use tasks::{Dependencies, HelpTab};
 
 /// How often the open files and the Explorer are compared with the disk.
 const WATCH_INTERVAL: Duration = Duration::from_secs(1);
@@ -94,6 +99,8 @@ pub struct App {
     /// The Explorer's right-click menu and the name it asks for (F01).
     pub entry_menu: Option<EntryMenu>,
     pub name_prompt: Option<NamePrompt>,
+    /// The Properties dialog of an Explorer entry (F30).
+    pub properties: Option<PropertiesDialog>,
     pub splash_visible: bool,
     pub motion: AppMotion,
     pub updater: Updater,
@@ -118,9 +125,24 @@ pub struct App {
     /// text last went to the servers.
     pub lsp: crate::lsp::Lsp,
     pub completion: Option<Completion>,
+    /// Code Intelligence (F31): the hover waited for, asked or shown, the Peek box and the
+    /// places left by going to a definition or a result, for Back.
+    pub hover: Option<intellisense::Hover>,
+    pub peek: Option<intellisense::Peek>,
+    /// The word under the mouse while Ctrl is held: file, row, first and last column.
+    pub link: Option<(usize, usize, usize, usize)>,
+    pub back: Vec<(PathBuf, usize, usize)>,
     lsp_synced: Instant,
-    /// The message of the installation of git, curl or ffmpeg running in the background (F24).
-    dependencies: Option<Receiver<String>>,
+    /// F32: a command waiting for Enter, the projects of a monorepo to choose from, the one
+    /// chosen, the commands already confirmed and whether a task may still be running.
+    pub confirm: Option<tasks::Confirm>,
+    pub project_choice: Option<tasks::ProjectChoice>,
+    chosen_project: Option<PathBuf>,
+    confirmed: std::collections::HashSet<String>,
+    task_running: bool,
+    /// F33: Help's tab and the Dependencies tab.
+    pub help_tab: tasks::HelpTab,
+    pub dependencies: Option<tasks::Dependencies>,
     /// The last text copied here, for Ctrl+V when the system clipboard cannot be read.
     copied: Option<String>,
     /// The file or folder Copy or Cut (true) kept in the Explorer, for Paste.
@@ -129,6 +151,10 @@ pub struct App {
     /// modification times of those folders.
     watched: Instant,
     folders: Vec<Option<SystemTime>>,
+    /// What Git says changed in the project, for the Explorer's marks (F01), and the reading
+    /// running in the background, one at a time.
+    pub git_changes: ExplorerChanges,
+    git_changes_reader: Option<Receiver<ExplorerChanges>>,
     /// A mouse drag that started in the editor text selects.
     selecting: bool,
     /// Where a drag over a 3D model was last: moving from there turns it.
@@ -169,9 +195,11 @@ impl App {
         } else {
             Welcome::None
         };
-        // A new installation or a new version installs the tools it is missing (Q41).
-        let dependencies =
-            (welcome != Welcome::None).then(crate::update::deps::install_in_background);
+        // A new installation or a new version says what it is missing; nothing is installed
+        // without Enter (Q65).
+        let missing = (welcome != Welcome::None)
+            .then(Self::missing_message)
+            .flatten();
         let lsp_root = root.clone();
         let mut app = Self {
             root,
@@ -206,6 +234,7 @@ impl App {
             search: None,
             entry_menu: None,
             name_prompt: None,
+            properties: None,
             splash_visible: splash,
             motion: AppMotion::new(now, splash),
             updater,
@@ -216,9 +245,19 @@ impl App {
             notes_filter: NotesFilter::All,
             overlay_scroll: 0,
             clipboard: None,
-            dependencies,
+            confirm: None,
+            project_choice: None,
+            chosen_project: None,
+            confirmed: std::collections::HashSet::new(),
+            task_running: false,
+            help_tab: tasks::HelpTab::default(),
+            dependencies: None,
             lsp: crate::lsp::Lsp::new(lsp_root, !cfg!(test)),
             completion: None,
+            hover: None,
+            peek: None,
+            link: None,
+            back: Vec::new(),
             lsp_synced: now,
             breakpoints: Default::default(),
             debug_build: None,
@@ -227,6 +266,8 @@ impl App {
             file_clipboard: None,
             watched: now,
             folders: Vec::new(),
+            git_changes: ExplorerChanges::new(),
+            git_changes_reader: None,
             selecting: false,
             turning: None,
             scrubbing: false,
@@ -243,6 +284,10 @@ impl App {
         };
         app.refresh_entries()?;
         app.restore_session()?;
+        app.read_git_changes();
+        if let Some(missing) = missing {
+            app.status = missing;
+        }
         Ok(app)
     }
 
@@ -303,14 +348,16 @@ impl App {
             self.watch_disk();
             self.save_session();
         }
-        if let Some(message) = self
-            .dependencies
-            .as_ref()
-            .and_then(|receiver| receiver.try_recv().ok())
-        {
-            self.status = message;
-            self.dependencies = None;
+        self.tick_properties();
+        match self.git_changes_reader.as_ref().map(Receiver::try_recv) {
+            Some(Ok(changes)) => {
+                self.git_changes = changes;
+                self.git_changes_reader = None;
+            }
+            Some(Err(TryRecvError::Disconnected)) => self.git_changes_reader = None,
+            _ => {}
         }
+        self.tick_dependencies();
         self.tick_lsp(now);
         self.tick_debug();
         self.database.tick_at(now);
@@ -351,6 +398,26 @@ impl App {
         {
             self.status = error.to_string();
         }
+        // Edits and Git itself change the marks without touching the folders.
+        self.read_git_changes();
+    }
+
+    /// Asks Git in the background what changed in the project (F01); a slow repository never
+    /// holds the UI, and a reading still running is not doubled.
+    fn read_git_changes(&mut self) {
+        if self.git_changes_reader.is_some() {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let root = self.root.clone();
+        std::thread::spawn(move || sender.send(crate::git::explorer_changes(&root)));
+        self.git_changes_reader = Some(receiver);
+    }
+
+    /// Git's change of an Explorer entry: a file's own, or the strongest below a folder.
+    pub fn git_change(&self, path: &std::path::Path) -> Option<(FileStatus, ChangeArea)> {
+        let inside = path.strip_prefix(&self.root).ok()?;
+        self.git_changes.get(inside).copied()
     }
 
     /// The modification times of the project folder and the folders open in the Explorer:
@@ -502,8 +569,10 @@ impl App {
         }
     }
 
-    /// The editor's right-click menu: Cut and Copy with a selection, Paste always (F02).
+    /// The editor's right-click menu: Cut and Copy with a selection, Paste always (F02), then
+    /// the questions to the language server about the symbol at the cursor (F31).
     pub(super) fn open_editor_menu(&mut self, position: (u16, u16)) {
+        use crate::lsp::Goal;
         let Some(file) = self.active_tab.and_then(|index| self.open_files.get(index)) else {
             return;
         };
@@ -512,6 +581,17 @@ impl App {
             actions.extend([EntryAction::Cut, EntryAction::Copy]);
         }
         actions.push(EntryAction::Paste);
+        actions.extend(
+            [
+                Goal::Definition,
+                Goal::Peek,
+                Goal::Declaration,
+                Goal::TypeDefinition,
+                Goal::Implementation,
+                Goal::References,
+            ]
+            .map(EntryAction::Code),
+        );
         self.entry_menu = Some(EntryMenu {
             target: file.path.clone(),
             actions,
@@ -537,6 +617,7 @@ impl App {
                 text
             }
             EntryAction::Paste => return self.paste_clipboard(),
+            EntryAction::Code(goal) => return self.ask_places(goal),
             _ => None,
         };
         if let Some(text) = text {
@@ -1029,6 +1110,32 @@ mod tests {
         let app = test_app();
         assert_eq!(app.icon("dev-terminal"), '\u{e795}');
         assert_eq!(app.icon("custom-file"), ' ');
+    }
+
+    #[test]
+    fn the_explorer_reads_what_git_changed_in_the_background() {
+        let directory = tempfile::tempdir().unwrap();
+        git2::Repository::init(directory.path()).unwrap();
+        std::fs::write(directory.path().join("new.txt"), "new").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        let wait = |app: &mut App, path: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(mark) = app.git_change(&directory.path().join(path)) {
+                    return mark;
+                }
+                assert!(Instant::now() < deadline, "no mark for {path}");
+                app.tick();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        let untracked = (FileStatus::Added, ChangeArea::Untracked);
+        assert_eq!(wait(&mut app, "new.txt"), untracked);
+        // A file made later is in the next reading, a second on, with its folder.
+        std::fs::create_dir(directory.path().join("docs")).unwrap();
+        std::fs::write(directory.path().join("docs/more.md"), "more").unwrap();
+        assert_eq!(wait(&mut app, "docs"), untracked);
+        assert_eq!(wait(&mut app, "docs/more.md"), untracked);
     }
 
     #[test]

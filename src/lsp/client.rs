@@ -24,7 +24,17 @@ pub enum Pending {
         row: usize,
         column: usize,
     },
-    Definition,
+    Hover {
+        path: PathBuf,
+        version: u64,
+        row: usize,
+        column: usize,
+    },
+    Places {
+        path: PathBuf,
+        version: u64,
+        goal: super::Goal,
+    },
 }
 
 pub struct Client {
@@ -36,6 +46,8 @@ pub struct Client {
     /// Until the server answers `initialize`, what is sent waits here.
     pub ready: bool,
     queue: Vec<Value>,
+    /// What the server said it answers (`hoverProvider`, `referencesProvider`…).
+    pub capabilities: Value,
 }
 
 impl Client {
@@ -60,6 +72,7 @@ impl Client {
             pending: HashMap::new(),
             ready: false,
             queue: Vec::new(),
+            capabilities: Value::Null,
         };
         let root_uri = uri::from_path(root);
         let id = client.request_now(
@@ -72,7 +85,12 @@ impl Client {
                     "textDocument": {
                         "synchronization": {"didSave": true},
                         "completion": {"completionItem": {"snippetSupport": false}},
-                        "definition": {},
+                        "definition": {"linkSupport": true},
+                        "references": {},
+                        "declaration": {"linkSupport": true},
+                        "typeDefinition": {"linkSupport": true},
+                        "implementation": {"linkSupport": true},
+                        "hover": {"contentFormat": ["markdown", "plaintext"]},
                         "publishDiagnostics": {},
                     },
                     "workspace": {"workspaceFolders": true, "configuration": true},

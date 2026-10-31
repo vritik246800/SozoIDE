@@ -184,7 +184,7 @@ fn row_style(selected: bool) -> Style {
 }
 
 /// The letter and colour of a change: added, modified, deleted, renamed…
-fn status_mark(status: FileStatus, area: ChangeArea) -> (&'static str, Color) {
+pub(crate) fn status_mark(status: FileStatus, area: ChangeArea) -> (&'static str, Color) {
     match (status, area) {
         (_, ChangeArea::Untracked) => ("U", Color::Green),
         (FileStatus::Added, _) => ("A", Color::Green),

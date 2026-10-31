@@ -8,14 +8,17 @@ use ratatui::{
 
 use crate::{
     animation::spinner,
-    app::{Action, App, AppMotion, KeyEditor, Keymap, NotesFilter, TUTORIAL_STEPS},
+    app::{
+        Action, App, AppMotion, Dependencies, HelpTab, KeyEditor, Keymap, NotesFilter,
+        TUTORIAL_STEPS,
+    },
     branding::{self, ASCII_LOGO, ASCII_LOGO_LARGE},
     editor::{MAX_MATCHES, SearchMatch, SearchScope, file_icon},
-    update::{NOTES, Notes, UpdateState},
+    update::{NOTES, Notes, UpdateState, deps::Found},
 };
 
 use super::{
-    ACTIVE, BORDER, MATCH, MUTED, TEXT, bar, centered, components::key_for, panel_block,
+    ACTIVE, BORDER, MATCH, MUTED, TEXT, bar, busy, centered, components::key_for, panel_block,
     render_dialog, scale_length, sweep_bar, unfold,
 };
 
@@ -95,14 +98,19 @@ pub(super) fn render_search(frame: &mut Frame, app: &mut App, area: Rect) {
         search_header(frame, app, inner);
         return;
     }
+    // References and definitions (F31) are a list with its own title.
+    let title = match &search.title {
+        Some(title) => format!(" {title} "),
+        None => format!(
+            " Find in workspace [{}] ",
+            app.keys.label(Action::FindInWorkspace)
+        ),
+    };
     render_dialog(
         frame,
         centered(area, 84, 70),
         progress,
-        format!(
-            " Find in workspace [{}] ",
-            app.keys.label(Action::FindInWorkspace)
-        ),
+        title,
         |frame, inner| render_search_results(frame, app, inner),
     );
 }
@@ -147,7 +155,11 @@ fn search_header(frame: &mut Frame, app: &mut App, area: Rect) {
         Paragraph::new(Line::from(vec![
             Span::styled("> ", Style::default().fg(ACTIVE)),
             Span::styled(search.query.clone(), Style::default().fg(TEXT)),
-            Span::styled("█", Style::default().fg(ACTIVE)),
+            // A list given whole takes no typing: no cursor.
+            Span::styled(
+                if search.title.is_some() { "" } else { "█" },
+                Style::default().fg(ACTIVE),
+            ),
         ])),
         query,
     );
@@ -389,10 +401,17 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             color: Color::Blue,
             keys: vec![
                 (Fixed("Enter"), "Open a file or a folder"),
-                (Fixed("Right-click"), "New, rename, delete (Explorer)"),
+                (
+                    Fixed("Right-click"),
+                    "New, rename, delete, properties (Explorer)",
+                ),
                 (Fixed("Ctrl+X/C/V"), "Cut, copy, paste (Explorer)"),
                 bound(Action::CloseTab),
                 bound(Action::Run),
+                bound(Action::Build),
+                bound(Action::Clean),
+                bound(Action::Rebuild),
+                bound(Action::RunProject),
                 (
                     Fixed("Wheel on the tabs"),
                     "Scroll the tabs, or click < and >",
@@ -421,6 +440,12 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
                 (Fixed("Ctrl+V"), "Paste"),
                 bound(Action::Suggestions),
                 bound(Action::Definition),
+                bound(Action::Peek),
+                bound(Action::References),
+                bound(Action::Hover),
+                (Fixed("Rest the mouse"), "On a word: the same information"),
+                (Fixed("Ctrl+click"), "Go to the definition"),
+                bound(Action::Back),
                 (Fixed("Right-click"), "Cut, copy, paste the text"),
                 (
                     Fixed(if mac {
@@ -754,8 +779,8 @@ pub(super) fn render_help(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     let (page, places) = help_page(os, width, two, &app.keys, &app.key_editor);
     let content = if two { width * 2 + 1 } else { width };
-    let dialog = dialog_area(area, content as u16 + 4, page.len() as u16 + 5);
-    let visible = dialog.height.saturating_sub(4);
+    let dialog = dialog_area(area, content as u16 + 4, page.len() as u16 + 6);
+    let visible = dialog.height.saturating_sub(5);
     let most = (page.len() as u16).saturating_sub(visible);
     // Tab brings the chosen command into view.
     if std::mem::take(&mut app.key_editor.follow)
@@ -776,24 +801,65 @@ pub(super) fn render_help(frame: &mut Frame, app: &mut App, area: Rect) {
     let editor = app.key_editor.clone();
     let mut keys = Vec::new();
     let mut reset = Rect::default();
+    let tab = app.help_tab;
+    let mut tabs = Vec::new();
+    let mut rows = Vec::new();
+    let dependencies = app
+        .dependencies
+        .as_ref()
+        .map(|dependencies| dependency_table(dependencies, app.motion.elapsed()));
     render_dialog(
         frame,
         dialog,
         progress,
         format!(" Help - all commands ({}) ", os_name(os)),
         |frame, inner| {
-            let [body, edit, hint] = Layout::vertical([
+            let [bar, body, edit, hint] = Layout::vertical([
+                Constraint::Length(1),
                 Constraint::Min(1),
                 Constraint::Length(1),
                 Constraint::Length(1),
             ])
             .areas(inner);
+            // Shortcuts and Dependencies, like the tabs of Source Control (F33).
+            let mut x = bar.x + 1;
+            for (each, label) in [
+                (HelpTab::Shortcuts, " Shortcuts "),
+                (HelpTab::Dependencies, " Dependencies "),
+            ] {
+                let style = if each == tab {
+                    Style::default()
+                        .fg(ACTIVE)
+                        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                } else {
+                    Style::default().fg(TEXT).add_modifier(Modifier::REVERSED)
+                };
+                let button = Rect::new(x, bar.y, label.len() as u16, 1).intersection(bar);
+                frame.render_widget(Paragraph::new(label).style(style), button);
+                tabs.push((each, button));
+                x += label.len() as u16 + 1;
+            }
+            frame.render_widget(
+                Paragraph::new(" Left/Right: tab").style(Style::default().fg(MUTED)),
+                Rect::new(x, bar.y, bar.right().saturating_sub(x), 1).intersection(bar),
+            );
             let body = Rect::new(
                 body.x + 1,
                 body.y,
                 body.width.saturating_sub(1),
                 body.height,
             );
+            if tab == HelpTab::Dependencies {
+                render_dependencies(frame, dependencies.as_ref(), body, &mut rows);
+                frame.render_widget(
+                    Paragraph::new(
+                        " Up/Down or a click: choose   Enter: install or update   R: check again   Esc: close",
+                    )
+                    .style(Style::default().fg(MUTED)),
+                    hint,
+                );
+                return;
+            }
             frame.render_widget(Paragraph::new(page).scroll((scroll, 0)), body);
             for (row, x, width, action) in &places {
                 let Some(y) = (*row as u16).checked_sub(scroll) else {
@@ -860,6 +926,229 @@ pub(super) fn render_help(frame: &mut Frame, app: &mut App, area: Rect) {
     );
     app.regions.help_keys = keys;
     app.regions.help_reset = reset;
+    app.regions.help_tabs = tabs;
+    app.regions.dependency_rows = rows;
+}
+
+/// The Dependencies tab as the dialog draws it: the summary, the rows (component, kind,
+/// installed, status and its colour, action) and the chosen one.
+struct DependencyTable {
+    summary: Line<'static>,
+    rows: Vec<[String; 4]>,
+    status: Vec<(String, Color)>,
+    selected: usize,
+}
+
+fn dependency_table(dependencies: &Dependencies, elapsed: std::time::Duration) -> DependencyTable {
+    let summary = match dependencies.counts() {
+        Some((missing, installed)) => Line::from(vec![
+            Span::styled(
+                format!("{missing} missing"),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                format!("   {installed} installed"),
+                Style::default().fg(Color::Green),
+            ),
+            Span::styled(
+                "   versions as each program says them",
+                Style::default().fg(MUTED),
+            ),
+        ]),
+        None => busy(spinner(elapsed), "Checking..."),
+    };
+    let mut rows = Vec::new();
+    let mut status = Vec::new();
+    for (index, component) in dependencies.components.iter().enumerate() {
+        let found = dependencies.found.as_ref().map(|found| &found[index]);
+        let (installed, state, action) = match found {
+            None => (String::new(), ("Checking".to_owned(), MUTED), None),
+            Some(Found::Missing) => (
+                "—".to_owned(),
+                ("Missing".to_owned(), Color::Yellow),
+                component.install.as_ref().map(|_| "Install"),
+            ),
+            Some(Found::Installed(version)) => (
+                version.clone().unwrap_or_else(|| "found".into()),
+                ("Installed".to_owned(), Color::Green),
+                component.update.as_ref().map(|_| "Update"),
+            ),
+        };
+        let action = match (found, action) {
+            (None, _) => String::new(),
+            (_, Some(action)) => action.to_owned(),
+            (_, None) => "—".to_owned(),
+        };
+        rows.push([
+            component.name.to_owned(),
+            component.kind.to_owned(),
+            installed,
+            action,
+        ]);
+        status.push(state);
+    }
+    DependencyTable {
+        summary,
+        rows,
+        status,
+        selected: dependencies.selected,
+    }
+}
+
+/// The summary, the header and the rows of the Dependencies tab in `area`; where each row is.
+fn render_dependencies(
+    frame: &mut Frame,
+    table: Option<&DependencyTable>,
+    area: Rect,
+    places: &mut Vec<(usize, Rect)>,
+) {
+    let Some(table) = table else {
+        return;
+    };
+    let width = usize::from(area.width);
+    let cut = |text: &str, room: usize| {
+        let text = text
+            .chars()
+            .take(room.saturating_sub(1))
+            .collect::<String>();
+        format!("{text:<room$}")
+    };
+    let (name, kind, status, action) = (28, 16, 11, 8);
+    let installed = width.saturating_sub(name + kind + status + action);
+    let mut lines = vec![
+        table.summary.clone(),
+        Line::from(Span::styled(
+            format!(
+                "{}{}{}{}{}",
+                cut("Component", name),
+                cut("Kind", kind),
+                cut("Installed", installed),
+                cut("Status", status),
+                cut("Action", action)
+            ),
+            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+        )),
+    ];
+    let room = usize::from(area.height).saturating_sub(lines.len());
+    let first = (table.selected + 1).saturating_sub(room);
+    for (index, row) in table.rows.iter().enumerate().skip(first).take(room) {
+        let (text, colour) = &table.status[index];
+        let mut line = Line::from(vec![
+            Span::styled(cut(&row[0], name), Style::default().fg(TEXT)),
+            Span::styled(cut(&row[1], kind), Style::default().fg(MUTED)),
+            Span::styled(cut(&row[2], installed), Style::default().fg(TEXT)),
+            Span::styled(cut(text, status), Style::default().fg(*colour)),
+            Span::styled(cut(&row[3], action), Style::default().fg(ACTIVE)),
+        ]);
+        if index == table.selected {
+            line = line.style(Style::default().add_modifier(Modifier::REVERSED));
+        }
+        let y = area.y + lines.len() as u16;
+        places.push((index, Rect::new(area.x, y, area.width, 1)));
+        lines.push(line);
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// A command waiting for Enter (F32, F33): what it is, then the command, over everything.
+pub(super) fn render_confirm(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(confirm) = &app.confirm else {
+        return;
+    };
+    let width = 120.min(area.width.saturating_sub(4));
+    let label = confirm
+        .rows
+        .iter()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let mut lines = confirm
+        .rows
+        .iter()
+        .map(|(name, value)| {
+            let colour = if *name == "Command" { ACTIVE } else { TEXT };
+            Line::from(vec![
+                Span::styled(format!("{name:<label$}"), Style::default().fg(MUTED)),
+                Span::styled(value.clone(), Style::default().fg(colour)),
+            ])
+        })
+        .collect::<Vec<_>>();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Enter: run it in the bottom terminal   Esc: cancel",
+        Style::default().fg(MUTED),
+    )));
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let height = paragraph.line_count(width.saturating_sub(4)) as u16 + 2;
+    render_dialog(
+        frame,
+        dialog_area(area, width, height),
+        1.0,
+        format!(" {} ", confirm.title),
+        |frame, inner| {
+            let inner = Rect::new(
+                inner.x + 1,
+                inner.y,
+                inner.width.saturating_sub(2),
+                inner.height,
+            );
+            frame.render_widget(paragraph, inner);
+        },
+    );
+}
+
+/// The projects of a monorepo to choose from (F32).
+pub(super) fn render_choice(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(choice) = &app.project_choice else {
+        return;
+    };
+    let lines = choice
+        .projects
+        .iter()
+        .enumerate()
+        .map(|(index, project)| {
+            let folder = project
+                .folder
+                .strip_prefix(&app.root)
+                .unwrap_or(&project.folder);
+            let line = Line::from(vec![
+                Span::styled(
+                    format!(" {:<16}", project.kind),
+                    Style::default().fg(ACTIVE),
+                ),
+                Span::styled(folder.display().to_string(), Style::default().fg(TEXT)),
+            ]);
+            if index == choice.selected {
+                line.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>();
+    let count = lines.len() as u16;
+    let dialog = dialog_area(area, 60, count + 4);
+    let mut places = Vec::new();
+    render_dialog(
+        frame,
+        dialog,
+        1.0,
+        format!(" Choose the project: {} ", choice.task.label()),
+        |frame, inner| {
+            let [list, hint] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+            for row in 0..count.min(list.height) {
+                places.push((row as usize, Rect::new(list.x, list.y + row, list.width, 1)));
+            }
+            frame.render_widget(Paragraph::new(lines), list);
+            frame.render_widget(
+                Paragraph::new(" Up/Down, Enter or a click: choose   Esc: cancel")
+                    .style(Style::default().fg(MUTED)),
+                hint,
+            );
+        },
+    );
+    app.regions.choice_rows = places;
 }
 
 fn os_name(os: &str) -> &'static str {
@@ -1525,7 +1814,7 @@ mod tests {
                 .starts_with("│ Ctrl+Q"),
             "{line}"
         );
-        assert_eq!(places.len(), 22, "21 commands and Database twice");
+        assert_eq!(places.len(), 30, "29 commands and Database twice");
         let (single, places) = help_page("linux", 40, false, &keys, &editor);
         assert!(single.len() > page.len());
         assert!(single.iter().all(|line| line.width() == 40));

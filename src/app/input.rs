@@ -5,13 +5,15 @@ use ratatui::layout::Rect;
 
 use crate::{
     editor::{SearchScope, SearchState},
+    lsp::Goal,
     media::Control,
+    run::Task,
     update::UpdateState,
 };
 
 use super::{
-    Action, App, DragTarget, DropZone, EntryAction, Focus, NotesFilter, Overlay, TUTORIAL_STEPS,
-    TabDrag, TerminalSelection, video_areas,
+    Action, App, DragTarget, DropZone, EntryAction, Focus, HelpTab, NotesFilter, Overlay,
+    TUTORIAL_STEPS, TabDrag, TerminalSelection, video_areas,
 };
 
 impl App {
@@ -42,6 +44,22 @@ impl App {
             self.handle_name_key(key.code);
             return;
         }
+        if self.properties.is_some() {
+            // Nothing to edit: Esc or Enter close it, and stop a folder's count.
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+                self.properties = None;
+            }
+            return;
+        }
+        // A command waiting for Enter, then the choice of a project (F32, F33).
+        if self.confirm.is_some() {
+            self.handle_confirm_key(key);
+            return;
+        }
+        if self.project_choice.is_some() {
+            self.handle_choice_key(key);
+            return;
+        }
         if self.entry_menu.is_some() {
             self.handle_menu_key(key.code);
             return;
@@ -70,6 +88,13 @@ impl App {
         }
 
         match action {
+            // The project's commands work from every panel (F32); Shift+F5 too, while
+            // something runs, since running takes the focus to the terminal.
+            Some(Action::Build) => return self.run_task(Task::Build),
+            Some(Action::Clean) => return self.run_task(Task::Clean),
+            Some(Action::Rebuild) => return self.run_task(Task::Rebuild),
+            Some(Action::RunProject) => return self.run_task(Task::Run),
+            Some(Action::StopDebug) if self.something_runs() => return self.stop(),
             Some(Action::Help) => {
                 self.flush_active_file();
                 self.open_overlay(Overlay::Help);
@@ -203,8 +228,11 @@ impl App {
                 }
                 return;
             }
-            KeyCode::Backspace => search.backspace(&self.root, active),
-            KeyCode::Char(character) if !ctrl => search.push(character, &self.root, active),
+            // References and definitions are a list given whole (F31).
+            KeyCode::Backspace if search.title.is_none() => search.backspace(&self.root, active),
+            KeyCode::Char(character) if !ctrl && search.title.is_none() => {
+                search.push(character, &self.root, active);
+            }
             _ => {}
         }
         self.preview_match();
@@ -226,13 +254,14 @@ impl App {
         }
     }
 
-    /// Opens the file of `found` with the match selected a few lines below the top.
+    /// Opens the file of `found` with the match selected a few lines below the top; where the
+    /// cursor was goes to Back (F31).
     fn show_match(&mut self, found: &crate::editor::SearchMatch) {
-        if let Err(error) = self.open_file(found.path.clone()) {
-            self.status = error.to_string();
-        } else if let Some(active) = self.active_tab {
+        self.jump_to(found.path.clone(), found.line, found.column + found.length);
+        if let Some(active) = self.active_tab
+            && self.open_files[active].path == found.path
+        {
             let file = &mut self.open_files[active];
-            file.move_cursor_to(found.line, found.column + found.length);
             file.anchor = Some((found.line, found.column));
             file.scroll = file.display_row(found.line).saturating_sub(3) as u16;
             file.follow_cursor = false;
@@ -309,7 +338,7 @@ impl App {
             return;
         }
         let active = self.active_tab.and_then(|index| self.open_files.get(index));
-        if let Some(search) = &mut self.search {
+        if let Some(search) = self.search.as_mut().filter(|search| search.title.is_none()) {
             search.push_str(text, &self.root, active);
         }
         self.preview_match();
@@ -318,8 +347,26 @@ impl App {
     /// Esc and the keys of Help and About close every dialog; the tutorial pages with Enter
     /// and the arrows, About opens the repository with G, Help changes shortcuts (F29).
     fn handle_overlay_key(&mut self, key: KeyEvent) {
-        if self.overlay == Overlay::Help && self.handle_shortcut_key(key) {
-            return;
+        // Help's tabs: Left and Right, then the keys of the tab (F33).
+        if self.overlay == Overlay::Help {
+            match key.code {
+                KeyCode::Left if self.help_tab == HelpTab::Dependencies => {
+                    self.help_tab = HelpTab::Shortcuts;
+                    return;
+                }
+                KeyCode::Right if self.help_tab == HelpTab::Shortcuts => {
+                    return self.open_dependencies();
+                }
+                _ => {}
+            }
+            let handled = if self.help_tab == HelpTab::Dependencies {
+                self.handle_dependencies_key(key)
+            } else {
+                self.handle_shortcut_key(key)
+            };
+            if handled {
+                return;
+            }
         }
         let code = key.code;
         let closes = code == KeyCode::Esc
@@ -406,6 +453,10 @@ impl App {
         }
         self.reset_key_editor(overlay);
         self.overlay = overlay;
+        // The Dependencies tab checks again after an installation (F33).
+        if overlay == Overlay::Help && self.help_tab == HelpTab::Dependencies {
+            self.open_dependencies();
+        }
         self.overlay_scroll = 0;
         self.motion.open_overlay(now);
     }
@@ -558,15 +609,23 @@ impl App {
             }
             return;
         }
-        // IntelliSense (F26): the open list takes its keys first.
+        // An open Peek or hover (F31), then the list of suggestions (F26), take their keys
+        // first.
+        if (self.peek.is_some() || self.hover.is_some()) && self.handle_intelligence_key(key) {
+            return;
+        }
         if self.completion.is_some() && self.handle_completion_key(key) {
             return;
         }
         // IntelliSense (F26) and debugging (F27); Shift+F5 also arrives as F17 (`Binding`).
         match self.keys.action(key) {
             Some(Action::Suggestions) => return self.request_completion(),
-            Some(Action::Definition) => return self.go_to_definition(),
-            Some(Action::StopDebug) => return self.debug_stop(),
+            Some(Action::Definition) => return self.ask_places(Goal::Definition),
+            Some(Action::Peek) => return self.ask_places(Goal::Peek),
+            Some(Action::References) => return self.ask_places(Goal::References),
+            Some(Action::Hover) => return self.ask_hover(),
+            Some(Action::Back) => return self.go_back(),
+            Some(Action::StopDebug) => return self.stop(),
             Some(Action::Debug) => return self.debug_start_or_continue(),
             Some(Action::Breakpoint) => return self.toggle_breakpoint(),
             Some(Action::StepOver) => return self.debug_step("next"),
@@ -654,7 +713,37 @@ impl App {
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 self.selecting = false;
                 self.terminal_selection = None;
+                // A click in a hover or Peek box keeps it; anywhere else closes it (F31).
+                if self.peek.is_some() || self.hover.is_some() {
+                    if contains(self.regions.peek, point) || contains(self.regions.hover, point) {
+                        return;
+                    }
+                    self.peek = None;
+                    self.hover = None;
+                }
                 if self.name_prompt.is_some() {
+                    return;
+                }
+                if self.properties.is_some() {
+                    if !contains(self.regions.properties, point) {
+                        self.properties = None;
+                    }
+                    return;
+                }
+                // The command dialog takes Enter or Esc; a project is chosen with a click.
+                if self.confirm.is_some() {
+                    return;
+                }
+                if self.project_choice.is_some() {
+                    match self
+                        .regions
+                        .choice_rows
+                        .iter()
+                        .find(|(_, area)| contains(*area, point))
+                    {
+                        Some((index, _)) => self.choose_project(Some(*index)),
+                        None => self.project_choice = None,
+                    }
                     return;
                 }
                 if self.entry_menu.is_some() {
@@ -727,6 +816,37 @@ impl App {
                     return;
                 }
                 if self.overlay == Overlay::Help && !self.motion.overlay_closing() {
+                    // The tabs, then the Dependencies rows (F33).
+                    if let Some((tab, _)) = self
+                        .regions
+                        .help_tabs
+                        .iter()
+                        .find(|(_, area)| contains(*area, point))
+                        .copied()
+                    {
+                        match tab {
+                            HelpTab::Shortcuts => self.help_tab = tab,
+                            HelpTab::Dependencies => self.open_dependencies(),
+                        }
+                        return;
+                    }
+                    if self.help_tab == HelpTab::Dependencies {
+                        let row = self
+                            .regions
+                            .dependency_rows
+                            .iter()
+                            .find(|(_, area)| contains(*area, point))
+                            .map(|(row, _)| *row);
+                        if let (Some(row), Some(dependencies)) = (row, &mut self.dependencies) {
+                            // A click chooses the row; a click on the chosen one asks.
+                            if dependencies.selected == row {
+                                self.ask_to_install(Some(row));
+                            } else {
+                                dependencies.selected = row;
+                            }
+                        }
+                        return;
+                    }
                     // A command's key waits for new keys; Reset asks first (F29).
                     if contains(self.regions.help_reset, point) {
                         self.ask_to_reset_shortcuts();
@@ -893,7 +1013,14 @@ impl App {
                         if !extend {
                             file.anchor = Some((file.cursor_row, file.cursor_column));
                         }
-                        self.selecting = true;
+                        // Ctrl+click goes to the definition, where the terminal sends the Ctrl
+                        // with the click (F31).
+                        if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                            file.anchor = None;
+                            self.ask_places(Goal::Definition);
+                        } else {
+                            self.selecting = true;
+                        }
                     }
                 }
             }
@@ -902,6 +1029,7 @@ impl App {
                 let free = self.overlay == Overlay::None
                     && self.search.is_none()
                     && self.name_prompt.is_none()
+                    && self.properties.is_none()
                     && !self.splash_visible;
                 if free && self.show_explorer && contains(explorer, point) && point.1 > explorer.y {
                     self.focus = Focus::Explorer;
@@ -917,6 +1045,14 @@ impl App {
                         self.select_tab(index);
                     }
                     self.focus = Focus::Editor;
+                    // Without a selection the click puts the cursor on the word the menu's
+                    // questions are about (F31).
+                    if let Some((_, row, column)) = self.text_under(point) {
+                        let file = &mut self.open_files[index];
+                        if file.selection().is_none() {
+                            file.move_cursor_to(row, column);
+                        }
+                    }
                     self.open_editor_menu(point);
                 } else {
                     self.entry_menu = None;
@@ -1018,7 +1154,12 @@ impl App {
                     self.drop_tab(drag, zone);
                 }
             }
-            MouseEventKind::Moved => self.hover(point),
+            MouseEventKind::Moved => {
+                self.hover(point);
+                let at = self.text_under(point);
+                self.mark_link(at, mouse.modifiers.contains(KeyModifiers::CONTROL));
+                self.rest_mouse(point, at);
+            }
             // Shift turns the wheel sideways, for terminals without a horizontal wheel.
             MouseEventKind::ScrollUp => self.scroll_at(point, true, sideways(mouse)),
             MouseEventKind::ScrollDown => self.scroll_at(point, false, sideways(mouse)),
@@ -1029,6 +1170,31 @@ impl App {
     }
 
     fn scroll_at(&mut self, point: (u16, u16), up: bool, sideways: bool) {
+        // The hover and Peek boxes scroll under the mouse (F31).
+        if let Some(hover) = self
+            .hover
+            .as_mut()
+            .filter(|_| contains(self.regions.hover, point))
+        {
+            hover.scroll = if up {
+                hover.scroll.saturating_sub(1)
+            } else {
+                (hover.scroll + 1).min(hover.overflow)
+            };
+            return;
+        }
+        if let Some(peek) = self
+            .peek
+            .as_mut()
+            .filter(|_| contains(self.regions.peek, point))
+        {
+            peek.top = if up {
+                peek.top.saturating_sub(3)
+            } else {
+                (peek.top + 3).min(peek.lines.len().saturating_sub(1))
+            };
+            return;
+        }
         if matches!(self.overlay, Overlay::Help | Overlay::WhatsNew) {
             self.overlay_scroll = if up {
                 self.overlay_scroll.saturating_sub(3)
@@ -1210,8 +1376,10 @@ impl App {
         self.entries
             .iter()
             .map(|entry| {
-                // Indentation, the `+`/`-` marker, the icon and the spaces between them.
-                2 * entry.depth + 4 + ratatui::text::Line::from(entry.name.as_str()).width()
+                // Indentation, the `+`/`-` marker, the icon and the spaces between them, and
+                // Git's mark at the right edge, which the end of the name scrolls clear of.
+                let mark = 2 * usize::from(self.git_change(&entry.path).is_some());
+                2 * entry.depth + 4 + ratatui::text::Line::from(entry.name.as_str()).width() + mark
             })
             .max()
             .unwrap_or(0)
@@ -1241,6 +1409,25 @@ impl App {
         self.pane_under(point)
             .and_then(|pane| self.shown_tab(pane))
             .filter(|index| *index < self.open_files.len())
+    }
+
+    /// The file under `point` and the row and character there, when it is over the text of
+    /// an editor with nothing drawn on top.
+    fn text_under(&self, point: (u16, u16)) -> Option<(usize, usize, usize)> {
+        if self.overlay != Overlay::None || self.search.is_some() {
+            return None;
+        }
+        let pane = self.pane_under(point)?;
+        let index = self.pane_at(point)?;
+        let file = &self.open_files[index];
+        let area = self.regions.pane_bodies[pane];
+        let gutter = file.lines.len().max(1).to_string().len() as u16 + 3;
+        if !file.shows_text() || !contains(inner_area(area), point) || point.0 < area.x + 1 + gutter
+        {
+            return None;
+        }
+        let (row, visual_column) = text_position(file, area, point);
+        Some((index, row, file.cursor_column_for_click(row, visual_column)))
     }
 
     /// The row under the mouse shows its Markdown source, like the cursor row.
@@ -1294,7 +1481,7 @@ fn clamped_cell(area: Rect, point: (u16, u16)) -> (u16, u16) {
     (row - inner.y, column - inner.x)
 }
 
-fn contains(area: Rect, point: (u16, u16)) -> bool {
+pub(super) fn contains(area: Rect, point: (u16, u16)) -> bool {
     point.0 >= area.x
         && point.0 < area.x.saturating_add(area.width)
         && point.1 >= area.y
@@ -1566,12 +1753,16 @@ mod tests {
                 .contains(&EntryAction::Delete)
         );
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-        // docs is the first row: Delete is the last entry of its menu.
+        // docs is the first row: Delete comes just before Properties, the last entry.
         mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 1);
-        assert_eq!(
-            app.entry_menu.as_ref().unwrap().actions.last(),
-            Some(&EntryAction::Delete)
+        assert!(
+            app.entry_menu
+                .as_ref()
+                .unwrap()
+                .actions
+                .ends_with(&[EntryAction::Delete, EntryAction::Properties])
         );
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
         press(&mut app, KeyCode::Up, KeyModifiers::NONE);
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(
@@ -1585,6 +1776,7 @@ mod tests {
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(folder.exists());
         mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 1);
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
         press(&mut app, KeyCode::Up, KeyModifiers::NONE);
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -1638,13 +1830,20 @@ mod tests {
         mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 10);
         let menu = app.entry_menu.as_ref().unwrap();
         assert_eq!(menu.target, directory.path());
-        assert_eq!(menu.actions, [EntryAction::NewFile, EntryAction::NewFolder]);
+        assert_eq!(
+            menu.actions,
+            [
+                EntryAction::NewFile,
+                EntryAction::NewFolder,
+                EntryAction::Properties
+            ]
+        );
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(app.entry_menu.is_none());
 
         // On the src folder: a new file goes inside it, opens and is selected.
         mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 1);
-        assert_eq!(app.entry_menu.as_ref().unwrap().actions.len(), 6);
+        assert_eq!(app.entry_menu.as_ref().unwrap().actions.len(), 7);
         app.regions.entry_menu_items = vec![(EntryAction::NewFile, Rect::new(3, 2, 14, 1))];
         mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 5, 2);
         assert!(app.entry_menu.is_none());
@@ -1684,9 +1883,10 @@ mod tests {
             3,
             row as u16 + 1,
         );
-        // Up from the top goes round to Delete, then Rename.
-        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
-        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        // Up from the top goes round to Properties, then Delete, then Rename.
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        }
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.name_prompt.as_ref().unwrap().name, "main.rs");
         for _ in 0.."main.rs".len() {
@@ -1701,6 +1901,79 @@ mod tests {
             (tab.path.as_path(), tab.name.as_str()),
             (renamed.as_path(), "lib.rs")
         );
+    }
+
+    #[test]
+    fn properties_open_from_the_menu_count_the_folder_and_close_with_esc_or_a_click() {
+        use crossterm::event::MouseButton;
+        use std::time::{Duration, Instant};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::create_dir_all(root.join("docs/sub")).unwrap();
+        std::fs::write(root.join("docs/a.txt"), "abc").unwrap();
+        std::fs::write(root.join("docs/sub/b.txt"), "hello").unwrap();
+        std::fs::write(root.join("top.txt"), "top").unwrap();
+        let mut app = App::new(root.to_path_buf()).unwrap();
+        app.show_explorer = true;
+        app.regions.explorer = Rect::new(0, 0, 30, 20);
+        // docs is the first row; Up from the top goes round to Properties, the last entry.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 1);
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let dialog = app.properties.as_ref().unwrap();
+        assert_eq!(dialog.properties.path, root.join("docs"));
+        assert_eq!(dialog.properties.kind, crate::app::Kind::Folder);
+        // The count arrives in the tick; until then the dialog says it is calculating.
+        assert!(dialog.count.is_none());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.properties.as_ref().unwrap().count.is_none() {
+            assert!(Instant::now() < deadline, "the count never came");
+            app.tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let count = app.properties.as_ref().unwrap().count.unwrap();
+        assert_eq!(
+            (count.files, count.folders, count.bytes, count.unreadable),
+            (2, 1, 8, 0)
+        );
+        // Keys other than Esc and Enter, and right-clicks, leave it as it is.
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 2);
+        assert!(app.properties.is_some() && app.entry_menu.is_none());
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.properties.is_none());
+
+        // A file: its size at once, nothing to count; a click inside stays, outside closes.
+        let row = app
+            .entries
+            .iter()
+            .position(|entry| entry.path == root.join("top.txt"))
+            .unwrap();
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Right),
+            3,
+            row as u16 + 1,
+        );
+        app.choose_entry_action(EntryAction::Properties);
+        let dialog = app.properties.as_ref().unwrap();
+        assert_eq!((dialog.properties.size, dialog.count), (Some(3), None));
+        app.regions.properties = Rect::new(40, 5, 30, 10);
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 45, 8);
+        assert!(app.properties.is_some());
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 1, 1);
+        assert!(app.properties.is_none());
+
+        // The empty space below the tree is the project folder; Enter closes too.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), 3, 15);
+        assert_eq!(
+            app.entry_menu.as_ref().unwrap().actions.last(),
+            Some(&EntryAction::Properties)
+        );
+        app.choose_entry_action(EntryAction::Properties);
+        assert_eq!(app.properties.as_ref().unwrap().properties.path, root);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.properties.is_none());
     }
 
     #[test]
@@ -1755,7 +2028,8 @@ mod tests {
                 EntryAction::Copy,
                 EntryAction::Paste,
                 EntryAction::Rename,
-                EntryAction::Delete
+                EntryAction::Delete,
+                EntryAction::Properties
             ]
         );
         app.choose_entry_action(EntryAction::Paste);
@@ -1798,16 +2072,38 @@ mod tests {
             assert!(menu.editor);
             menu.actions.clone()
         };
-        // Without a selection there is only Paste, and nothing to paste yet.
-        assert_eq!(right_click(&mut app), [EntryAction::Paste]);
+        // Without a selection there is only Paste, and nothing to paste yet; then the
+        // questions to the language server (F31).
+        use crate::lsp::Goal;
+        let code = [
+            Goal::Definition,
+            Goal::Peek,
+            Goal::Declaration,
+            Goal::TypeDefinition,
+            Goal::Implementation,
+            Goal::References,
+        ]
+        .map(EntryAction::Code);
+        assert_eq!(
+            right_click(&mut app),
+            [&[EntryAction::Paste][..], &code].concat()
+        );
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.status, "The clipboard is empty");
+        // Without a selection the click put the cursor where it was.
+        let file = app.active_file().unwrap();
+        assert_eq!((file.cursor_row, file.cursor_column), (0, 5));
+        press(&mut app, KeyCode::Home, KeyModifiers::NONE);
         for _ in 0..5 {
             press(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
         }
         assert_eq!(
             right_click(&mut app),
-            [EntryAction::Cut, EntryAction::Copy, EntryAction::Paste]
+            [
+                &[EntryAction::Cut, EntryAction::Copy, EntryAction::Paste][..],
+                &code
+            ]
+            .concat()
         );
         app.choose_entry_action(EntryAction::Copy);
         assert_eq!(app.clipboard.take().as_deref(), Some("alpha"));
@@ -2007,7 +2303,7 @@ mod tests {
     }
 
     #[test]
-    fn a_gif_plays_in_its_tab_and_installed_tools_reach_the_status_bar() {
+    fn a_gif_plays_in_its_tab() {
         use image::{Delay, Frame, Rgba, RgbaImage, codecs::gif::GifEncoder};
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("blink.gif");
@@ -2026,15 +2322,6 @@ mod tests {
         assert_eq!(hint(&app).as_deref(), Some("Frame 1/2"));
         app.tick_at(Instant::now() + Duration::from_millis(150));
         assert_eq!(hint(&app).as_deref(), Some("Frame 2/2"));
-
-        let (sender, receiver) = std::sync::mpsc::channel();
-        app.dependencies = Some(receiver);
-        app.tick_at(Instant::now());
-        assert_ne!(app.status, "Installed ffmpeg");
-        sender.send("Installed ffmpeg".into()).unwrap();
-        app.tick_at(Instant::now());
-        assert_eq!(app.status, "Installed ffmpeg");
-        assert!(app.dependencies.is_none());
     }
 
     #[test]
@@ -2137,10 +2424,18 @@ mod tests {
         assert_eq!(app.active_file().unwrap().lines[2], "    list.pop(");
 
         // A definition elsewhere opens there; messages reach the status bar.
-        app.lsp_event(Event::Definition {
-            path: directory.path().join("lib.rs"),
-            row: 0,
-            column: 7,
+        let version = app.active_file().unwrap().edits;
+        app.lsp_event(Event::Places {
+            path: path.clone(),
+            version,
+            goal: crate::lsp::Goal::Definition,
+            places: vec![crate::lsp::Place {
+                path: directory.path().join("lib.rs"),
+                row: 0,
+                start: 7,
+                end_row: 0,
+                end: 13,
+            }],
         });
         let file = app.active_file().unwrap();
         assert!(file.path.ends_with("lib.rs"));
@@ -2151,6 +2446,566 @@ mod tests {
         press(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
         press(&mut app, KeyCode::F(12), KeyModifiers::NONE);
         assert!(app.completion.is_none());
+    }
+
+    /// The requests a test `Lsp` wrote down: method, row and UTF-16 column.
+    fn asked(app: &App) -> Vec<(String, usize, usize)> {
+        app.lsp
+            .asked
+            .iter()
+            .map(|(method, _, row, column)| (method.clone(), *row, *column))
+            .collect()
+    }
+
+    #[test]
+    fn the_mouse_resting_on_a_word_asks_for_its_hover_once_and_leaving_closes_it() {
+        use crate::{app::intellisense::HOVER_DELAY, lsp::Event};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("main.rs");
+        std::fs::write(&path, "fn main() {\n    let total = compute();\n}\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path.clone()).unwrap();
+        app.regions.editor_body = Rect::new(30, 2, 60, 20);
+        app.regions.pane_bodies[0] = app.regions.editor_body;
+        let text_x = 30 + 1 + 4;
+        let hover = ("textDocument/hover".to_owned(), 1, 8);
+        // «total» is at columns 8 to 12 of row 1: nothing is asked before the mouse rests.
+        mouse(&mut app, MouseEventKind::Moved, text_x + 9, 4);
+        app.tick_at(Instant::now() + Duration::from_millis(100));
+        assert!(asked(&app).is_empty());
+        // Inside the same word it keeps waiting; then it is asked once, at the word's start.
+        mouse(&mut app, MouseEventKind::Moved, text_x + 11, 4);
+        let rested = Instant::now() + HOVER_DELAY + Duration::from_millis(50);
+        app.tick_at(rested);
+        app.tick_at(rested + Duration::from_millis(500));
+        assert_eq!(asked(&app), std::slice::from_ref(&hover));
+        mouse(&mut app, MouseEventKind::Moved, text_x + 10, 4);
+        app.tick_at(rested + Duration::from_secs(1));
+        assert_eq!(
+            asked(&app),
+            std::slice::from_ref(&hover),
+            "not again inside the same word"
+        );
+        // An answer for another edit is dropped; the right one fills the box.
+        let version = app.active_file().unwrap().edits;
+        let answer = |app: &mut App, version, text: &str| {
+            app.lsp_event(Event::Hover {
+                path: path.clone(),
+                version,
+                row: 1,
+                column: 8,
+                text: text.into(),
+            })
+        };
+        answer(&mut app, version + 1, "stale");
+        assert!(app.hover.as_ref().unwrap().text.is_none());
+        answer(&mut app, version, "```rust\nlet total: u32\n```");
+        assert_eq!(
+            app.hover.as_ref().unwrap().text.as_deref(),
+            Some("```rust\nlet total: u32\n```")
+        );
+        // Over the box it stays; off the word and the box it closes. Spaces ask nothing.
+        app.regions.hover = Rect::new(40, 5, 20, 3);
+        mouse(&mut app, MouseEventKind::Moved, 45, 6);
+        assert!(app.hover.is_some());
+        mouse(&mut app, MouseEventKind::Moved, text_x + 2, 4);
+        assert!(app.hover.is_none());
+        app.tick_at(rested + Duration::from_secs(1));
+        assert_eq!(asked(&app).len(), 1);
+
+        // Ctrl+K asks at the cursor, also just after the word.
+        app.open_files[0].move_cursor_to(1, 13);
+        app.lsp.asked.clear();
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(asked(&app), [hover]);
+        answer(&mut app, version, "");
+        assert!(app.hover.is_none());
+        assert_eq!(app.status, "Nothing to show for this symbol");
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        answer(&mut app, version, "let total: u32");
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.hover.is_none());
+        // A key that edits closes it and reaches the text.
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        answer(&mut app, version, "let total: u32");
+        press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(app.hover.is_none());
+        assert_eq!(
+            app.active_file().unwrap().lines[1],
+            "    let totals = compute();"
+        );
+        // Text pasted while it was asked: the answer is for the text before.
+        app.open_files[0].move_cursor_to(1, 9);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        let before = app.active_file().unwrap().edits;
+        app.editor_paste("x");
+        answer(&mut app, before, "let totals: u32");
+        assert!(app.hover.as_ref().is_none_or(|hover| hover.text.is_none()));
+        app.hover = None;
+        // On a space the cursor has no symbol.
+        app.open_files[0].move_cursor_to(1, 2);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(app.status, "No symbol at the cursor");
+    }
+
+    #[test]
+    fn definitions_peeks_and_references_open_and_alt_left_goes_back() {
+        use crate::lsp::{Event, Goal, Place};
+        let directory = tempfile::tempdir().unwrap();
+        let main = directory.path().join("main.rs");
+        let lib = directory.path().join("lib.rs");
+        std::fs::write(&main, "fn main() {\n    let total = compute();\n}\n").unwrap();
+        std::fs::write(
+            &lib,
+            "pub fn compute() -> u32 {\n    1\n}\n// compute again\n",
+        )
+        .unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(main.clone()).unwrap();
+        app.open_files[0].move_cursor_to(1, 16);
+        let place = |path: &PathBuf, row, start, end| Place {
+            path: path.clone(),
+            row,
+            start,
+            end_row: row,
+            end,
+        };
+        let answer = |app: &mut App, goal, places: Vec<Place>| {
+            let file = app.active_file().unwrap();
+            let (path, version) = (file.path.clone(), file.edits);
+            app.lsp_event(Event::Places {
+                path,
+                version,
+                goal,
+                places,
+            });
+        };
+        let at = |app: &App| {
+            let file = app.active_file().unwrap();
+            (
+                file.path.file_name().unwrap().to_str().unwrap().to_owned(),
+                file.cursor_row,
+                file.cursor_column,
+            )
+        };
+        press(&mut app, KeyCode::F(12), KeyModifiers::NONE);
+        assert_eq!(asked(&app), [("textDocument/definition".into(), 1, 16)]);
+        assert_eq!(app.status, "Looking for the definition...");
+        // An answer for an older edit is dropped.
+        let version = app.active_file().unwrap().edits;
+        app.lsp_event(Event::Places {
+            path: main.clone(),
+            version: version + 1,
+            goal: Goal::Definition,
+            places: vec![place(&lib, 0, 7, 14)],
+        });
+        assert_eq!(at(&app), ("main.rs".into(), 1, 16));
+        // One definition opens there; Alt+Left comes back.
+        answer(&mut app, Goal::Definition, vec![place(&lib, 0, 7, 14)]);
+        assert_eq!(at(&app), ("lib.rs".into(), 0, 7));
+        press(&mut app, KeyCode::Left, KeyModifiers::ALT);
+        assert_eq!(at(&app), ("main.rs".into(), 1, 16));
+
+        // Several open a list to choose from, which takes no typing; Enter opens one.
+        answer(
+            &mut app,
+            Goal::Definition,
+            vec![place(&lib, 3, 3, 10), place(&lib, 0, 7, 14)],
+        );
+        let search = app.search.as_ref().unwrap();
+        assert_eq!(search.title.as_deref(), Some("Definitions"));
+        assert_eq!(search.query, "compute");
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(app.search.as_ref().unwrap().query, "compute");
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let file = app.active_file().unwrap();
+        assert_eq!(
+            at(&app),
+            ("lib.rs".into(), 3, 10),
+            "the second, sorted by row"
+        );
+        assert_eq!(file.anchor, Some((3, 3)), "the symbol selected");
+        // The ESC b of the Terminal.app's Option+Left goes back too.
+        press(&mut app, KeyCode::Char('b'), KeyModifiers::ALT);
+        assert_eq!(at(&app), ("main.rs".into(), 1, 16));
+        app.tick_at(Instant::now() + Duration::from_secs(1));
+
+        // References: the same list, with every use and its line.
+        app.lsp.asked.clear();
+        press(&mut app, KeyCode::F(12), KeyModifiers::SHIFT);
+        assert_eq!(asked(&app), [("textDocument/references".into(), 1, 16)]);
+        answer(&mut app, Goal::References, Vec::new());
+        assert_eq!(app.status, "No references found");
+        answer(
+            &mut app,
+            Goal::References,
+            vec![place(&main, 1, 16, 23), place(&lib, 0, 7, 14)],
+        );
+        let search = app.search.as_ref().unwrap();
+        assert_eq!(search.title.as_deref(), Some("References"));
+        let lines = search
+            .matches
+            .iter()
+            .map(|found| (found.line, found.column, found.length, found.text.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            [
+                (0, 7, 7, "pub fn compute() -> u32 {"),
+                (1, 16, 7, "    let total = compute();"),
+            ]
+        );
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        app.tick_at(Instant::now() + Duration::from_secs(1));
+        assert!(app.search.is_none());
+
+        // Peek shows the definition without leaving the tab; the arrows scroll, Enter goes.
+        press(&mut app, KeyCode::F(12), KeyModifiers::ALT);
+        answer(&mut app, Goal::Peek, vec![place(&lib, 0, 7, 14)]);
+        let peek = app.peek.as_ref().unwrap();
+        assert_eq!((peek.row, peek.column, peek.top), (0, 7, 0));
+        assert_eq!(peek.lines[3], "// compute again");
+        assert_eq!(at(&app).0, "main.rs");
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.peek.as_ref().unwrap().top, 1);
+        assert_eq!(at(&app), ("main.rs".into(), 1, 16), "the cursor stays");
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.peek.is_none());
+        assert_eq!(at(&app), ("lib.rs".into(), 0, 7));
+        press(&mut app, KeyCode::Left, KeyModifiers::ALT);
+        assert_eq!(at(&app), ("main.rs".into(), 1, 16));
+        // Esc closes it where it was.
+        press(&mut app, KeyCode::F(12), KeyModifiers::ALT);
+        answer(&mut app, Goal::Peek, vec![place(&lib, 0, 7, 14)]);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.peek.is_none());
+        assert_eq!(at(&app).0, "main.rs");
+
+        // Ctrl+click asks for the definition of what was clicked.
+        app.regions.editor_body = Rect::new(30, 2, 60, 20);
+        app.regions.pane_bodies[0] = app.regions.editor_body;
+        app.lsp.asked.clear();
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 30 + 1 + 4 + 9,
+            row: 4,
+            modifiers: KeyModifiers::CONTROL,
+        });
+        assert_eq!(asked(&app), [("textDocument/definition".into(), 1, 9)]);
+        assert!(!app.selecting && app.active_file().unwrap().anchor.is_none());
+    }
+
+    #[test]
+    fn code_intelligence_says_why_without_a_server() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.md");
+        std::fs::write(&path, "# Notes\nsome words\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path).unwrap();
+        app.open_files[0].move_cursor_to(1, 2);
+        for (code, modifiers) in [
+            (KeyCode::F(12), KeyModifiers::NONE),
+            (KeyCode::F(12), KeyModifiers::ALT),
+            (KeyCode::F(12), KeyModifiers::SHIFT),
+            (KeyCode::Char('k'), KeyModifiers::CONTROL),
+        ] {
+            app.status.clear();
+            press(&mut app, code, modifiers);
+            assert_eq!(app.status, "No language server for .md files", "{code:?}");
+        }
+        assert!(app.hover.is_none() && app.peek.is_none() && app.search.is_none());
+        assert_eq!(app.active_file().unwrap().lines, ["# Notes", "some words"]);
+        // The mouse resting on a word says nothing.
+        app.regions.editor_body = Rect::new(30, 2, 60, 20);
+        app.regions.pane_bodies[0] = app.regions.editor_body;
+        app.status.clear();
+        mouse(&mut app, MouseEventKind::Moved, 30 + 1 + 4 + 1, 4);
+        app.tick_at(Instant::now() + Duration::from_secs(1));
+        assert!(app.hover.is_none() && app.status.is_empty());
+        press(&mut app, KeyCode::Left, KeyModifiers::ALT);
+        assert_eq!(app.status, "No earlier place to go back to");
+    }
+
+    #[test]
+    fn f7_builds_the_project_after_showing_the_command_once_and_shift_f5_stops_it() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        let rows = |app: &App| app.confirm.as_ref().unwrap().rows.clone();
+        press(&mut app, KeyCode::F(7), KeyModifiers::NONE);
+        let shown = rows(&app);
+        assert_eq!(shown[0], ("Project", "Cargo".to_owned()));
+        assert_eq!(shown[2], ("From", "Cargo.toml".to_owned()));
+        assert!(shown[3].1.ends_with("&& cargo build"), "{:?}", shown[3]);
+        assert_eq!(
+            app.confirm.as_ref().unwrap().title,
+            "Build the Cargo project"
+        );
+        // Esc runs nothing; Enter types it into the bottom terminal, which takes the focus.
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.confirm.is_none() && !app.show_bottom_terminal);
+        assert_eq!(app.status, "Cancelled");
+        press(&mut app, KeyCode::F(7), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.confirm.is_none() && app.show_bottom_terminal);
+        assert_eq!(app.focus, Focus::BottomTerminal);
+        assert!(app.status.starts_with("Building: cd "), "{}", app.status);
+        // The same command does not ask again; Shift+F5 stops it from the terminal.
+        press(&mut app, KeyCode::F(7), KeyModifiers::NONE);
+        assert!(app.confirm.is_none());
+        press(&mut app, KeyCode::F(5), KeyModifiers::SHIFT);
+        assert_eq!(app.status, "Stopped");
+        press(&mut app, KeyCode::F(5), KeyModifiers::SHIFT);
+        assert_eq!(
+            app.status, "Stopped",
+            "with nothing running the key is the shell's"
+        );
+        app.open_file(directory.path().join("Cargo.toml")).unwrap();
+        app.focus = Focus::Editor;
+        press(&mut app, KeyCode::F(17), KeyModifiers::NONE);
+        assert_eq!(app.status, "Nothing is running");
+        // Clean, Rebuild and Run ask for their own commands.
+        for (code, modifiers, command) in [
+            (KeyCode::F(7), KeyModifiers::SHIFT, "&& cargo clean"),
+            (
+                KeyCode::F(7),
+                KeyModifiers::CONTROL,
+                "&& cargo clean && cargo build",
+            ),
+            (KeyCode::F(5), KeyModifiers::CONTROL, "&& cargo run"),
+        ] {
+            press(&mut app, code, modifiers);
+            assert!(rows(&app)[3].1.ends_with(command), "{:?}", rows(&app));
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        }
+    }
+
+    #[test]
+    fn several_projects_are_chosen_and_a_folder_without_one_says_how() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let mut app = App::new(root.to_path_buf()).unwrap();
+        press(&mut app, KeyCode::F(7), KeyModifiers::NONE);
+        assert_eq!(
+            app.status,
+            "Failed: no project here. Add [tasks.build] to .sozo.toml"
+        );
+        press(&mut app, KeyCode::F(5), KeyModifiers::CONTROL);
+        assert_eq!(
+            app.status,
+            "Failed: no project here. Add [tasks.run] to .sozo.toml"
+        );
+        // Two folders with a project: chosen once for the session.
+        for name in ["api", "web"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join("Cargo.toml"), "").unwrap();
+        }
+        press(&mut app, KeyCode::F(7), KeyModifiers::NONE);
+        let choice = app.project_choice.as_ref().unwrap();
+        let folders = choice
+            .projects
+            .iter()
+            .map(|project| project.folder.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(folders, [root.join("api"), root.join("web")]);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.project_choice.is_none());
+        let confirm = app.confirm.as_ref().unwrap();
+        let name = root.file_name().unwrap().to_string_lossy();
+        assert_eq!(confirm.rows[1], ("Folder", format!("{name}/web")));
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        press(&mut app, KeyCode::F(7), KeyModifiers::NONE);
+        assert!(app.project_choice.is_none(), "the choice is kept");
+        assert!(app.confirm.as_ref().unwrap().rows[1].1.ends_with("/web"));
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+        // A command nobody can know, and a tool that is not there, say so.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("CMakeLists.txt"), "").unwrap();
+        let mut app = App::new(other.path().to_path_buf()).unwrap();
+        press(&mut app, KeyCode::F(5), KeyModifiers::CONTROL);
+        assert_eq!(
+            app.status,
+            "Failed: This CMake project has no run command: add [tasks.run] to .sozo.toml"
+        );
+        std::fs::write(
+            other.path().join(".sozo.toml"),
+            "[tasks.build]\nprogram = \"sozo-no-such-tool\"\n",
+        )
+        .unwrap();
+        press(&mut app, KeyCode::F(7), KeyModifiers::NONE);
+        assert_eq!(
+            app.status,
+            "Failed: sozo-no-such-tool is missing: Help, then Dependencies"
+        );
+        assert!(app.confirm.is_none());
+    }
+
+    #[test]
+    fn dependencies_check_on_opening_and_install_only_after_enter() {
+        use crate::{
+            app::HelpTab,
+            update::deps::{Component, Found},
+        };
+        let mut app = test_app();
+        press(&mut app, KeyCode::F(1), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.help_tab, HelpTab::Dependencies);
+        assert!(
+            app.dependencies.as_ref().unwrap().found.is_none(),
+            "checking"
+        );
+        // Two components of our own: one there, one missing.
+        let words = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        app.dependencies.as_mut().unwrap().components = vec![
+            Component {
+                name: "Cargo",
+                kind: "Build tool",
+                program: "cargo",
+                probe: words(&["cargo", "--version"]),
+                install: None,
+                update: None,
+            },
+            Component {
+                name: "Fake",
+                kind: "Tool",
+                program: "sozo-no-such-tool",
+                probe: words(&["sozo-no-such-tool", "--version"]),
+                install: Some(words(&["echo", "installed"])),
+                update: None,
+            },
+        ];
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
+        let started = Instant::now();
+        while app.dependencies.as_ref().unwrap().found.is_none() {
+            assert!(started.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(20));
+            app.tick_at(Instant::now());
+        }
+        let dependencies = app.dependencies.as_ref().unwrap();
+        let found = dependencies.found.clone().unwrap();
+        assert!(
+            matches!(&found[0], Found::Installed(Some(version)) if version.starts_with("cargo "))
+        );
+        assert_eq!(found[1], Found::Missing);
+        assert_eq!(dependencies.counts(), Some((1, 1)));
+        // No way to update here: said, nothing asked.
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.confirm.is_none());
+        assert_eq!(
+            app.status,
+            "No package manager here can update Cargo: do it by hand"
+        );
+        // The missing one: its command waits for Enter; Esc runs nothing.
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let confirm = app.confirm.as_ref().unwrap();
+        assert_eq!(confirm.title, "Install Fake");
+        assert_eq!(confirm.rows[2], ("Command", "echo installed".to_owned()));
+        assert!(!app.show_bottom_terminal);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.confirm.is_none() && !app.show_bottom_terminal);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.show_bottom_terminal && app.overlay == Overlay::None);
+        assert_eq!(app.status, "Installing Fake: echo installed");
+        // Help opens on the tab again and checks what the installation did.
+        assert!(app.dependencies.as_ref().unwrap().found.is_none());
+        press(&mut app, KeyCode::F(1), KeyModifiers::NONE);
+        assert_eq!(app.help_tab, HelpTab::Dependencies);
+        press(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.help_tab, HelpTab::Shortcuts);
+    }
+
+    #[test]
+    fn the_editor_menu_goes_to_declarations_types_and_implementations_and_ctrl_marks_the_link() {
+        use crate::lsp::{Event, Goal, Place};
+        use crossterm::event::MouseButton;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("main.rs");
+        std::fs::write(&path, "fn main() {\n    let total = compute();\n}\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path.clone()).unwrap();
+        app.regions.editor_body = Rect::new(30, 2, 60, 20);
+        app.regions.pane_bodies[0] = app.regions.editor_body;
+        let text_x = 30 + 1 + 4;
+        // The right-click puts the cursor on «compute»; the menu asks about it.
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Right),
+            text_x + 18,
+            4,
+        );
+        app.choose_entry_action(EntryAction::Code(Goal::Declaration));
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Right),
+            text_x + 18,
+            4,
+        );
+        app.choose_entry_action(EntryAction::Code(Goal::Implementation));
+        assert_eq!(
+            asked(&app),
+            [
+                ("textDocument/declaration".into(), 1, 18),
+                ("textDocument/implementation".into(), 1, 18)
+            ]
+        );
+        let version = app.active_file().unwrap().edits;
+        let place = |row, start, end| Place {
+            path: path.clone(),
+            row,
+            start,
+            end_row: row,
+            end,
+        };
+        let answer = |app: &mut App, goal, places| {
+            app.lsp_event(Event::Places {
+                path: path.clone(),
+                version,
+                goal,
+                places,
+            })
+        };
+        answer(
+            &mut app,
+            Goal::Implementation,
+            vec![place(0, 3, 7), place(1, 8, 13)],
+        );
+        assert_eq!(
+            app.search.as_ref().unwrap().title.as_deref(),
+            Some("Implementations")
+        );
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        app.tick_at(Instant::now() + Duration::from_secs(1));
+        answer(&mut app, Goal::TypeDefinition, vec![place(0, 3, 7)]);
+        let file = app.active_file().unwrap();
+        assert_eq!(
+            (file.cursor_row, file.cursor_column),
+            (0, 3),
+            "one place goes there"
+        );
+        answer(&mut app, Goal::Declaration, Vec::new());
+        assert_eq!(app.status, "No declaration found");
+
+        // Ctrl over a word marks it as a link; without Ctrl, or off it, the mark goes.
+        let moved = |app: &mut App, column, modifiers| {
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                column,
+                row: 4,
+                modifiers,
+            })
+        };
+        moved(&mut app, text_x + 10, KeyModifiers::CONTROL);
+        assert_eq!(app.link, Some((0, 1, 8, 13)));
+        assert_eq!(app.status, "Ctrl+click: go to the definition");
+        moved(&mut app, text_x + 2, KeyModifiers::CONTROL);
+        assert_eq!(app.link, None, "a space is no link");
+        moved(&mut app, text_x + 10, KeyModifiers::NONE);
+        assert_eq!(app.link, None);
     }
 
     #[test]
@@ -2443,14 +3298,14 @@ mod tests {
         let path = app.root.join("Cargo.toml");
         app.open_file(path.clone()).unwrap();
         app.keys.set(Action::CloseTab, key("Alt+W"));
-        app.keys.set(Action::Breakpoint, key("F7"));
+        app.keys.set(Action::Breakpoint, key("F8"));
         press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
         assert!(
             app.breakpoints
                 .get(&path)
                 .is_none_or(|rows| rows.is_empty())
         );
-        press(&mut app, KeyCode::F(7), KeyModifiers::NONE);
+        press(&mut app, KeyCode::F(8), KeyModifiers::NONE);
         assert!(app.breakpoints[&path].contains(&0));
         press(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
         assert_eq!(app.open_files.len(), 1);

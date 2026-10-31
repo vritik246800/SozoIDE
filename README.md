@@ -21,7 +21,7 @@
 - **One binary, three systems.** `sozo` runs the same on Windows, macOS and Linux, on x86_64 and ARM64, and installs with a native installer.
 - **Fast while you type.** Highlighting is redone only from the line you changed (at most a few tens of milliseconds a key on long files), a frame draws in under a millisecond, and language servers, Git, builds and videos run in their own processes or threads: the editor never waits for them.
 - **Your terminal's look.** SozoIDE has no colours of its own: it draws with the 16 ANSI colours of your terminal theme and shows every shortcut the way your system types it.
-- **Nothing to set up.** The tools it needs (`git`, `curl`, `ffmpeg` and the language servers) are installed in the background the first time it opens.
+- **Nothing to hunt for.** Help's Dependencies tab lists every tool it and your projects use (`git`, `ffmpeg`, Rust, Node.js, Python, Java, Go, Docker, CMake, the language servers and debuggers) with its version, and installs or updates one with your package manager when you press `Enter`. Nothing is installed without asking.
 
 ## Features
 
@@ -29,6 +29,8 @@
 
 - Every file and folder with an icon for its type, in your terminal's colours.
 - Right-click to create a file (its icon follows the extension you type) or a folder, to rename, to delete (it asks first), and to cut, copy and paste files and folders; `Ctrl+X`, `Ctrl+C` and `Ctrl+V` do the same on the selected entry. A copy in the same folder becomes `name copy`, `name copy 2`…; a move never overwrites anything.
+- **Properties** in the same menu: kind, location, size, what a folder contains, when it was created, modified and last opened, and its permissions. A big folder says *Calculating…* while it is counted in the background, then shows its size in KB, MB, GB or TB.
+- Git marks, as in VS Code: the Source Control letter (`M`, `A`, `U`, `D`, `R`…) at the right of every changed file, its name in the same colour, and `*` on a folder with changes inside.
 - The tree follows other programs: what they create, rename or delete shows up within a second.
 - Long names scroll sideways with `Shift` and the mouse wheel (or a sideways wheel), with a bar along the bottom.
 - Each folder opens as you left it, like VS Code: the folders you had open, your tabs with their cursors, the active tab and the panels.
@@ -44,7 +46,7 @@
 
 ### IntelliSense
 
-Problems underlined in red (errors) or yellow (warnings), with the message of the cursor's line in the footer; suggestions with `Ctrl+Space`, and by themselves after `.`, `::`, `->` and the second letter of a word; `F12` goes to the definition. They come from the language server of each language, started when you open its first file:
+Problems underlined in red (errors) or yellow (warnings), with the message of the cursor's line in the footer; suggestions with `Ctrl+Space`, and by themselves after `.`, `::`, `->` and the second letter of a word. Rest the mouse on a word, or press `Ctrl+K`, to read its type and documentation; `F12` or `Ctrl`+click goes to the definition (a list when there are several), `Alt+F12` peeks at it in a box without leaving the tab, `Shift+F12` lists every reference, and `Alt+Left` goes back. They come from the language server of each language, started when you open its first file; a file without one says so and edits as before:
 
 | Language | Server |
 | --- | --- |
@@ -54,10 +56,36 @@ Problems underlined in red (errors) or yellow (warnings), with the message of th
 | Java | jdtls |
 | TypeScript, JavaScript | typescript-language-server |
 | Go | gopls |
+| Shell (sh, bash, zsh) | bash-language-server |
+| YAML | yaml-language-server |
+| PHP | intelephense |
+| HTML, CSS, SCSS, Less, JSON | vscode-langservers-extracted |
+| Lua | lua-language-server |
 
 ### Run
 
 `Ctrl+R` saves everything, opens the bottom terminal and runs the file there with the tool of its language; a Cargo project or a Go module runs whole. The command stays in the shell's history, so you can run it again.
+
+`F7` builds the project of the open folder, `Shift+F7` cleans it, `Ctrl+F7` cleans and builds it and `Ctrl+F5` runs it; `Shift+F5` stops what it started. The project is found by its manifest, and only commands it really has are used:
+
+| Project | Build / Clean / Run |
+| --- | --- |
+| Cargo, Go | `cargo build` / `clean` / `run`; `go build ./...` / `go clean` / `go run .` |
+| Node.js (`package.json`) | the `build`, `clean` and `dev` or `start` scripts, with npm, pnpm, yarn or bun by the lockfile |
+| CMake, Make | `cmake -S . -B build && cmake --build build`, `--target clean`; `make`, `make clean`, `make run` when there are such targets |
+| Maven, Gradle | `mvn package` / `mvn clean`; `./gradlew build` / `clean` / `run` (Gradle's `run` with the application plugin) |
+| .NET, Swift, Flutter, Dart | `dotnet`, `swift`, `flutter`, `dart` |
+| Django, Laravel, Rails | `manage.py runserver`, `artisan serve`, `bin/rails server` |
+| Docker | `docker compose build` / `down` / `up --build`; a lone `Dockerfile` builds and runs its image |
+
+The first time, a dialog shows the project, its folder, the file that says so and the command; `Enter` runs it in the bottom terminal. A folder with several projects (a frontend and a backend, say) asks which one. For anything else, put your own commands in `.sozo.toml` at the root of the project:
+
+```toml
+[tasks.run]
+program = "python3"
+args = ["serve.py", "--port", "8000"]
+cwd = "backend"   # optional, from the project's root
+```
 
 | Language | Command |
 | --- | --- |
@@ -129,7 +157,7 @@ Each release includes `SHA256SUMS.txt`. Check a download with `shasum -a 256 -c 
 ### Requirements
 
 - A [Nerd Font](https://www.nerdfonts.com/) in your terminal for the icons.
-- SozoIDE runs `git` (Source Control), `curl` (updates), `ffmpeg` with `ffprobe` and `ffplay` (videos and their sound) and the language servers instead of linking them. After a new installation and after each update it installs the ones that are missing, in the background:
+- SozoIDE runs `git` (Source Control), `curl` (updates), `ffmpeg` with `ffprobe` and `ffplay` (videos and their sound) and the language servers instead of linking them. After a new installation and after each update the footer says what is missing; Help's Dependencies tab (`F1`, then `Right`) shows each one and installs it, after `Enter`, in the bottom terminal:
 
 | Tool | macOS | Windows | Linux |
 | --- | --- | --- | --- |
@@ -140,8 +168,9 @@ Each release includes `SHA256SUMS.txt`. Check a download with `shasum -a 256 -c 
 | gopls | `go install` | `go install` | `go install` |
 | jdtls | Homebrew | — | Homebrew |
 | Debuggers | lldb-dap with Xcode; debugpy with `pip`; Delve with `go install` or Homebrew | lldb-dap with LLVM; debugpy with `pip`; Delve with `go install` | GDB with `apt-get` or `dnf`; debugpy with `pip`; Delve with `go install` |
+| Rust, Node.js, Python, Java, Go, Docker, CMake | Homebrew | `winget` | `apt-get` or `dnf` |
 
-On Linux the background install only works when `sudo` needs no password; otherwise the footer tells you what to install. Nothing is installed in debug builds or tests.
+On Linux the command starts with `sudo`, which asks for your password in the terminal.
 
 ## Usage
 
@@ -168,11 +197,12 @@ These are the keys SozoIDE comes with; change them in Help.
 | `Ctrl+P` | Search the open file |
 | `Ctrl+Shift+P` | Search the whole folder |
 | `Up` / `Down`, `◂` / `▸` (search) | Previous / next result; `Enter` opens it selected |
-| Right-click in the Explorer | New file, new folder, cut, copy, paste, rename, delete (after a confirmation) |
+| Right-click in the Explorer | New file, new folder, cut, copy, paste, rename, delete (after a confirmation), properties |
 | `Ctrl+X` / `Ctrl+C` / `Ctrl+V` in the Explorer | Cut / copy / paste the selected file or folder (paste goes into the selected folder) |
 | `Ctrl+W` | Close the active tab |
 | `Ctrl+Enter` or `F5` | Run the SQL query |
-| `F1` | Help with every command |
+| `F1` | Help with every command; `Left` / `Right` switch to the Dependencies tab and back |
+| `Up`/`Down`, `Enter`, `R` (Dependencies) | Choose a tool; show its install or update command, then `Enter` runs it; check again |
 | Click a key, or `Tab` and `Enter` (Help) | Change that shortcut: press the new keys; `Esc` gives up, `R` then `Enter` resets them all |
 | `F2` | About, with the version |
 | `Ctrl+Q` | Quit and restore the terminal |
@@ -195,8 +225,14 @@ These are the keys SozoIDE comes with; change them in Help.
 | `←` / `→`, `Shift` + `←` / `→` (video) | Back / forward 5 seconds, 30 seconds |
 | `-` / `+` or wheel, `M`, `[` / `]` (video) | Volume down / up, mute, slower / faster |
 | `F`, `Esc` (video) | Full screen; leave it, then close the video |
-| `Ctrl+Space` / `F12` | Suggestions from the language server (they also open after `.`, `::`, `->` and the second letter of a word) / go to the definition |
-| `F9` / `F5` / `F10` / `F11` / `Shift+F5` | Breakpoint / build and debug, or continue / step over / step into / stop |
+| `Ctrl+Space` / `F12` | Suggestions from the language server (they also open after `.`, `::`, `->` and the second letter of a word) / go to the definition (a list when there are several) |
+| `Alt+F12` / `Shift+F12` | Peek at the definition in a box (`Up`/`Down` scroll, `Enter` goes there, `Esc` closes) / list every reference |
+| `Ctrl+K`, or rest the mouse on a word | Type and documentation of the symbol (`Up`/`Down` scroll a long one, `Esc` closes) |
+| `Ctrl`+click / `Alt+Left` | Go to the definition / back to where you were before |
+| `F9` / `F5` / `F10` / `F11` / `Shift+F5` | Breakpoint / build and debug, or continue / step over / step into / stop debugging, or what `F7` or `Ctrl+F5` started |
+| `F7` / `Shift+F7` / `Ctrl+F7` / `Ctrl+F5` | Build / clean / clean and build / run the project, in the bottom terminal |
+| Right-click (editor) | Cut, copy, paste; go to the definition, declaration, type definition or implementations; peek; find references |
+| `Ctrl` over a word | Underlines it: `Ctrl`+click goes to its definition |
 | `Ctrl+R` (editor or Explorer) | Save, open the bottom terminal and run the file there: a Cargo project or Go module runs whole; C, C++, Rust, Python, JavaScript, TypeScript, Java, Kotlin, Go, Ruby, PHP, Lua, Perl, R, Swift, Dart, Zig, Haskell, Elixir, Julia and shell scripts with their own compiler or interpreter |
 | `Page Down` / `→` / mouse wheel, `Page Up` / `←`, `Home` / `End` (PDF) | Next page, previous page, first and last page; on a page of text the arrows move the cursor, `Shift` selects, `Ctrl+C` copies and the wheel scrolls on to the next page |
 | Click a branch (Source Control) | Switch to it, after a confirmation |
@@ -261,16 +297,16 @@ npm run dev
 
 ```text
 src/          the application:
-  app/        state, keys and your own shortcuts, mouse, Explorer, IntelliSense list, each folder's session
+  app/        state, keys and your own shortcuts, mouse, Explorer, IntelliSense list, project tasks and Dependencies, each folder's session
   editor/     text, highlighting, Markdown, Mermaid, PDF, search
   lsp/        language server client (JSON-RPC over stdio)
-  run/        the command Ctrl+R runs
+  run/        the command Ctrl+R runs, and the project F7, Shift+F7, Ctrl+F7 and Ctrl+F5 build, clean and run
   debug/      the debugger client (Debug Adapter Protocol)
   media/      pictures, GIFs, videos and 3D models in half blocks
   terminal/   the PTY terminals and their tabs
   git/        Source Control
   database/   SQLite, PostgreSQL and MySQL
-  update/     updates and the tools installed in the background
+  update/     updates and Help's Dependencies tab
   ui/         drawing
   animation/  transitions
 tests/        CLI, end-to-end and interaction tests in a real PTY

@@ -517,6 +517,60 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn the_explorer_gets_each_change_and_the_strongest_one_of_every_folder() {
+        let (directory, repo) = init_repo();
+        let root = directory.path();
+        write(root, "src/lib.rs", "one\n");
+        write(root, "src/app/mod.rs", "two\n");
+        write(root, "gone.txt", "three\n");
+        write(root, "staged.txt", "four\n");
+        commit_all(&repo, "initial");
+        write(root, "src/app/mod.rs", "changed\n");
+        write(root, "docs/new/notes.md", "new\n");
+        fs::remove_file(root.join("gone.txt")).unwrap();
+        // Staged, then changed again: the working tree's change shows.
+        write(root, "staged.txt", "staged\n");
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("staged.txt")).unwrap();
+        write(root, "added.txt", "added\n");
+        index.add_path(Path::new("added.txt")).unwrap();
+        index.write().unwrap();
+        write(root, "staged.txt", "staged and changed\n");
+
+        let changes = explorer_changes(root);
+        let mark = |path: &str| changes.get(Path::new(path)).copied();
+        let unstaged = |status| Some((status, ChangeArea::Unstaged));
+        assert_eq!(mark("src/app/mod.rs"), unstaged(FileStatus::Modified));
+        assert_eq!(mark("gone.txt"), unstaged(FileStatus::Deleted));
+        assert_eq!(mark("staged.txt"), unstaged(FileStatus::Modified));
+        assert_eq!(
+            mark("added.txt"),
+            Some((FileStatus::Added, ChangeArea::Staged))
+        );
+        let untracked = Some((FileStatus::Added, ChangeArea::Untracked));
+        assert_eq!(mark("docs/new/notes.md"), untracked);
+        // Folders: every one above a change, with its strongest change.
+        assert_eq!(mark("src"), unstaged(FileStatus::Modified));
+        assert_eq!(mark("src/app"), unstaged(FileStatus::Modified));
+        assert_eq!(mark("docs"), untracked);
+        assert_eq!(mark("docs/new"), untracked);
+        assert_eq!(mark("src/lib.rs"), None);
+        assert_eq!(mark(""), None);
+
+        // A project in a folder of the repository sees only its own changes, by its paths.
+        let inside = explorer_changes(&root.join("src"));
+        assert_eq!(
+            inside.get(Path::new("app/mod.rs")).copied(),
+            unstaged(FileStatus::Modified)
+        );
+        assert_eq!(inside.len(), 2);
+        // Outside a repository there is nothing to mark.
+        let plain = TempDir::new().unwrap();
+        write(plain.path(), "file.txt", "text\n");
+        assert!(explorer_changes(plain.path()).is_empty());
+    }
+
     fn checkout(repo: &Repository, branch: &str) {
         let reference = format!("refs/heads/{branch}");
         let commit = repo
