@@ -10,6 +10,22 @@ pub struct Notes {
 
 pub const NOTES: &[Notes] = &[
     Notes {
+        version: "0.7.9",
+        new: &[
+            "Rest the mouse on a word, or press Ctrl+K, to read its type and documentation from the language server",
+            "F12 or Ctrl+click goes to the definition (a list when there are several); Alt+F12 peeks at it in a box without leaving the tab; Shift+F12 lists every reference; Alt+Left goes back",
+            "Right-click in the editor: go to the declaration, the type definition or the implementations; Ctrl over a word underlines it",
+            "Language servers for shell, YAML, PHP, HTML, CSS, JSON and Lua",
+            "F7 builds the project, Shift+F7 cleans it, Ctrl+F7 rebuilds it and Ctrl+F5 runs it, in the bottom terminal: Cargo, Go, npm, pnpm, yarn and bun scripts, CMake, Make, Maven, Gradle, .NET, Swift, Flutter, Django, Laravel, Rails, Docker and your own commands in .sozo.toml; Shift+F5 stops it",
+            "Help has a Dependencies tab: every tool SozoIDE and your projects use, with its version, and Enter installs or updates it with your package manager",
+            "Right-click a file or folder for its Properties: size (a folder counted in the background), dates and permissions",
+            "The Explorer shows what Git changed: the letter of each changed file and a mark on the folders above it",
+        ],
+        fixed: &[
+            "Nothing is installed without asking: a new version says what is missing instead of installing it",
+        ],
+    },
+    Notes {
         version: "0.7.3",
         new: &[
             "The bottom terminal opens up to three shells, each in a tab: + adds one, x closes one; the right terminal has two tabs; Ctrl+PageDown and Ctrl+PageUp switch them",
