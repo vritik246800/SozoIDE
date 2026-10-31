@@ -2813,12 +2813,16 @@ mod tests {
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(app.project_choice.is_none());
         let confirm = app.confirm.as_ref().unwrap();
-        let name = root.file_name().unwrap().to_string_lossy();
-        assert_eq!(confirm.rows[1], ("Folder", format!("{name}/web")));
+        // Joined as the app joins it: `\\` between the parts on Windows.
+        let web = std::path::Path::new(root.file_name().unwrap()).join("web");
+        assert_eq!(confirm.rows[1], ("Folder", web.display().to_string()));
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         press(&mut app, KeyCode::F(7), KeyModifiers::NONE);
         assert!(app.project_choice.is_none(), "the choice is kept");
-        assert!(app.confirm.as_ref().unwrap().rows[1].1.ends_with("/web"));
+        assert_eq!(
+            app.confirm.as_ref().unwrap().rows[1].1,
+            web.display().to_string()
+        );
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
 
         // A command nobody can know, and a tool that is not there, say so.
