@@ -19,8 +19,8 @@ pub(crate) use components::{
 pub(crate) use components::{mark_columns, select_columns, skip_columns};
 use components::{render_handle, sweep};
 use editor::{
-    render_editor, render_entry_menu, render_explorer, render_name_prompt, render_tabs,
-    render_terminal,
+    render_editor, render_entry_menu, render_explorer, render_name_prompt, render_properties,
+    render_tabs, render_terminal,
 };
 use overlays::{
     render_about, render_help, render_search, render_splash, render_tutorial, render_update,
@@ -176,6 +176,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     render_entry_menu(frame, app, area);
     render_name_prompt(frame, app, area);
+    render_properties(frame, app, area);
     match app.overlay {
         Overlay::Help => render_help(frame, app, area),
         Overlay::About => render_about(frame, app, area),
@@ -187,6 +188,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         Overlay::None => {}
     }
+    // A command waiting for Enter and the project choice go over Help too (F32, F33).
+    overlays::render_choice(frame, app, area);
+    overlays::render_confirm(frame, app, area);
     if app.splash_visible {
         render_splash(frame, area, &app.motion);
     }
@@ -1290,7 +1294,8 @@ mod tests {
             "Click a commit",
             "Remove the builder row",
             "Undo the last edit",
-            "New, rename, delete",
+            "New, rename, delete,",
+            "properties (Explorer)",
             "Turn the model",
             "Run the file or its project",
             "Suggestions (language server)",
@@ -1555,6 +1560,300 @@ mod tests {
     }
 
     #[test]
+    fn hover_peek_and_references_are_drawn_by_the_symbol() {
+        use crate::lsp::{Event, Goal, Place};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let directory = tempfile::tempdir().unwrap();
+        let main = directory.path().join("main.rs");
+        let lib = directory.path().join("lib.rs");
+        std::fs::write(&main, "fn main() {\n    let total = compute();\n}\n").unwrap();
+        std::fs::write(&lib, "pub fn compute() -> u32 {\n    1\n}\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(main.clone()).unwrap();
+        settle(&mut app);
+        app.open_files[0].move_cursor_to(1, 9);
+        let press = |app: &mut App, code, modifiers| {
+            app.handle_key(KeyEvent::new(code, modifiers));
+        };
+        let version = app.active_file().unwrap().edits;
+        let hover = |app: &mut App, text: &str| {
+            press(app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+            app.lsp_event(Event::Hover {
+                path: main.clone(),
+                version,
+                row: 1,
+                column: 8,
+                text: text.into(),
+            });
+        };
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        hover(
+            &mut app,
+            "```rust\nlet total: u32\n```\n\nThe **sum** of the order.",
+        );
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let find = |text: &str| {
+            (0..24).find_map(|y| {
+                let line = row(&buffer, y);
+                line.find(text)
+                    .map(|x| (line[..x].chars().count() as u16, y))
+            })
+        };
+        let (_, symbol) = find("let total = compute();").unwrap();
+        let (_, signature) = find("let total: u32").unwrap();
+        let (x, sum) = find("The sum of the order.").unwrap();
+        assert!(
+            signature > symbol && sum > signature,
+            "under the symbol's row"
+        );
+        assert!(
+            buffer[(x + 4, sum)]
+                .modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        let text = buffer_text(&terminal);
+        assert!(
+            !text.contains("**") && !text.contains("```"),
+            "drawn, not the marks"
+        );
+        assert_eq!(app.regions.hover.y, symbol + 1);
+
+        // A long one scrolls with the arrows and says so on its border.
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        let long = (1..=30).map(|n| format!("line {n}")).collect::<Vec<_>>();
+        hover(&mut app, &long.join("\n\n"));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("line 1 ") && text.contains("↑/↓"));
+        assert!(app.hover.as_ref().unwrap().overflow > 0);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(!buffer_text(&terminal).contains("line 1 "));
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+        // Peek: the file and line in the title, numbered and highlighted lines.
+        press(&mut app, KeyCode::F(12), KeyModifiers::ALT);
+        let place = |path: &std::path::PathBuf, row, start, end| Place {
+            path: path.clone(),
+            row,
+            start,
+            end_row: row,
+            end,
+        };
+        app.lsp_event(Event::Places {
+            path: main.clone(),
+            version,
+            goal: Goal::Peek,
+            places: vec![place(&lib, 0, 7, 14)],
+        });
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        for part in [
+            "Peek ─ lib.rs:1",
+            "1 │ pub fn compute() -> u32 {",
+            "Enter: go",
+        ] {
+            assert!(text.contains(part), "{part}");
+        }
+        let buffer = terminal.backend().buffer();
+        let y = (0..24)
+            .find(|y| row(buffer, *y).contains("1 │ pub fn"))
+            .unwrap();
+        let x = row(buffer, y).find("1 │ pub fn").unwrap();
+        let x = row(buffer, y)[..x].chars().count() as u16;
+        assert_eq!(buffer[(x, y)].fg, ACTIVE, "the definition's row");
+        assert!(y > app.regions.editor.y + 2, "under the cursor's row");
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+        // References: the workspace list with its own title and the symbol.
+        app.lsp_event(Event::Places {
+            path: main.clone(),
+            version,
+            goal: Goal::References,
+            places: vec![place(&main, 1, 16, 23), place(&lib, 0, 7, 14)],
+        });
+        settle(&mut app);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        for part in [
+            " References ",
+            "> compute",
+            "2 results in 2 files",
+            "pub fn compute() -> u32 {",
+            "let total = compute();",
+        ] {
+            assert!(text.contains(part), "{part}");
+        }
+        assert!(!text.contains("Find in workspace") && !text.contains("compute█"));
+
+        // Ctrl over a word underlines it as a link.
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        settle(&mut app);
+        app.link = Some((0, 1, 8, 13));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let y = (0..24)
+            .find(|y| row(buffer, *y).contains("let total = compute();"))
+            .unwrap();
+        let x = row(buffer, y).find("total").unwrap();
+        let x = row(buffer, y)[..x].chars().count() as u16;
+        let underlined = |x| {
+            buffer[(x, y)]
+                .modifier
+                .contains(ratatui::style::Modifier::UNDERLINED)
+        };
+        assert!((x..x + 5).all(underlined) && !underlined(x + 5) && !underlined(x - 1));
+    }
+
+    #[test]
+    fn help_shows_the_dependencies_tab_with_its_table_and_summary() {
+        use crate::{
+            app::{Dependencies, HelpTab},
+            update::deps::{Component, Found},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        let component = |name, kind, install: Option<&str>| Component {
+            name,
+            kind,
+            program: name,
+            probe: vec![name.to_owned()],
+            install: install.map(|command| vec![command.to_owned()]),
+            update: install.map(|command| vec![command.to_owned()]),
+        };
+        let components = vec![
+            component("FFmpeg", "Tool", Some("brew")),
+            component("Rust", "Compiler", None),
+        ];
+        app.dependencies = Some(Dependencies::checked(components.clone(), None));
+        app.help_tab = HelpTab::Dependencies;
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::F(1),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let now = std::time::Instant::now();
+        app.tick_at(now);
+        app.tick_at(now + std::time::Duration::from_millis(400));
+        let mut terminal = Terminal::new(TestBackend::new(130, 40)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("Checking...") && text.contains(" Shortcuts "),
+            "{text}"
+        );
+        assert!(!text.contains("Install "), "no action before the check");
+        app.dependencies = Some(Dependencies::checked(
+            components,
+            Some(vec![
+                Found::Missing,
+                Found::Installed(Some("rustc 1.97.1".into())),
+            ]),
+        ));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        for part in [
+            " Dependencies ",
+            "1 missing",
+            "1 installed",
+            "Component",
+            "Installed",
+            "Action",
+            "FFmpeg",
+            "Missing",
+            "Install",
+            "rustc 1.97.1",
+            "Enter: install or update",
+        ] {
+            assert!(text.contains(part), "{part}");
+        }
+        assert!(!text.contains("Reset shortcuts"), "the other tab's row");
+        assert_eq!(app.regions.dependency_rows.len(), 2);
+        assert_eq!(app.regions.help_tabs.len(), 2);
+        let buffer = terminal.backend().buffer();
+        let (_, area) = app.regions.dependency_rows[0];
+        assert!(
+            buffer[(area.x, area.y)]
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED),
+            "the chosen row"
+        );
+        let y = app.regions.dependency_rows[1].1.y;
+        let x = row(buffer, y).find("Installed").unwrap();
+        let x = row(buffer, y)[..x].chars().count() as u16;
+        assert_eq!(buffer[(x, y)].fg, ratatui::style::Color::Green);
+        // A click on the tab goes back to the shortcuts.
+        let (_, shortcuts) = app.regions.help_tabs[0];
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: shortcuts.x + 1,
+            row: shortcuts.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert_eq!(app.help_tab, HelpTab::Shortcuts);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("Reset shortcuts"));
+    }
+
+    #[test]
+    fn the_command_dialog_and_the_project_choice_are_drawn() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        for name in ["api", "web"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join("Cargo.toml"), "").unwrap();
+        }
+        let mut app = App::new(root.to_path_buf()).unwrap();
+        settle(&mut app);
+        app.handle_key(KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(150, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        for part in [
+            " Choose the project: Build ",
+            "Cargo",
+            "api",
+            "web",
+            "Esc: cancel",
+        ] {
+            assert!(text.contains(part), "{part}");
+        }
+        assert_eq!(app.regions.choice_rows.len(), 2);
+        // A click on the second chooses it; the command shows before it runs.
+        let (_, web) = app.regions.choice_rows[1];
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: web.x + 2,
+            row: web.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        for part in [
+            " Build the Cargo project ",
+            "Project",
+            "Folder",
+            "web",
+            "From",
+            "Cargo.toml",
+            "cargo build",
+            "Enter: run it in the bottom terminal",
+        ] {
+            assert!(text.contains(part), "{part}");
+        }
+        assert!(!text.contains("Choose the project"));
+        let buffer = terminal.backend().buffer();
+        let y = (0..30)
+            .find(|y| row(buffer, *y).contains("cargo build"))
+            .unwrap();
+        let x = row(buffer, y).find("cargo build").unwrap();
+        let x = row(buffer, y)[..x].chars().count() as u16;
+        assert_eq!(buffer[(x, y)].fg, ACTIVE, "the command stands out");
+    }
+
+    #[test]
     fn the_margin_marks_breakpoints_and_the_paused_line_and_the_panel_shows_the_session() {
         use crate::debug::{Frame, State, fake};
         let directory = tempfile::tempdir().unwrap();
@@ -1626,8 +1925,25 @@ mod tests {
             .iter()
             .map(|(action, area)| (action.label(), area.x, area.y))
             .collect::<Vec<_>>();
-        assert_eq!(items, [("Paste", column + 1, row + 1)]);
+        assert_eq!(items[0], ("Paste", column + 1, row + 1));
+        let labels = items.iter().map(|item| item.0).collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "Paste",
+                "Go to Definition",
+                "Peek Definition",
+                "Go to Declaration",
+                "Go to Type Definition",
+                "Go to Implementations",
+                "Find References"
+            ]
+        );
         assert!(buffer_text(&terminal).contains(" Paste"));
+        assert!(
+            buffer_text(&terminal).contains(" Go to Type Definition "),
+            "whole"
+        );
     }
 
     #[test]
@@ -1662,7 +1978,8 @@ mod tests {
                 ("Cut", 4),
                 ("Copy", 5),
                 ("Rename", 6),
-                ("Delete", 7)
+                ("Delete", 7),
+                ("Properties", 8)
             ]
         );
         assert!(buffer_text(&terminal).contains(" New Folder"));
@@ -1691,6 +2008,80 @@ mod tests {
         ] {
             assert!(text.contains(part), "{part}\n{text}");
         }
+    }
+
+    #[test]
+    fn the_properties_dialog_says_calculating_then_shows_the_size() {
+        use crate::app::EntryAction;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::create_dir_all(root.join("docs/sub")).unwrap();
+        std::fs::write(root.join("docs/a.txt"), "abc").unwrap();
+        std::fs::write(root.join("docs/sub/b.txt"), "hello").unwrap();
+        std::fs::write(root.join("notes.txt"), [b'x'; 1536]).unwrap();
+        let mut app = App::new(root.to_path_buf()).unwrap();
+        app.show_explorer = true;
+        settle(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let docs = app
+            .entries
+            .iter()
+            .position(|entry| entry.path == root.join("docs"))
+            .unwrap();
+        app.open_entry_menu(Some(docs), (2, 2));
+        app.choose_entry_action(EntryAction::Properties);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        let project = root.file_name().unwrap().to_string_lossy().into_owned();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        for part in [
+            "╭ Properties ",
+            "docs",
+            "Kind         Folder",
+            &format!("Location     {project}"),
+            "Size         ",
+            "Contains     ",
+            &format!("Modified     {today}"),
+            "Permissions  ",
+            "Esc: close",
+        ] {
+            assert!(text.contains(part), "{part}\n{text}");
+        }
+        // Size and Contains wait for the count with the spinner.
+        assert_eq!(text.matches("Calculating\u{2026}").count(), 2, "{text}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.properties.as_ref().unwrap().count.is_none() {
+            assert!(std::time::Instant::now() < deadline, "the count never came");
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(!text.contains("Calculating"), "{text}");
+        assert!(text.contains("Size         8 B"), "{text}");
+        assert!(text.contains("Contains     2 files, 1 folder"), "{text}");
+        // The dialog sits in the middle, where a click inside keeps it.
+        let area = app.regions.properties;
+        assert!(area.width > 0 && area.x > 0 && area.y > 0);
+
+        // A file: its size at once, in KB with the bytes, and nothing to contain.
+        app.properties = None;
+        let notes = app
+            .entries
+            .iter()
+            .position(|entry| entry.path == root.join("notes.txt"))
+            .unwrap();
+        app.open_entry_menu(Some(notes), (2, 2));
+        app.choose_entry_action(EntryAction::Properties);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Kind         File"), "{text}");
+        assert!(text.contains("Size         1.5 KB (1,536 bytes)"), "{text}");
+        assert!(!text.contains("Contains") && !text.contains("Calculating"));
+        app.properties = None;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(!buffer_text(&terminal).contains("Properties"));
+        assert_eq!(app.regions.properties, Rect::default());
     }
 
     #[test]
@@ -2224,6 +2615,66 @@ mod tests {
         let now = std::time::Instant::now();
         app.tick_at(now);
         app.tick_at(now + std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn the_explorer_marks_changed_files_and_the_folders_above_them() {
+        use crate::git::{ChangeArea, FileStatus};
+        use ratatui::style::Color;
+        let directory = tempfile::tempdir().unwrap();
+        let long = "a_name_much_longer_than_the_explorer_is_wide.txt";
+        std::fs::create_dir(directory.path().join("src")).unwrap();
+        for name in ["src/lib.rs", "clean.txt", long] {
+            std::fs::write(directory.path().join(name), "").unwrap();
+        }
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.activate_selected();
+        let modified = (FileStatus::Modified, ChangeArea::Unstaged);
+        app.git_changes = [
+            ("src", modified),
+            ("src/lib.rs", modified),
+            (long, (FileStatus::Added, ChangeArea::Untracked)),
+        ]
+        .into_iter()
+        .map(|(path, mark)| (PathBuf::from(path), mark))
+        .collect();
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let explorer = app.regions.explorer;
+        let at = |name: &str| {
+            (explorer.y..explorer.bottom())
+                .find(|y| row(buffer, *y)[..].contains(name))
+                .unwrap()
+        };
+        let mark = |name: &str| {
+            let cell = &buffer[(explorer.right() - 2, at(name))];
+            (cell.symbol().to_string(), cell.fg)
+        };
+        // The folder says something below it changed; once open, its file says what.
+        assert_eq!(mark("src"), ("*".into(), Color::Yellow));
+        assert_eq!(mark("lib.rs"), ("M".into(), Color::Yellow));
+        assert_eq!(mark("clean.txt").0, " ");
+        // A changed file's name is in the colour of its change.
+        let lib = at("lib.rs");
+        let name = (explorer.x..explorer.right())
+            .find(|x| buffer[(*x, lib)].symbol() == "l")
+            .unwrap();
+        assert_eq!(buffer[(name, lib)].fg, Color::Yellow);
+        // A name too long for the panel gives way to its mark at the right edge.
+        assert_eq!(mark("a_name_much"), ("U".into(), Color::Green));
+        assert!(!buffer_text(&terminal).contains(long));
+        // Scrolled sideways to the end, the end of the name stops clear of its mark.
+        app.explorer_scroll_x = usize::MAX;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let y = (explorer.y..explorer.bottom())
+            .find(|y| row(buffer, *y).contains("wide.txt"))
+            .unwrap();
+        let text = row(buffer, y);
+        let end = text[..text.find("wide.txt").unwrap()].chars().count() + "wide.txt".len();
+        assert!(end <= usize::from(explorer.right() - 3), "{text}");
+        assert_eq!(buffer[(explorer.right() - 2, y)].symbol(), "U");
     }
 
     fn row(buffer: &ratatui::buffer::Buffer, y: u16) -> String {

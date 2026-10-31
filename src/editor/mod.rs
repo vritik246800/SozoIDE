@@ -6,7 +6,8 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use markdown::{MarkdownDocument, Row, is_markdown_path, visual_column_to_char};
+pub use markdown::{MarkdownDocument, Row};
+use markdown::{is_markdown_path, visual_column_to_char};
 use ratatui::{
     style::Color,
     text::{Line, Span},

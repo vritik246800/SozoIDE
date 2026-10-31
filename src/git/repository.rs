@@ -1,4 +1,7 @@
-use std::path::{Component, Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
@@ -99,6 +102,65 @@ pub(super) fn read_status(repo: &Repository) -> Result<WorkingTreeStatus> {
     result.unstaged.sort_by(by_path);
     result.untracked.sort_by(by_path);
     Ok(result)
+}
+
+/// What Git says changed under the project folder, by path inside it, for the Explorer (F01).
+pub type ExplorerChanges = HashMap<PathBuf, (FileStatus, ChangeArea)>;
+
+/// Each changed file under `root` with its change — the working tree's over the index's, as
+/// VS Code shows them — and each folder above a change with the strongest change below it.
+/// Nothing outside a repository.
+pub fn explorer_changes(root: &Path) -> ExplorerChanges {
+    let read = || -> Result<_> {
+        let repo = Repository::discover(root)?;
+        let workdir = repo
+            .workdir()
+            .context("A bare repository")?
+            .canonicalize()?;
+        Ok((read_status(&repo)?, workdir, root.canonicalize()?))
+    };
+    let Ok((status, workdir, root)) = read() else {
+        return HashMap::new();
+    };
+    // A conflict shows first on a folder, then deletions, edits and, last, new files.
+    let rank = |(status, area): (FileStatus, ChangeArea)| match (status, area) {
+        (FileStatus::Conflict, _) => 0,
+        (FileStatus::Deleted, _) => 1,
+        (FileStatus::Modified, _) => 2,
+        (FileStatus::Renamed, _) => 3,
+        (FileStatus::TypeChanged, _) => 4,
+        (FileStatus::Added, ChangeArea::Untracked) => 6,
+        (FileStatus::Added, _) => 5,
+        (FileStatus::Unknown, _) => 7,
+    };
+    let mut changes = HashMap::new();
+    // The index first: the working tree's change of the same file takes its place.
+    for change in status
+        .staged
+        .iter()
+        .chain(&status.unstaged)
+        .chain(&status.untracked)
+    {
+        let Ok(inside) = workdir
+            .join(&change.path)
+            .strip_prefix(&root)
+            .map(Path::to_path_buf)
+        else {
+            continue;
+        };
+        let mark = (change.status, change.area);
+        for folder in inside.ancestors().skip(1) {
+            if folder.as_os_str().is_empty() {
+                break;
+            }
+            let strongest = changes.entry(folder.to_path_buf()).or_insert(mark);
+            if rank(mark) < rank(*strongest) {
+                *strongest = mark;
+            }
+        }
+        changes.insert(inside, mark);
+    }
+    changes
 }
 
 pub(super) fn read_commits(repo: &Repository) -> Result<Vec<CommitInfo>> {

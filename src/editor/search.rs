@@ -47,6 +47,8 @@ pub struct SearchState {
     pub searching: bool,
     receiver: Option<Receiver<Found>>,
     cancelled: Arc<AtomicBool>,
+    /// A list given whole, with its title (references, definitions — F31): nothing is typed.
+    pub title: Option<String>,
 }
 
 impl SearchState {
@@ -60,7 +62,17 @@ impl SearchState {
             searching: false,
             receiver: None,
             cancelled: Arc::new(AtomicBool::new(false)),
+            title: None,
         }
+    }
+
+    /// The workspace results `matches` under `title`, for `query` (the symbol).
+    pub fn fixed(title: String, query: String, matches: Vec<SearchMatch>) -> Self {
+        let mut search = Self::new(SearchScope::Workspace);
+        search.query = query;
+        search.matches = matches;
+        search.title = Some(title);
+        search
     }
 
     pub fn push(&mut self, character: char, root: &Path, active: Option<&OpenFile>) {

@@ -174,6 +174,12 @@ pub struct Regions {
     pub search_next: Rect,
     pub tab_items: Vec<(usize, Rect, Rect)>,
     pub entry_menu_items: Vec<(super::EntryAction, Rect)>,
+    /// The Properties dialog: a click outside it closes it.
+    pub properties: Rect,
+    /// The hover and Peek boxes of Code Intelligence (F31): the wheel scrolls them, the mouse
+    /// over them keeps them open.
+    pub hover: Rect,
+    pub peek: Rect,
     /// The tabs of the terminals: panel, tab, the tab and its `x` (empty when it has none).
     pub terminal_tabs: Vec<(Focus, usize, Rect, Rect)>,
     /// The `+` of the bottom terminal.
@@ -181,6 +187,10 @@ pub struct Regions {
     /// The keys Help lets change (F29), and its Reset button.
     pub help_keys: Vec<(super::Action, Rect)>,
     pub help_reset: Rect,
+    /// Help's tabs, the Dependencies rows and the projects to choose from (F32, F33).
+    pub help_tabs: Vec<(super::HelpTab, Rect)>,
+    pub dependency_rows: Vec<(usize, Rect)>,
+    pub choice_rows: Vec<(usize, Rect)>,
 }
 
 /// A video's tab inside its border: the picture, then the progress row and the button row

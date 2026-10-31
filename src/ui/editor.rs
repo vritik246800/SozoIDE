@@ -6,7 +6,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState,
+        ScrollbarState, Wrap,
     },
 };
 use ratatui_image::{Resize, StatefulImage, protocol::StatefulProtocol};
@@ -14,18 +14,18 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 
 use crate::{
     app::{
-        Action, App, BOTTOM_TERMINALS, DropZone, EntryAction, Focus, Keymap, Regions, SHOWN_ITEMS,
-        SplitDirection, video_areas,
+        Action, App, BOTTOM_TERMINALS, DropZone, EntryAction, Focus, FolderCount, Keymap, Kind,
+        Regions, SHOWN_ITEMS, SplitDirection, grouped, human_size, video_areas,
     },
     branding::ASCII_LOGO,
-    editor::{OpenFile, file_icon},
+    editor::{MarkdownDocument, OpenFile, Row as MarkdownRow, file_icon, highlight_lines},
     lsp::{Diagnostic, char_column},
     media::Video,
 };
 
 use super::{
-    ACTIVE, BORDER, CURRENT_MATCH, MATCH, MUTED, TEXT, mark_columns, panel_block, select_columns,
-    skip_columns,
+    ACTIVE, BORDER, CURRENT_MATCH, MATCH, MUTED, TEXT, busy, mark_columns, panel_block,
+    select_columns, skip_columns,
 };
 
 pub(super) fn render_explorer(frame: &mut Frame, app: &App, area: Rect) {
@@ -35,13 +35,27 @@ pub(super) fn render_explorer(frame: &mut Frame, app: &App, area: Rect) {
     let room = usize::from(area.width.saturating_sub(2));
     let widest = app.explorer_width_needed();
     let scroll_x = app.explorer_scroll_x.min(widest.saturating_sub(room));
+    // Git's mark of each row (F01): a file's change with the letters of Source Control, `*` on
+    // a folder with a change below it, in the colour of its strongest change.
+    let marks = app
+        .entries
+        .iter()
+        .skip(app.explorer_scroll)
+        .take(height)
+        .map(|entry| {
+            let (status, change) = app.git_change(&entry.path)?;
+            let (letter, colour) = crate::git::view::status_mark(status, change);
+            Some((if entry.is_dir { "*" } else { letter }, colour))
+        })
+        .collect::<Vec<_>>();
     let lines = app
         .entries
         .iter()
         .enumerate()
         .skip(app.explorer_scroll)
         .take(height)
-        .map(|(index, entry)| {
+        .zip(&marks)
+        .map(|((index, entry), mark)| {
             let indentation = "  ".repeat(entry.depth);
             let (icon, color) = if entry.is_dir {
                 let name = if entry.expanded {
@@ -68,7 +82,10 @@ pub(super) fn render_explorer(frame: &mut Frame, app: &App, area: Rect) {
                 vec![
                     Span::styled(format!("{indentation}{marker} "), Style::default().fg(TEXT)),
                     Span::styled(icon.to_string(), Style::default().fg(color)),
-                    Span::styled(format!(" {}", entry.name), Style::default().fg(TEXT)),
+                    Span::styled(
+                        format!(" {}", entry.name),
+                        Style::default().fg(mark.map_or(TEXT, |(_, colour)| colour)),
+                    ),
                 ]
             };
             Line::from(skip_columns(spans, scroll_x))
@@ -79,6 +96,23 @@ pub(super) fn render_explorer(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(lines).block(panel_block(title, focused)),
         area,
     );
+    // The marks stay at the right edge, over the end of a name too long for the panel.
+    if area.width >= 6 {
+        for (row, (letter, colour)) in marks
+            .into_iter()
+            .enumerate()
+            .filter_map(|(row, mark)| Some((row, mark?)))
+        {
+            let cell = Rect::new(area.right() - 3, area.y + 1 + row as u16, 2, 1);
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    format!(" {letter}"),
+                    Style::default().fg(colour),
+                )),
+                cell,
+            );
+        }
+    }
     if widest > room && area.height > 2 {
         let track = Rect::new(area.x + 1, area.bottom() - 1, room as u16, 1);
         render_sideways_bar(frame, track, widest, scroll_x, focused);
@@ -117,7 +151,14 @@ pub(super) fn render_entry_menu(frame: &mut Frame, app: &mut App, screen: Rect) 
     let Some(menu) = &app.entry_menu else {
         return;
     };
-    let width = 16;
+    // As wide as its longest entry (the editor's questions to the language server, F31).
+    let width = menu
+        .actions
+        .iter()
+        .map(|action| action.label().len() as u16 + 4)
+        .max()
+        .unwrap_or(0)
+        .max(16);
     let height = menu.actions.len() as u16 + 2;
     let x = menu.position.0.min(screen.right().saturating_sub(width));
     let y = menu.position.1.min(screen.bottom().saturating_sub(height));
@@ -141,6 +182,122 @@ pub(super) fn render_entry_menu(frame: &mut Frame, app: &mut App, screen: Rect) 
         );
         app.regions.entry_menu_items.push((*action, row));
     }
+}
+
+/// The Properties of an Explorer entry (F30): a folder says «Calculating…» until its count
+/// arrives, then its size and what it contains.
+pub(super) fn render_properties(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let Some(dialog) = &app.properties else {
+        app.regions.properties = Rect::default();
+        return;
+    };
+    let read = &dialog.properties;
+    let (icon, color) = if read.kind == Kind::Folder {
+        (app.icon("custom-folder"), ACTIVE)
+    } else {
+        file_icon(&read.path)
+    };
+    let name = read
+        .path
+        .file_name()
+        .unwrap_or(read.path.as_os_str())
+        .to_string_lossy();
+    // Where it is: inside the project from the project folder's name, the project itself in full.
+    let parent = read.path.parent().unwrap_or(&read.path);
+    let inside = parent.strip_prefix(app.root.parent().unwrap_or(&app.root));
+    let location = match inside {
+        Ok(inside) if !inside.as_os_str().is_empty() => inside.display().to_string(),
+        _ => parent.display().to_string(),
+    };
+    let spinner = crate::animation::spinner(app.motion.elapsed());
+    let calculating = || busy(spinner, "Calculating\u{2026}");
+    let size = match (read.size, dialog.count) {
+        (Some(bytes), _) | (None, Some(FolderCount { bytes, .. })) => human_size(bytes).into(),
+        (None, None) => calculating(),
+    };
+    let plural = |count: u64, one: &str| {
+        format!(
+            "{} {one}{}",
+            grouped(count),
+            if count == 1 { "" } else { "s" }
+        )
+    };
+    let date = |time: Option<chrono::DateTime<chrono::Local>>| {
+        time.map_or("Unknown".into(), |time| {
+            time.format("%Y-%m-%d %H:%M:%S").to_string()
+        })
+    };
+    let mut rows = vec![
+        ("Kind", Line::from(read.kind.label())),
+        ("Location", Line::from(location)),
+        ("Size", size),
+    ];
+    if read.kind == Kind::Folder {
+        let contains = dialog.count.map_or_else(calculating, |count| {
+            Line::from(format!(
+                "{}, {}",
+                plural(count.files, "file"),
+                plural(count.folders, "folder")
+            ))
+        });
+        rows.push(("Contains", contains));
+    }
+    rows.extend([
+        ("Created", Line::from(date(read.created))),
+        ("Modified", Line::from(date(read.modified))),
+        ("Accessed", Line::from(date(read.accessed))),
+        ("Permissions", Line::from(read.permissions.clone())),
+    ]);
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(format!("{icon} "), Style::default().fg(color)),
+            Span::styled(
+                name.into_owned(),
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::default(),
+    ];
+    lines.extend(rows.into_iter().map(|(label, value)| {
+        let mut spans = vec![Span::styled(
+            format!("{label:<13}"),
+            Style::default().fg(MUTED),
+        )];
+        spans.extend(value.spans);
+        Line::from(spans)
+    }));
+    if let Some(unreadable) = dialog
+        .count
+        .map(|count| count.unreadable)
+        .filter(|n| *n > 0)
+    {
+        lines.push(Line::styled(
+            format!("{} could not be read", plural(unreadable, "item")),
+            Style::default().fg(MUTED),
+        ));
+    }
+    lines.extend([
+        Line::default(),
+        Line::styled("Esc: close", Style::default().fg(MUTED)),
+    ]);
+    let width = 64.min(screen.width);
+    let height = (lines.len() as u16 + 2).min(screen.height);
+    let area = Rect::new(
+        screen.x + (screen.width - width) / 2,
+        screen.y + (screen.height - height) / 2,
+        width,
+        height,
+    );
+    app.regions.properties = area;
+    super::render_dialog(frame, area, 1.0, " Properties ".into(), |frame, inner| {
+        let inner = Rect::new(
+            inner.x + 1,
+            inner.y,
+            inner.width.saturating_sub(2),
+            inner.height,
+        );
+        frame.render_widget(Paragraph::new(lines), inner);
+    });
 }
 
 /// The name of a new file or folder, or of a rename: the icon follows the extension typed.
@@ -415,6 +572,24 @@ pub(super) fn render_editor(frame: &mut Frame, app: &mut App, regions: &mut Regi
                 );
                 if pane == active_pane {
                     render_completion(frame, app, index, body);
+                    render_peek(frame, app, regions, index, body);
+                }
+                render_hover(frame, app, regions, index, body);
+                // The word under the mouse while Ctrl is held, as a link (F31).
+                if let Some((link, row, start, end)) = app.link
+                    && link == index
+                {
+                    let (x, y) = cell_of(&app.open_files[index], body, row, start);
+                    let inner = Rect::new(
+                        body.x + 1,
+                        body.y + 1,
+                        body.width.saturating_sub(2),
+                        body.height.saturating_sub(2),
+                    );
+                    let word = Rect::new(x, y, (end - start) as u16, 1).intersection(inner);
+                    frame
+                        .buffer_mut()
+                        .set_style(word, Style::default().add_modifier(Modifier::UNDERLINED));
                 }
             }
             None => render_empty(frame, &app.keys, focused, body),
@@ -664,6 +839,154 @@ fn render_completion(frame: &mut Frame, app: &App, index: usize, body: Rect) {
         ),
         area,
     );
+}
+
+/// A box of Code Intelligence (F31) by the cell `anchor` in `body`: below its row when it
+/// fits, above otherwise (where there is more room), never over the row itself.
+fn box_by(anchor: (u16, u16), width: u16, height: u16, body: Rect) -> Rect {
+    let width = width.min(body.width);
+    let below = anchor.1.saturating_add(1);
+    let room_below = body.bottom().saturating_sub(below);
+    let room_above = anchor.1.saturating_sub(body.y);
+    let (y, height) = if height <= room_below || room_below >= room_above {
+        (below, height.min(room_below))
+    } else {
+        let height = height.min(room_above);
+        (anchor.1 - height, height)
+    };
+    let x = anchor.0.min(body.right().saturating_sub(width)).max(body.x);
+    Rect::new(x, y, width, height)
+}
+
+/// The screen cell of character `column` of `row` of `file` drawn in `body`.
+fn cell_of(file: &OpenFile, body: Rect, row: usize, column: usize) -> (u16, u16) {
+    let gutter = file.lines.len().max(1).to_string().len() + 3;
+    let y = file.display_row(row).saturating_sub(file.scroll as usize);
+    let prefix = file
+        .lines
+        .get(row)
+        .map(|line| line.chars().take(column).collect::<String>())
+        .unwrap_or_default();
+    let x = gutter
+        + Line::from(prefix)
+            .width()
+            .saturating_sub(file.scroll_x as usize);
+    (
+        body.x.saturating_add(1 + x as u16),
+        body.y.saturating_add(1 + y as u16),
+    )
+}
+
+fn intelligence_block() -> Block<'static> {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACTIVE))
+}
+
+/// What the language server says about the word under the mouse or the cursor (F31), in
+/// Markdown drawn as the editor draws it, wrapped and scrolled.
+fn render_hover(frame: &mut Frame, app: &mut App, regions: &mut Regions, index: usize, body: Rect) {
+    let file = &app.open_files[index];
+    let Some((hover, text)) = app.hover.as_ref().and_then(|hover| {
+        let text = hover.text.as_deref().filter(|_| hover.path == file.path)?;
+        Some((hover, text))
+    }) else {
+        return;
+    };
+    let anchor = hover
+        .mouse
+        .unwrap_or_else(|| cell_of(file, body, hover.row, hover.start));
+    let lines = text.lines().map(str::to_owned).collect::<Vec<_>>();
+    let highlighted = highlight_lines(std::path::Path::new("hover.md"), &lines);
+    let document = MarkdownDocument::parse(&lines);
+    let inner_width = lines
+        .iter()
+        .map(|line| Line::from(line.as_str()).width())
+        .max()
+        .unwrap_or(0)
+        .clamp(10, 78)
+        .min(usize::from(body.width.saturating_sub(2)));
+    let rendered = lines
+        .iter()
+        .zip(&highlighted)
+        .enumerate()
+        .map(|(row, (line, spans))| {
+            Line::from(
+                document
+                    .render(MarkdownRow::plain(row), &[], inner_width, line, spans)
+                    .unwrap_or_else(|| spans.clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let paragraph = Paragraph::new(rendered).wrap(Wrap { trim: false });
+    let total = paragraph.line_count(inner_width as u16) as u16;
+    let area = box_by(anchor, inner_width as u16 + 2, total.min(14) + 2, body);
+    let overflow = total.saturating_sub(area.height.saturating_sub(2));
+    let scroll = hover.scroll.min(overflow);
+    let mut block = intelligence_block();
+    if overflow > 0 {
+        block = block.title_bottom(
+            Line::from(Span::styled(" ↑/↓ ", Style::default().fg(MUTED))).right_aligned(),
+        );
+    }
+    frame.render_widget(Clear, area);
+    frame.render_widget(paragraph.scroll((scroll, 0)).block(block), area);
+    regions.hover = area;
+    if let Some(hover) = &mut app.hover {
+        hover.overflow = overflow;
+        hover.scroll = scroll;
+    }
+}
+
+/// The definition in a box under the cursor without leaving the tab (Peek, F31).
+fn render_peek(frame: &mut Frame, app: &App, regions: &mut Regions, index: usize, body: Rect) {
+    let Some(peek) = &app.peek else {
+        return;
+    };
+    let file = &app.open_files[index];
+    let (_, row) = cell_of(file, body, file.cursor_row, file.cursor_column);
+    let area = box_by((body.x + 1, row), body.width.saturating_sub(2), 14, body);
+    let end = (peek.top + usize::from(area.height.saturating_sub(2))).min(peek.lines.len());
+    let shown = &peek.lines[peek.top.min(end)..end];
+    // ponytail: only the rows on screen are highlighted, so a comment opened above them is
+    // not seen; highlight from the top of the file if that matters.
+    let highlighted = highlight_lines(&peek.path, shown);
+    let number_width = peek.lines.len().max(1).to_string().len();
+    let lines = highlighted
+        .into_iter()
+        .enumerate()
+        .map(|(offset, spans)| {
+            let row = peek.top + offset;
+            let style = if row == peek.row {
+                Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED)
+            };
+            let mut line = vec![Span::styled(
+                format!("{:>number_width$} │ ", row + 1),
+                style,
+            )];
+            line.extend(spans);
+            Line::from(line)
+        })
+        .collect::<Vec<_>>();
+    let shown_path = peek.path.strip_prefix(&app.root).unwrap_or(&peek.path);
+    let block = intelligence_block()
+        .title(format!(
+            " Peek ─ {}:{} ",
+            shown_path.display(),
+            peek.row + 1
+        ))
+        .title_bottom(
+            Line::from(Span::styled(
+                " Up/Down: scroll  Enter: go  Esc: close ",
+                Style::default().fg(MUTED),
+            ))
+            .right_aligned(),
+        );
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+    regions.peek = area;
 }
 
 /// A picture, GIF, video or model in `area`; false when `file` is none of those.

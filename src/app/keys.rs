@@ -23,8 +23,16 @@ pub enum Action {
     PreviousTerminal,
     CloseTab,
     Run,
+    Build,
+    Clean,
+    Rebuild,
+    RunProject,
     Suggestions,
     Definition,
+    Peek,
+    References,
+    Hover,
+    Back,
     FindInFile,
     FindInWorkspace,
     Breakpoint,
@@ -37,7 +45,7 @@ pub enum Action {
     Quit,
 }
 
-pub const ACTIONS: [Action; 21] = [
+pub const ACTIONS: [Action; 29] = [
     Action::Explorer,
     Action::BottomTerminal,
     Action::RightTerminal,
@@ -47,8 +55,16 @@ pub const ACTIONS: [Action; 21] = [
     Action::PreviousTerminal,
     Action::CloseTab,
     Action::Run,
+    Action::Build,
+    Action::Clean,
+    Action::Rebuild,
+    Action::RunProject,
     Action::Suggestions,
     Action::Definition,
+    Action::Peek,
+    Action::References,
+    Action::Hover,
+    Action::Back,
     Action::FindInFile,
     Action::FindInWorkspace,
     Action::Breakpoint,
@@ -74,8 +90,16 @@ impl Action {
             Self::PreviousTerminal => "previous_terminal",
             Self::CloseTab => "close_tab",
             Self::Run => "run",
+            Self::Build => "build",
+            Self::Clean => "clean",
+            Self::Rebuild => "rebuild",
+            Self::RunProject => "run_project",
             Self::Suggestions => "suggestions",
             Self::Definition => "definition",
+            Self::Peek => "peek_definition",
+            Self::References => "references",
+            Self::Hover => "hover",
+            Self::Back => "go_back",
             Self::FindInFile => "find_in_file",
             Self::FindInWorkspace => "find_in_workspace",
             Self::Breakpoint => "breakpoint",
@@ -101,15 +125,23 @@ impl Action {
             Self::PreviousTerminal => "Previous terminal tab",
             Self::CloseTab => "Close the tab",
             Self::Run => "Run the file or its project",
+            Self::Build => "Build the project",
+            Self::Clean => "Clean the project",
+            Self::Rebuild => "Clean and build the project",
+            Self::RunProject => "Run the project",
             Self::Suggestions => "Suggestions (language server)",
             Self::Definition => "Go to the definition",
+            Self::Peek => "Peek the definition",
+            Self::References => "Find the references",
+            Self::Hover => "Information on the symbol",
+            Self::Back => "Back to where you were",
             Self::FindInFile => "Find in the file",
             Self::FindInWorkspace => "Find in the workspace",
             Self::Breakpoint => "Breakpoint on the line",
             Self::Debug => "Build and debug, or continue",
             Self::StepOver => "Step over",
             Self::StepInto => "Step into",
-            Self::StopDebug => "Stop and close the panel",
+            Self::StopDebug => "Stop debugging or what runs",
             Self::Help => "Help",
             Self::About => "About",
             Self::Quit => "Quit",
@@ -137,8 +169,16 @@ impl Action {
             Self::PreviousTerminal => Binding::new(KeyCode::PageUp, KeyModifiers::CONTROL),
             Self::CloseTab => ctrl('w'),
             Self::Run => ctrl('r'),
+            Self::Build => Binding::new(KeyCode::F(7), KeyModifiers::NONE),
+            Self::Clean => Binding::new(KeyCode::F(7), KeyModifiers::SHIFT),
+            Self::Rebuild => Binding::new(KeyCode::F(7), KeyModifiers::CONTROL),
+            Self::RunProject => Binding::new(KeyCode::F(5), KeyModifiers::CONTROL),
             Self::Suggestions => ctrl(' '),
             Self::Definition => Binding::new(KeyCode::F(12), KeyModifiers::NONE),
+            Self::Peek => Binding::new(KeyCode::F(12), KeyModifiers::ALT),
+            Self::References => Binding::new(KeyCode::F(12), KeyModifiers::SHIFT),
+            Self::Hover => ctrl('k'),
+            Self::Back => Binding::new(KeyCode::Left, KeyModifiers::ALT),
             Self::FindInFile => ctrl('p'),
             Self::FindInWorkspace => Binding::new(
                 KeyCode::Char('p'),
@@ -175,10 +215,12 @@ impl Binding {
 
     /// The key as terminals send it in different ways: a letter in upper case means Shift,
     /// another character already says its Shift, BackTab is Shift+Tab and F13 to F24 are what
-    /// some terminals send for Shift+F1 to Shift+F12.
+    /// some terminals send for Shift+F1 to Shift+F12. Option+Left reaches the app from the
+    /// Terminal.app as `ESC b` (Alt+B, a word back in a shell): it is Alt+Left (Q67).
     pub fn from_key(key: KeyEvent) -> Self {
         let mut modifiers = key.modifiers & CHOSEN;
         let code = match key.code {
+            KeyCode::Char('b') if modifiers == KeyModifiers::ALT => KeyCode::Left,
             KeyCode::Char(character) if character.is_alphabetic() => {
                 if character.is_uppercase() {
                     modifiers |= KeyModifiers::SHIFT;
