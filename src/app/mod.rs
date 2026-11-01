@@ -455,7 +455,7 @@ impl App {
         // the middle of one of its own operations (F35).
         if self.git_moved && self.show_git && !self.git.operation {
             self.git_moved = false;
-            self.git.open();
+            self.git.follow();
         }
     }
 
@@ -1153,7 +1153,7 @@ mod tests {
         let mut app = App::new(root.to_path_buf()).unwrap();
         let settle = |app: &mut App| {
             let started = Instant::now();
-            while app.git.operation || app.git_changes_reader.is_some() {
+            while app.git.operation || app.git.following() || app.git_changes_reader.is_some() {
                 assert!(started.elapsed() < Duration::from_secs(10));
                 std::thread::sleep(Duration::from_millis(20));
                 app.tick_at(Instant::now());
@@ -1168,11 +1168,13 @@ mod tests {
         assert_eq!(commits(&app), 1);
         // Nothing changed: nothing is read again.
         app.watch_disk();
-        assert!(!app.git.operation);
-        // A commit made in a terminal reaches the panel by itself.
+        assert!(!app.git.operation && !app.git.following());
+        // A commit made in a terminal reaches the panel by itself, read in the background
+        // without an operation: the panel is never left saying it is busy (E50).
         std::fs::write(root.join("a.txt"), "two\n").unwrap();
         git(&["commit", "-q", "-am", "second"]);
         app.watch_disk();
+        assert!(!app.git.operation);
         settle(&mut app);
         app.watch_disk();
         settle(&mut app);
@@ -1183,7 +1185,7 @@ mod tests {
         git(&["commit", "-q", "-am", "third"]);
         app.watch_disk();
         settle(&mut app);
-        assert!(!app.git.operation && commits(&app) == 2);
+        assert!(!app.git.following() && commits(&app) == 2);
         app.show_git = true;
         app.watch_disk();
         settle(&mut app);
