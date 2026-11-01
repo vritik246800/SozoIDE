@@ -583,7 +583,6 @@ impl OpenFile {
             self.lines.insert(self.cursor_row + 1, tail);
             self.cursor_row += 1;
             self.cursor_column = 0;
-            self.trailing_newline = false;
         } else {
             let index = self.byte_index(self.cursor_column);
             self.current_line_mut().insert(index, character);
@@ -608,7 +607,6 @@ impl OpenFile {
             self.cursor_row -= 1;
             self.cursor_column = self.current_line().chars().count();
             self.current_line_mut().push_str(&line);
-            self.trailing_newline = false;
         } else {
             return;
         }
@@ -630,7 +628,6 @@ impl OpenFile {
         } else if self.cursor_row + 1 < self.lines.len() {
             let next = self.lines.remove(self.cursor_row + 1);
             self.current_line_mut().push_str(&next);
-            self.trailing_newline = false;
         } else {
             return;
         }
@@ -799,6 +796,32 @@ mod tests {
         file.insert('?');
         assert!(file.undo());
         assert_eq!(file.lines, ["one!"]);
+    }
+
+    #[test]
+    fn new_lines_and_joined_lines_keep_the_newline_at_the_end_of_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("main.rs");
+        fs::write(&path, "one\ntwo\n").unwrap();
+        let mut file = OpenFile::load(path.clone(), &mut Picker::halfblocks()).unwrap();
+        file.move_cursor_to(0, 3);
+        file.insert('\n');
+        file.insert('x');
+        assert_eq!(file.text(), "one\nx\ntwo\n", "a new line (E47)");
+        file.move_cursor_to(1, 1);
+        file.delete();
+        assert_eq!(file.text(), "one\nxtwo\n", "Delete joins lines");
+        file.move_cursor_to(1, 0);
+        file.backspace();
+        assert_eq!(file.text(), "onextwo\n", "Backspace joins lines");
+        file.save().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "onextwo\n");
+        // A file without one stays without.
+        fs::write(&path, "one").unwrap();
+        let mut file = OpenFile::load(path, &mut Picker::halfblocks()).unwrap();
+        file.move_cursor_to(0, 3);
+        file.insert('\n');
+        assert_eq!(file.text(), "one\n");
     }
 
     #[test]

@@ -1,3 +1,14 @@
+/// Whether `query` has a statement that creates, changes or removes tables or views.
+fn changes_tables(query: &str) -> bool {
+    query.split(';').any(|statement| {
+        statement.split_whitespace().next().is_some_and(|word| {
+            ["create", "alter", "drop", "rename", "truncate"]
+                .iter()
+                .any(|kind| word.eq_ignore_ascii_case(kind))
+        })
+    })
+}
+
 #[cfg(test)]
 use std::path::Path;
 use std::{
@@ -210,6 +221,18 @@ impl DatabasePanel {
         Ok(())
     }
 
+    /// After SQL that changes the tables: the tables and views read again, keeping the SQL,
+    /// the design and the results (F35).
+    pub async fn reload_catalog(&mut self) -> Result<()> {
+        let connection = self
+            .active_config()
+            .context("No active connection")?
+            .clone();
+        let pool = self.pool_for(&connection).await?;
+        self.catalog = Some(load_catalog(&pool, connection.driver).await?);
+        Ok(())
+    }
+
     /// The SQL of the design, unless it was typed over; `force` replaces it anyway.
     pub fn rebuild(&mut self, force: bool) {
         if force {
@@ -397,6 +420,11 @@ impl DatabasePanel {
                     duration.as_millis()
                 ));
                 self.results = Some(result.clone());
+                if changes_tables(&query)
+                    && let Err(error) = self.reload_catalog().await
+                {
+                    self.error = Some(format!("Could not read the tables: {error}"));
+                }
                 Ok(result)
             }
             Err(error) => {
@@ -596,6 +624,50 @@ mod tests {
             panel.history.last().unwrap().result,
             Err("Query cancelled".into())
         );
+        panel.close().await;
+    }
+
+    #[tokio::test]
+    async fn sql_that_changes_the_tables_reads_them_again_and_keeps_the_query() {
+        assert!(changes_tables("select 1; Create table x (a)"));
+        assert!(changes_tables("  drop view v"));
+        assert!(!changes_tables(
+            "SELECT * FROM created; INSERT INTO t VALUES (1)"
+        ));
+        let directory = TempDir::new().unwrap();
+        let mut panel = panel(&directory);
+        let form = sqlite_form(&directory, "shop");
+        panel.add_connection(&form).await.unwrap();
+        panel.load_catalog().await.unwrap();
+        assert!(panel.catalog.as_ref().unwrap().objects.is_empty());
+        let names = |panel: &DatabasePanel| {
+            panel
+                .catalog
+                .as_ref()
+                .unwrap()
+                .objects
+                .iter()
+                .map(|object| object.name.clone())
+                .collect::<Vec<_>>()
+        };
+        panel.set_query("CREATE TABLE crew (id INTEGER PRIMARY KEY, name TEXT)");
+        panel.execute_query().await.unwrap();
+        assert_eq!(names(&panel), ["crew"]);
+        assert_eq!(
+            panel.query_text,
+            "CREATE TABLE crew (id INTEGER PRIMARY KEY, name TEXT)"
+        );
+        // A query that only reads does not read the tables again.
+        panel.catalog.as_mut().unwrap().objects.clear();
+        panel.set_query("SELECT * FROM crew");
+        panel.execute_query().await.unwrap();
+        assert!(names(&panel).is_empty());
+        panel.set_query("DROP TABLE crew");
+        panel.execute_query().await.unwrap();
+        assert!(names(&panel).is_empty());
+        panel.set_query("CREATE VIEW crews AS SELECT 1 AS one");
+        panel.execute_query().await.unwrap();
+        assert_eq!(names(&panel), ["crews"]);
         panel.close().await;
     }
 

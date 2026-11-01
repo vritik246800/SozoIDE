@@ -14,6 +14,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use rayon::prelude::*;
+
 pub const TOOLS: [&str; 3] = ["git", "curl", "ffmpeg"];
 
 /// The tools of `TOOLS` that are not on the `PATH`.
@@ -304,34 +306,32 @@ pub fn components(os: &str, has: impl Fn(&str) -> bool, sudo: &[&str]) -> Vec<Co
             .iter()
             .find(|(known, _)| *known == tool)
             .map(|(_, command)| command.clone());
-        let (kind, probe) = match tool {
-            "gdb" => ("Debugger", vec![tool.to_owned(), "--version".to_owned()]),
-            "dlv" => ("Debugger", vec![tool.to_owned(), "version".to_owned()]),
-            "debugpy" => (
-                "Debugger",
-                [python, "-m", "debugpy", "--version"]
-                    .map(str::to_owned)
-                    .to_vec(),
-            ),
-            "gopls" => (
-                "Language server",
-                vec![tool.to_owned(), "version".to_owned()],
-            ),
-            _ => (
-                "Language server",
-                vec![tool.to_owned(), "--version".to_owned()],
-            ),
+        let kind = if matches!(tool, "gdb" | "dlv" | "debugpy") {
+            "Debugger"
+        } else {
+            "Language server"
         };
         list.push(Component {
             name: tool,
             kind,
             program: tool,
-            probe,
+            probe: tool_probe(tool, python),
             update: install.as_deref().map(upgrade),
             install,
         });
     }
     list
+}
+
+/// The command that says the version of language server or debugger `tool`.
+fn tool_probe(tool: &str, python: &str) -> Vec<String> {
+    match tool {
+        "dlv" | "gopls" => vec![tool.to_owned(), "version".to_owned()],
+        "debugpy" => [python, "-m", "debugpy", "--version"]
+            .map(str::to_owned)
+            .to_vec(),
+        _ => vec![tool.to_owned(), "--version".to_owned()],
+    }
 }
 
 /// What the Dependencies tab found of a component: missing, or there with its version (none
@@ -342,9 +342,23 @@ pub enum Found {
     Installed(Option<String>),
 }
 
-/// The first line `probe` prints (on its output or its errors, as `java -version` does) when
-/// it succeeds within a few seconds; a program that waits for input is stopped.
-pub fn version(probe: &[String]) -> Option<String> {
+/// What the component of `program` is, by its `probe`: there with the version it says (none
+/// when it says nothing or waits for input), or missing — also a rustup proxy whose
+/// component is not installed, which fails saying its toolchain lacks it (`rust-analyzer`
+/// before `rustup component add rust-analyzer`, E45).
+pub fn found(program: &str, probe: &[String]) -> Found {
+    match run(probe) {
+        Some((true, version)) => Found::Installed(version),
+        Some((false, Some(line))) if line.contains("toolchain") => Found::Missing,
+        _ if locate(program).is_some() => Found::Installed(None),
+        _ => Found::Missing,
+    }
+}
+
+/// Whether `probe` succeeded within a few seconds and the first line it printed (on its
+/// output or its errors, as `java -version` does); none when it cannot start or waits for
+/// input (it is stopped).
+fn run(probe: &[String]) -> Option<(bool, Option<String>)> {
     let program = locate(&probe[0]).unwrap_or_else(|| PathBuf::from(&probe[0]));
     let mut child = Command::new(program)
         .args(&probe[1..])
@@ -367,16 +381,17 @@ pub fn version(probe: &[String]) -> Option<String> {
             }
         }
     };
-    if !status.success() {
-        return None;
-    }
     let mut text = String::new();
     child.stdout.take()?.read_to_string(&mut text).ok()?;
     if text.trim().is_empty() {
         child.stderr.take()?.read_to_string(&mut text).ok()?;
     }
-    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
-    Some(line.chars().take(60).collect())
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(60).collect());
+    Some((status.success(), line))
 }
 
 /// What is found of each component, read in parallel on threads; all of it arrives at once.
@@ -387,23 +402,54 @@ pub fn check(components: &[Component]) -> Receiver<Vec<Found>> {
         .map(|component| (component.program, component.probe.clone()))
         .collect::<Vec<_>>();
     thread::spawn(move || {
-        let found = thread::scope(|scope| {
-            let handles = probes
-                .iter()
-                .map(|(program, probe)| {
-                    scope.spawn(move || match version(probe) {
-                        Some(version) => Found::Installed(Some(version)),
-                        None if locate(program).is_some() => Found::Installed(None),
-                        None => Found::Missing,
-                    })
-                })
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| handle.join().unwrap_or(Found::Missing))
+        // Its own pool, one thread per program: a probe waits on its program for seconds and
+        // must not hold the pool that draws pictures and videos.
+        let check_all = || {
+            probes
+                .par_iter()
+                .map(|(program, probe)| found(program, probe))
                 .collect::<Vec<_>>()
-        });
+        };
+        let found = match rayon::ThreadPoolBuilder::new()
+            .num_threads(probes.len().max(1))
+            .build()
+        {
+            Ok(pool) => pool.install(check_all),
+            Err(_) => check_all(),
+        };
         let _ = sender.send(found);
+    });
+    receiver
+}
+
+/// Says from a thread what is found of the component of `program` once it is no longer
+/// `before` — installed, updated to another version or removed in the bottom terminal (F35):
+/// checked every 2 seconds for 10 minutes.
+pub fn watch_component(
+    program: &'static str,
+    probe: Vec<String>,
+    before: Found,
+) -> Receiver<Found> {
+    watch_component_every(program, probe, before, Duration::from_secs(2), 300)
+}
+
+fn watch_component_every(
+    program: &'static str,
+    probe: Vec<String>,
+    before: Found,
+    every: Duration,
+    times: u32,
+) -> Receiver<Found> {
+    let (sender, receiver) = channel();
+    thread::spawn(move || {
+        for _ in 0..times {
+            thread::sleep(every);
+            let now = found(program, &probe);
+            if now != before {
+                let _ = sender.send(now);
+                return;
+            }
+        }
     });
     receiver
 }
@@ -425,6 +471,53 @@ pub fn locate(tool: &str) -> Option<PathBuf> {
             ["", ".exe", ".cmd"].map(|suffix| folder.join(format!("{tool}{suffix}")))
         })
         .find(|path| path.is_file())
+}
+
+/// The command that installs language server `name` here, as the Dependencies tab would;
+/// CSS's and JSON's come with HTML's (`vscode-langservers-extracted`).
+pub fn server_install(name: &str) -> Option<Vec<String>> {
+    let sudo = if cfg!(target_os = "linux") {
+        sudo()
+    } else {
+        &[]
+    };
+    install_in(
+        language_plan(env::consts::OS, |_| false, on_path, sudo),
+        name,
+    )
+}
+
+fn install_in(plan: Vec<(&str, Vec<String>)>, name: &str) -> Option<Vec<String>> {
+    let name = if name.starts_with("vscode-") {
+        "vscode-html-language-server"
+    } else {
+        name
+    };
+    plan.into_iter()
+        .find(|(tool, _)| *tool == name)
+        .map(|(_, command)| command)
+}
+
+/// Says once, from a thread, when language server `name` is there (installed in the bottom
+/// terminal): checked every 2 seconds for 10 minutes.
+pub fn watch(name: &str) -> Receiver<()> {
+    watch_every(name, Duration::from_secs(2), 300)
+}
+
+fn watch_every(name: &str, every: Duration, times: u32) -> Receiver<()> {
+    let (sender, receiver) = channel();
+    let name = name.to_owned();
+    let probe = tool_probe(&name, "python3");
+    thread::spawn(move || {
+        for _ in 0..times {
+            thread::sleep(every);
+            if found(&name, &probe) != Found::Missing {
+                let _ = sender.send(());
+                return;
+            }
+        }
+    });
+    receiver
 }
 
 /// The command line of a language server, found by `locate`; on macOS `clangd` also comes
@@ -748,12 +841,35 @@ mod tests {
     fn versions_are_read_from_the_first_line_and_a_missing_tool_has_none() {
         let words = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
         // `cargo` is there wherever these tests build.
-        let cargo = version(&words(&["cargo", "--version"])).unwrap();
+        let Found::Installed(Some(cargo)) = found("cargo", &words(&["cargo", "--version"])) else {
+            panic!("cargo has a version");
+        };
         assert!(cargo.starts_with("cargo "), "{cargo}");
         assert!(!cargo.contains('\n'));
-        assert_eq!(version(&words(&["sozo-no-such-tool", "--version"])), None);
-        // A program that fails says nothing.
-        assert_eq!(version(&words(&["cargo", "--no-such-flag"])), None);
+        assert_eq!(run(&words(&["sozo-no-such-tool", "--version"])), None);
+        assert_eq!(
+            found(
+                "sozo-no-such-tool",
+                &words(&["sozo-no-such-tool", "--version"])
+            ),
+            Found::Missing
+        );
+        // A program that is there but fails says no version.
+        assert_eq!(
+            found("cargo", &words(&["cargo", "--no-such-flag"])),
+            Found::Installed(None)
+        );
+        // A rustup proxy without its component fails saying so (E45): the test binary, which
+        // fails with «error: Unrecognized option: 'toolchain'» on every system, stands for it.
+        let test = env::current_exe().unwrap().display().to_string();
+        assert_eq!(
+            found("cargo", &[test.clone(), "--toolchain".into()]),
+            Found::Missing
+        );
+        assert_eq!(
+            found("cargo", &[test, "--no-such-flag".into()]),
+            Found::Installed(None)
+        );
         let list = vec![Component {
             name: "Nothing",
             kind: "Tool",
@@ -764,5 +880,56 @@ mod tests {
         }];
         let found = check(&list).recv().unwrap();
         assert_eq!(found, [Found::Missing]);
+    }
+
+    #[test]
+    fn a_missing_server_has_its_install_command_and_is_watched_until_it_is_there() {
+        let only = |managers: &'static [&'static str]| move |tool: &str| managers.contains(&tool);
+        let plan = || language_plan("macos", |_| false, only(&["rustup", "npm"]), &[]);
+        let line = |command: Option<Vec<String>>| command.map(|command| command.join(" "));
+        assert_eq!(
+            line(install_in(plan(), "rust-analyzer")).as_deref(),
+            Some("rustup component add rust-analyzer")
+        );
+        // CSS and JSON come in the package of the HTML server.
+        assert_eq!(
+            line(install_in(plan(), "vscode-json-language-server")).as_deref(),
+            Some("npm install --global vscode-langservers-extracted")
+        );
+        assert_eq!(install_in(plan(), "gopls"), None, "no go here");
+
+        // `cargo` is there wherever the tests build; the other never comes.
+        let there = watch_every("cargo", Duration::from_millis(5), 100);
+        assert_eq!(there.recv_timeout(Duration::from_secs(10)), Ok(()));
+        // A component is said again once it is not what it was: `cargo` is there.
+        let words = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let changed = watch_component_every(
+            "cargo",
+            words(&["cargo", "--version"]),
+            Found::Missing,
+            Duration::from_millis(5),
+            100,
+        );
+        assert!(matches!(
+            changed.recv_timeout(Duration::from_secs(10)),
+            Ok(Found::Installed(Some(version))) if version.starts_with("cargo ")
+        ));
+        let same = found("cargo", &words(&["cargo", "--version"]));
+        let unchanged = watch_component_every(
+            "cargo",
+            words(&["cargo", "--version"]),
+            same,
+            Duration::from_millis(1),
+            3,
+        );
+        assert_eq!(
+            unchanged.recv_timeout(Duration::from_secs(10)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        );
+        let never = watch_every("sozo-no-such-tool", Duration::from_millis(1), 3);
+        assert_eq!(
+            never.recv_timeout(Duration::from_secs(10)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        );
     }
 }

@@ -1627,10 +1627,36 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("line 1 ") && text.contains("↑/↓"));
         assert!(app.hover.as_ref().unwrap().overflow > 0);
+        assert_eq!(
+            app.regions.hover.height, 12,
+            "small as the menu: ten lines (Q72)"
+        );
         press(&mut app, KeyCode::Down, KeyModifiers::NONE);
         press(&mut app, KeyCode::Down, KeyModifiers::NONE);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(!buffer_text(&terminal).contains("line 1 "));
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        hover(&mut app, &"wide ".repeat(30));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert_eq!(app.regions.hover.width, 60, "at most 60 columns");
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        // Code wider than the prose keeps its frame whole (E49), as rust-analyzer answers.
+        hover(
+            &mut app,
+            "```rust\nrproj::lib2\n```\n\n```rust\npub fn counter(x: i32) -> i32\n```",
+        );
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("│ pub fn counter(x: i32) -> i32 │"), "{text}");
+        // No frame is broken onto a second row inside the box.
+        let area = app.regions.hover;
+        let buffer = terminal.backend().buffer();
+        for y in area.y + 1..area.bottom() - 1 {
+            let inside = (area.x + 1..area.right() - 1)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>();
+            assert!(!inside.starts_with('─'), "a broken frame: {inside}");
+        }
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
 
         // Peek: the file and line in the title, numbered and highlighted lines.
@@ -1771,6 +1797,24 @@ mod tests {
         assert!(!text.contains("Reset shortcuts"), "the other tab's row");
         assert_eq!(app.regions.dependency_rows.len(), 2);
         assert_eq!(app.regions.help_tabs.len(), 2);
+        // The rows being installed or updated say so until they change (F35).
+        let (_sender, quiet) = std::sync::mpsc::channel();
+        app.dependencies.as_mut().unwrap().watching = Some((0, quiet));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let ffmpeg = (0..40)
+            .map(|y| row(terminal.backend().buffer(), y))
+            .find(|line| line.contains("FFmpeg"))
+            .unwrap();
+        assert!(
+            ffmpeg.contains(" Installing…") && !ffmpeg.contains("Missing"),
+            "{ffmpeg}"
+        );
+        let (_sender, quiet) = std::sync::mpsc::channel();
+        app.dependencies.as_mut().unwrap().watching = Some((1, quiet));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains(" Updating…"));
+        app.dependencies.as_mut().unwrap().watching = None;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
         let (_, area) = app.regions.dependency_rows[0];
         assert!(
@@ -1854,6 +1898,55 @@ mod tests {
     }
 
     #[test]
+    fn the_margin_marks_the_lines_git_sees_added_changed_or_deleted() {
+        use crate::git::LineMark;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("main.rs");
+        std::fs::write(&path, "fn main() {\n    let a = 1;\n    let b = 2;\n}\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(path.clone()).unwrap();
+        settle(&mut app);
+        let edits = app.open_files[0].edits;
+        app.line_marks.insert(
+            path.clone(),
+            (
+                edits,
+                [
+                    (0, LineMark::DeletedAbove),
+                    (1, LineMark::Modified),
+                    (2, LineMark::Added),
+                    (3, LineMark::DeletedBelow),
+                ]
+                .into(),
+            ),
+        );
+        app.breakpoints.insert(path.clone(), [1].into());
+        let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        // In the place of the bar, the breakpoint still before it; the width stays.
+        let cases = [
+            ("1 ▔ fn main() {", '▔', ratatui::style::Color::Red),
+            ("2●▎     let a = 1;", '▎', ratatui::style::Color::Yellow),
+            ("3 ▎     let b = 2;", '▎', ratatui::style::Color::Green),
+            ("4 ▁ }", '▁', ratatui::style::Color::Red),
+        ];
+        for (text, glyph, colour) in cases {
+            let y = (0..24)
+                .find(|y| row(buffer, *y).contains(text))
+                .unwrap_or_else(|| panic!("{text}"));
+            let at = row(buffer, y).find(text).unwrap() + text.find(glyph).unwrap();
+            let x = row(buffer, y)[..at].chars().count() as u16;
+            assert_eq!(buffer[(x, y)].symbol(), glyph.to_string());
+            assert_eq!(buffer[(x, y)].fg, colour, "{text}");
+        }
+        // Without marks, the bar.
+        app.line_marks.clear();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("3 |     let b = 2;"));
+    }
+
+    #[test]
     fn the_margin_marks_breakpoints_and_the_paused_line_and_the_panel_shows_the_session() {
         use crate::debug::{Frame, State, fake};
         let directory = tempfile::tempdir().unwrap();
@@ -1898,6 +1991,159 @@ mod tests {
         app.debug = None;
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(!buffer_text(&terminal).contains("╭ Debug "));
+    }
+
+    #[test]
+    fn the_menu_preview_is_drawn_beside_its_entry_with_the_answers_or_why_not() {
+        use crate::{
+            app::PreviewRow,
+            lsp::{Event, Failure, Goal, Place},
+        };
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let directory = tempfile::tempdir().unwrap();
+        let main = directory.path().join("main.rs");
+        let lib = directory.path().join("lib.rs");
+        std::fs::write(&main, "fn main() {\n    let total = compute();\n}\n").unwrap();
+        std::fs::write(&lib, "pub fn compute() -> u32 {\n    1\n}\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(main.clone()).unwrap();
+        settle(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let mouse = |app: &mut App, kind, (column, row): (u16, u16)| {
+            app.handle_mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            });
+        };
+        let body = app.regions.pane_bodies[0];
+        // The right-click on «compute» (row 1, column 18).
+        let word = (body.x + 1 + 4 + 18, body.y + 2);
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), word);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let entry = |app: &App, index: usize| app.regions.entry_menu_items[index].1;
+        let menu_right = entry(&app, 1).right() + 1;
+        let text = buffer_text(&terminal);
+        assert!(text.contains(" Go to Definition      ▸"), "{text}");
+        assert!(
+            text.contains(" Go to Type Definition ▸ │"),
+            "room before the border"
+        );
+        assert!(!text.contains(" Paste                 ▸"));
+        // On Go to Definition: the spinner, then the answers beside the menu, at its height.
+        let definition = entry(&app, 1);
+        mouse(
+            &mut app,
+            MouseEventKind::Moved,
+            (definition.x + 2, definition.y),
+        );
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("Looking…"));
+        let version = app.active_file().unwrap().edits;
+        let place = |path: &std::path::Path, row, start, end| Place {
+            path: path.to_path_buf(),
+            row,
+            start,
+            end_row: row,
+            end,
+        };
+        let answer = |app: &mut App, goal, places| {
+            app.lsp_event(Event::Places {
+                path: main.clone(),
+                version,
+                goal,
+                places,
+            })
+        };
+        answer(
+            &mut app,
+            Goal::Definition,
+            vec![place(&lib, 0, 7, 14), place(&main, 1, 16, 23)],
+        );
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let find = |text: &str| {
+            (0..30).find_map(|y| {
+                let line = row(&buffer, y);
+                line.find(text)
+                    .map(|x| (line[..x].chars().count() as u16, y))
+            })
+        };
+        let (x, title) = find("Definitions (2)").unwrap();
+        assert_eq!(
+            title,
+            definition.y - 1,
+            "the box starts at the entry's height"
+        );
+        assert!(x > menu_right, "right of the menu");
+        let (first_x, first) = find("lib.rs:1  pub fn compute() -> u32 {").unwrap();
+        assert_eq!(first, definition.y);
+        assert!(find("main.rs:2  let total = compute();").is_some());
+        assert_eq!(buffer[(first_x, first)].fg, MUTED);
+        let rows = app
+            .regions
+            .preview_rows
+            .iter()
+            .map(|(row, _)| *row)
+            .collect::<Vec<_>>();
+        assert_eq!(rows, [PreviewRow::Place(0), PreviewRow::Place(1)]);
+        // The answer under the mouse in ACTIVE inverse.
+        let second = app.regions.preview_rows[1].1;
+        mouse(&mut app, MouseEventKind::Moved, (second.x + 3, second.y));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let cell = &terminal.backend().buffer()[(second.x + 3, second.y)];
+        assert!(cell.modifier.contains(Modifier::REVERSED) && cell.fg == ACTIVE);
+
+        // Peek: the definition's file and line in the title, its lines numbered.
+        let peek = entry(&app, 2);
+        mouse(&mut app, MouseEventKind::Moved, (peek.x + 2, peek.y));
+        answer(&mut app, Goal::Peek, vec![place(&lib, 0, 7, 14)]);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains(" lib.rs:1 ") && text.contains("1 │ pub fn compute() -> u32 { "));
+        // Nothing found, and a server that could not start: why, and Install.
+        let declaration = entry(&app, 3);
+        mouse(
+            &mut app,
+            MouseEventKind::Moved,
+            (declaration.x + 2, declaration.y),
+        );
+        answer(&mut app, Goal::Declaration, Vec::new());
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("No declaration found"));
+        let why = "error: Unknown binary 'rust-analyzer' in official toolchain 'stable-aarch64-apple-darwin'.";
+        app.lsp.fail("rust-analyzer", Failure::Start(why.into()));
+        let types = entry(&app, 4);
+        mouse(&mut app, MouseEventKind::Moved, (types.x + 2, types.y));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("rust-analyzer could not start: error: Unknown binary"));
+        assert!(
+            text.contains("'stable-aarch64-apple-darwin'."),
+            "wrapped, not cut"
+        );
+        assert!(text.contains(" Install "));
+        assert_eq!(
+            app.regions
+                .preview_rows
+                .iter()
+                .map(|(row, _)| *row)
+                .collect::<Vec<_>>(),
+            [PreviewRow::Install]
+        );
+
+        // Without room on the right it goes on the left.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), (0, 0));
+        let far = (body.right() - 2, body.y + 2);
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), far);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let types = entry(&app, 4);
+        mouse(&mut app, MouseEventKind::Moved, (types.x + 2, types.y));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let install = app.regions.preview_rows[0].1;
+        assert!(install.right() < types.x, "left of the menu");
     }
 
     #[test]

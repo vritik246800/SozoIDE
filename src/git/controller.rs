@@ -94,6 +94,8 @@ pub struct GitController {
     /// The commit whose files were asked for while Git was busy; loaded once it is free.
     pub pending_commit: Option<usize>,
     task: Option<JoinHandle<()>>,
+    /// A refresh that follows changes made elsewhere (F35), read without holding the panel.
+    following: Option<JoinHandle<()>>,
 }
 
 impl GitController {
@@ -110,7 +112,42 @@ impl GitController {
             timeline_scroll: 0,
             pending_commit: None,
             task: None,
+            following: None,
         }
+    }
+
+    /// The repository changed elsewhere: it is read in the background and the panel takes
+    /// the result in one go, without the spinner of an operation or a blank panel (F35).
+    pub fn follow(&mut self) {
+        if self.operation
+            || self
+                .following
+                .as_ref()
+                .is_some_and(|task| !task.is_finished())
+        {
+            return;
+        }
+        let panel = Arc::clone(&self.panel);
+        self.following = Some(thread::spawn(move || {
+            let Some(source) = panel.lock().ok().map(|panel| panel.source()) else {
+                return;
+            };
+            let read = GitPanel::read(source);
+            if let Ok(mut panel) = panel.lock() {
+                match read {
+                    Ok(snapshot) => panel.apply(snapshot),
+                    Err(error) => panel.last_error = Some(format!("{error:#}")),
+                }
+            }
+        }));
+    }
+
+    /// Whether a refresh that follows changes is still reading.
+    #[cfg(test)]
+    pub fn following(&self) -> bool {
+        self.following
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
     }
 
     pub fn open(&mut self) {

@@ -262,6 +262,16 @@ fn free_lane(lanes: &mut Vec<Option<(String, usize)>>) -> usize {
     })
 }
 
+/// How a line of the editor differs from the file in the last commit (F34), for its margin:
+/// added, modified, or the line under which (above which, at the top) lines were deleted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineMark {
+    Added,
+    Modified,
+    DeletedBelow,
+    DeletedAbove,
+}
+
 /// How a diff line changed, for the timeline's colours (Q38): a run of removed lines followed
 /// by added ones is a modification, line by line; the rest were added or removed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

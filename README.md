@@ -21,7 +21,8 @@
 - **One binary, three systems.** `sozo` runs the same on Windows, macOS and Linux, on x86_64 and ARM64, and installs with a native installer.
 - **Fast while you type.** Highlighting is redone only from the line you changed (at most a few tens of milliseconds a key on long files), a frame draws in under a millisecond, and language servers, Git, builds and videos run in their own processes or threads: the editor never waits for them.
 - **Your terminal's look.** SozoIDE has no colours of its own: it draws with the 16 ANSI colours of your terminal theme and shows every shortcut the way your system types it.
-- **Nothing to hunt for.** Help's Dependencies tab lists every tool it and your projects use (`git`, `ffmpeg`, Rust, Node.js, Python, Java, Go, Docker, CMake, the language servers and debuggers) with its version, and installs or updates one with your package manager when you press `Enter`. Nothing is installed without asking.
+- **Nothing to hunt for.** Help's Dependencies tab lists every tool it and your projects use (`git`, `ffmpeg`, Rust, Node.js, Python, Java, Go, Docker, CMake, the language servers and debuggers) with its version, and installs or updates one with your package manager when you press `Enter`; its row changes by itself once it is done, and a language server installed there starts at once. Nothing is installed without asking.
+- **Live.** What you do elsewhere shows at once: the open Source Control follows commits and changes made in a terminal, the Database reads its tables again after `CREATE`, `ALTER` or `DROP`, and the Explorer, the open tabs and the Git marks follow the disk.
 
 ## Features
 
@@ -38,6 +39,7 @@
 ### Editor
 
 - Tabs with a scrolling tab bar; drag a tab to an edge of the editor to split it side by side or stacked, each side with its own tabs.
+- Git marks in the margin, as in VS Code: a green bar on lines added since the last commit, a yellow one on lines changed and a red mark where lines were deleted, also for edits not saved yet.
 - Edits save themselves after two idle seconds and before you switch tabs or quit. A file changed by another program is read again (your unsaved edits are kept).
 - Select with the mouse or `Shift` and the arrows, `Ctrl+A` for everything; copy, cut and paste with `Ctrl+C`, `Ctrl+X`, `Ctrl+V` or the right-click menu, through the system clipboard (and OSC 52 over SSH). `Ctrl+Z` undoes, a word or a paste at a time.
 - Syntax highlighting for more than 30 languages, from Rust, Go, C, Java and Python to SQL, JSP, Astro and Mermaid, and for configuration files by their name (`.env`, `Cargo.lock`, `.config`, `.properties`, `Dockerfile`, `Makefile`, `.gitignore`…).
@@ -46,7 +48,7 @@
 
 ### IntelliSense
 
-Problems underlined in red (errors) or yellow (warnings), with the message of the cursor's line in the footer; suggestions with `Ctrl+Space`, and by themselves after `.`, `::`, `->` and the second letter of a word. Rest the mouse on a word, or press `Ctrl+K`, to read its type and documentation; `F12` or `Ctrl`+click goes to the definition (a list when there are several), `Alt+F12` peeks at it in a box without leaving the tab, `Shift+F12` lists every reference, and `Alt+Left` goes back. They come from the language server of each language, started when you open its first file; a file without one says so and edits as before:
+Problems underlined in red (errors) or yellow (warnings), with the message of the cursor's line in the footer; suggestions with `Ctrl+Space`, and by themselves after `.`, `::`, `->` and the second letter of a word. Hold `Ctrl` and rest the mouse on a word for 2 seconds, or press `Ctrl+K`, to read its type and documentation in a small box; `F12` or `Ctrl`+click goes to the definition, in a new tab when it is in another file (a list when there are several), `Alt+F12` peeks at it in a box without leaving the tab, `Shift+F12` lists every reference, and `Alt+Left` goes back. Right-click a word for the same questions: moving over one shows its answers in a small box beside the menu, and a click on an answer opens it. They come from the language server of each language, started when you open its first file; a file without one says so and edits as before. When the server is not installed, or cannot start, asking it something shows the command that installs it on your system; `Enter` runs it in the bottom terminal and, once the server is there, SozoIDE goes on with what you asked:
 
 | Language | Server |
 | --- | --- |
@@ -227,11 +229,11 @@ These are the keys SozoIDE comes with; change them in Help.
 | `F`, `Esc` (video) | Full screen; leave it, then close the video |
 | `Ctrl+Space` / `F12` | Suggestions from the language server (they also open after `.`, `::`, `->` and the second letter of a word) / go to the definition (a list when there are several) |
 | `Alt+F12` / `Shift+F12` | Peek at the definition in a box (`Up`/`Down` scroll, `Enter` goes there, `Esc` closes) / list every reference |
-| `Ctrl+K`, or rest the mouse on a word | Type and documentation of the symbol (`Up`/`Down` scroll a long one, `Esc` closes) |
-| `Ctrl`+click / `Alt+Left` | Go to the definition / back to where you were before |
+| `Ctrl+K`, or hold `Ctrl` and rest the mouse on a word for 2 s | Type and documentation of the symbol (`Up`/`Down` scroll a long one, `Esc` closes) |
+| `Ctrl`+click / `Alt+Left` | Go to the definition, in a new tab when it is in another file / back to where you were before |
 | `F9` / `F5` / `F10` / `F11` / `Shift+F5` | Breakpoint / build and debug, or continue / step over / step into / stop debugging, or what `F7` or `Ctrl+F5` started |
 | `F7` / `Shift+F7` / `Ctrl+F7` / `Ctrl+F5` | Build / clean / clean and build / run the project, in the bottom terminal |
-| Right-click (editor) | Cut, copy, paste; go to the definition, declaration, type definition or implementations; peek; find references |
+| Right-click (editor) | Cut, copy, paste; go to the definition, declaration, type definition or implementations; peek; find references (move over one to see its answers beside the menu, click an answer to open it) |
 | `Ctrl` over a word | Underlines it: `Ctrl`+click goes to its definition |
 | `Ctrl+R` (editor or Explorer) | Save, open the bottom terminal and run the file there: a Cargo project or Go module runs whole; C, C++, Rust, Python, JavaScript, TypeScript, Java, Kotlin, Go, Ruby, PHP, Lua, Perl, R, Swift, Dart, Zig, Haskell, Elixir, Julia and shell scripts with their own compiler or interpreter |
 | `Page Down` / `→` / mouse wheel, `Page Up` / `←`, `Home` / `End` (PDF) | Next page, previous page, first and last page; on a page of text the arrows move the cursor, `Shift` selects, `Ctrl+C` copies and the wheel scrolls on to the next page |

@@ -5,6 +5,27 @@ use git2::Repository;
 
 use super::{model::*, repository::*};
 
+/// What a refresh reads the repository from (`GitPanel::source`).
+#[derive(Clone, PartialEq)]
+pub struct Source {
+    root: PathBuf,
+    diff: (DiffKind, Option<PathBuf>, Option<String>),
+    inspected: Option<String>,
+}
+
+/// What a refresh read of the repository (`GitPanel::read`).
+pub struct Snapshot {
+    repository_root: PathBuf,
+    status: WorkingTreeStatus,
+    commits: Vec<CommitInfo>,
+    branches: Vec<BranchInfo>,
+    launchpad: LaunchpadSummary,
+    inspected: Option<CommitDetails>,
+    diff: DiffView,
+    /// What it was read for: a diff or a commit opened since stays (E51).
+    from: Source,
+}
+
 #[derive(Debug)]
 pub struct GitPanel {
     pub root: PathBuf,
@@ -185,52 +206,91 @@ impl GitPanel {
     }
 
     pub fn refresh(&mut self) -> Result<()> {
-        let previous_diff = self.diff.clone();
-        let inspected_id = self
-            .inspected_commit
-            .as_ref()
-            .map(|details| details.commit.id.clone());
+        let snapshot = Self::read(self.source())?;
+        self.apply(snapshot);
+        Ok(())
+    }
 
-        let Some(repo) = self.open_repository()? else {
-            self.clear_repository_data();
-            self.status_message = "Not a Git repository.".to_string();
-            return Ok(());
+    /// What a refresh needs to read the repository: the folder, the diff on screen and the
+    /// commit inspected.
+    pub fn source(&self) -> Source {
+        Source {
+            root: self.root.clone(),
+            diff: (
+                self.diff.kind,
+                self.diff.path.clone(),
+                self.diff.commit_id.clone(),
+            ),
+            inspected: self
+                .inspected_commit
+                .as_ref()
+                .map(|details| details.commit.id.clone()),
+        }
+    }
+
+    /// Reads the repository without the panel, so that a refresh that follows changes made
+    /// elsewhere never holds what is on screen (F35); none outside a repository.
+    pub fn read(source: Source) -> Result<Option<Snapshot>> {
+        let from = source.clone();
+        let repo = match Repository::discover(&source.root) {
+            Ok(repo) => repo,
+            Err(error) if error.code() == git2::ErrorCode::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
         };
-
         let repository_root = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
         let status = read_status(&repo).context("Could not read working-tree status.")?;
         let commits = read_commits(&repo).context("Could not read commits.")?;
         let branches = read_branches(&repo).context("Could not read branches.")?;
         let launchpad = read_launchpad(&repo, commits.first().cloned())
             .context("Could not read launchpad summary.")?;
-
-        self.repository_root = Some(repository_root);
-        self.status = status;
-        self.commits = commits;
-        self.branches = branches;
-        self.launchpad = launchpad;
-
-        if let Some(id) = inspected_id {
-            self.inspected_commit = Some(read_commit_details(&repo, &id)?);
-        }
-        let diff = match (
-            previous_diff.kind,
-            previous_diff.path,
-            previous_diff.commit_id,
-        ) {
+        let inspected = match &source.inspected {
+            Some(id) => Some(read_commit_details(&repo, id)?),
+            None => None,
+        };
+        let diff = match source.diff {
             (DiffKind::Commit, _, Some(id)) => read_commit_diff(&repo, &id)?,
             (kind, Some(path), _) if kind != DiffKind::None => {
                 read_change_diff(&repo, &path, kind)?
             }
             _ => DiffView::default(),
         };
-        // The same diff keeps its folds; another one starts unfolded.
-        if diff.files.len() != self.diff.files.len() {
-            self.diff_folds.clear();
+        Ok(Some(Snapshot {
+            repository_root,
+            status,
+            commits,
+            branches,
+            launchpad,
+            inspected,
+            diff,
+            from,
+        }))
+    }
+
+    /// What a refresh read, put on screen.
+    pub fn apply(&mut self, snapshot: Option<Snapshot>) {
+        let Some(snapshot) = snapshot else {
+            self.clear_repository_data();
+            self.status_message = "Not a Git repository.".to_string();
+            return;
+        };
+        self.repository_root = Some(snapshot.repository_root);
+        self.status = snapshot.status;
+        self.commits = snapshot.commits;
+        self.branches = snapshot.branches;
+        self.launchpad = snapshot.launchpad;
+        // A diff or a commit opened while it was read is newer than what was read for it.
+        let now = self.source();
+        if now.inspected == snapshot.from.inspected && snapshot.inspected.is_some() {
+            self.inspected_commit = snapshot.inspected;
         }
-        self.diff = diff;
+        if now.diff == snapshot.from.diff {
+            // The same diff keeps its folds; another one starts unfolded.
+            if snapshot.diff.files.len() != self.diff.files.len() {
+                self.diff_folds.clear();
+            }
+            self.diff = snapshot.diff;
+        }
         self.select(self.selected);
-        Ok(())
     }
 
     pub fn diff_selected(&mut self) -> Result<()> {
@@ -571,6 +631,44 @@ mod tests {
         assert!(explorer_changes(plain.path()).is_empty());
     }
 
+    #[test]
+    fn editor_lines_are_marked_added_changed_or_deleted_against_the_last_commit() {
+        use std::collections::HashMap;
+        let (directory, repo) = init_repo();
+        let root = directory.path();
+        let base = "one\ntwo\nthree\nfour\nfive\nsix\n";
+        write(root, "src/main.rs", base);
+        let path = root.join("src/main.rs");
+        assert!(
+            line_marks(&path, "other\n").is_empty(),
+            "before the first commit"
+        );
+        commit_all(&repo, "Base");
+        // Line 2 changed, a line added after line 3, the last two deleted after «four».
+        assert_eq!(
+            line_marks(&path, "one\nTWO\nthree\nnew\nfour\n"),
+            HashMap::from([
+                (1, LineMark::Modified),
+                (3, LineMark::Added),
+                (4, LineMark::DeletedBelow),
+            ])
+        );
+        // The first line deleted: marked above the new first line.
+        assert_eq!(
+            line_marks(&path, "two\nthree\nfour\nfive\nsix\n"),
+            HashMap::from([(0, LineMark::DeletedAbove)])
+        );
+        // The same text has no marks, also with \r\n (Windows' autocrlf).
+        assert!(line_marks(&path, base).is_empty());
+        assert!(line_marks(&path, &base.replace('\n', "\r\n")).is_empty());
+        // Nor a file Git does not follow, nor one outside a repository.
+        write(root, "new.rs", "fresh\n");
+        assert!(line_marks(&root.join("new.rs"), "changed\n").is_empty());
+        let plain = TempDir::new().unwrap();
+        write(plain.path(), "file.txt", "text\n");
+        assert!(line_marks(&plain.path().join("file.txt"), "other\n").is_empty());
+    }
+
     fn checkout(repo: &Repository, branch: &str) {
         let reference = format!("refs/heads/{branch}");
         let commit = repo
@@ -607,6 +705,31 @@ mod tests {
         panel.refresh().unwrap();
         panel.select_next();
         assert_eq!(panel.selected, 0);
+    }
+
+    #[test]
+    fn a_refresh_read_in_the_background_keeps_a_diff_opened_meanwhile() {
+        let (directory, repo) = init_repo();
+        write(directory.path(), "file.txt", "first\n");
+        let mut panel = GitPanel::new(directory.path());
+        // Read for the panel as it was, without a diff; a file appears and a diff opens.
+        let early = GitPanel::read(panel.source()).unwrap();
+        write(directory.path(), "other.txt", "second\n");
+        panel.diff_selected().unwrap();
+        assert!(added(&panel).contains(&"first".to_owned()));
+        // What was read fills the lists, and the diff opened since stays (E51).
+        panel.apply(early);
+        assert!(
+            added(&panel).contains(&"first".to_owned()),
+            "the diff is kept"
+        );
+        assert_eq!(panel.status.untracked.len(), 1);
+        // Read for the diff on screen: it is refreshed with the rest.
+        let late = GitPanel::read(panel.source()).unwrap();
+        panel.apply(late);
+        assert_eq!(panel.status.untracked.len(), 2);
+        assert!(added(&panel).contains(&"first".to_owned()));
+        drop(repo);
     }
 
     #[test]

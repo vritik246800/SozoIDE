@@ -163,6 +163,64 @@ pub fn explorer_changes(root: &Path) -> ExplorerChanges {
     changes
 }
 
+/// Each row of `text`, the editor's copy of `path`, that differs from the file in the last
+/// commit (F34): nothing outside a repository, before the first commit or for a file Git does
+/// not follow. `\r\n` counts as `\n`, so `autocrlf` does not mark every line.
+pub fn line_marks(path: &Path, text: &str) -> HashMap<usize, LineMark> {
+    let committed = || -> Result<Vec<u8>> {
+        let repo = Repository::discover(path.parent().context("No folder")?)?;
+        let workdir = repo
+            .workdir()
+            .context("A bare repository")?
+            .canonicalize()?;
+        let inside = path.canonicalize()?.strip_prefix(&workdir)?.to_path_buf();
+        let entry = repo.head()?.peel_to_tree()?.get_path(&inside)?;
+        Ok(entry.to_object(&repo)?.peel_to_blob()?.content().to_vec())
+    };
+    let Ok(committed) = committed() else {
+        return HashMap::new();
+    };
+    let old = String::from_utf8_lossy(&committed).replace("\r\n", "\n");
+    let new = text.replace("\r\n", "\n");
+    let mut options = DiffOptions::new();
+    options.context_lines(0);
+    let Ok(patch) = Patch::from_buffers(
+        old.as_bytes(),
+        None,
+        new.as_bytes(),
+        None,
+        Some(&mut options),
+    ) else {
+        return HashMap::new();
+    };
+    let mut marks = HashMap::new();
+    for index in 0..patch.num_hunks() {
+        let Ok((hunk, _)) = patch.hunk(index) else {
+            continue;
+        };
+        let start = hunk.new_start() as usize;
+        let rows = hunk.new_lines() as usize;
+        if rows == 0 {
+            // Lines deleted after line `start`: marked under it, or above the first line.
+            let (row, mark) = match start.checked_sub(1) {
+                Some(row) => (row, LineMark::DeletedBelow),
+                None => (0, LineMark::DeletedAbove),
+            };
+            marks.entry(row).or_insert(mark);
+            continue;
+        }
+        let mark = if hunk.old_lines() == 0 {
+            LineMark::Added
+        } else {
+            LineMark::Modified
+        };
+        for row in start - 1..start - 1 + rows {
+            marks.insert(row, mark);
+        }
+    }
+    marks
+}
+
 pub(super) fn read_commits(repo: &Repository) -> Result<Vec<CommitInfo>> {
     if head_commit(repo)?.is_none() {
         return Ok(Vec::new());

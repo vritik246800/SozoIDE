@@ -443,7 +443,7 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
                 bound(Action::Peek),
                 bound(Action::References),
                 bound(Action::Hover),
-                (Fixed("Rest the mouse"), "On a word: the same information"),
+                (Fixed("Ctrl+mouse 2 s"), "On a word: the same information"),
                 (Fixed("Ctrl+click"), "Go to the definition"),
                 bound(Action::Back),
                 (Fixed("Right-click"), "Cut, copy, paste the text"),
@@ -974,6 +974,26 @@ fn dependency_table(dependencies: &Dependencies, elapsed: std::time::Duration) -
                 component.update.as_ref().map(|_| "Update"),
             ),
         };
+        // The row being installed or updated says so until it changes (F35).
+        let watched = dependencies
+            .watching
+            .as_ref()
+            .is_some_and(|(row, _)| *row == index);
+        let state = match found {
+            Some(found) if watched => (
+                format!(
+                    "{} {}",
+                    spinner(elapsed),
+                    if *found == Found::Missing {
+                        "Installing…"
+                    } else {
+                        "Updating…"
+                    }
+                ),
+                ACTIVE,
+            ),
+            _ => state,
+        };
         let action = match (found, action) {
             (None, _) => String::new(),
             (_, Some(action)) => action.to_owned(),
@@ -1013,7 +1033,7 @@ fn render_dependencies(
             .collect::<String>();
         format!("{text:<room$}")
     };
-    let (name, kind, status, action) = (28, 16, 11, 8);
+    let (name, kind, status, action) = (28, 16, 14, 8);
     let installed = width.saturating_sub(name + kind + status + action);
     let mut lines = vec![
         table.summary.clone(),

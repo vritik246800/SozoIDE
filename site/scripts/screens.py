@@ -15,7 +15,7 @@ from pathlib import Path
 
 COLUMNS, ROWS = 132, 34
 ROOT, SHOWN = "/home/dev/code/orbit", "~/code/orbit"
-SCREENS = ["editor", "git-changes", "git-graph", "db-query", "db-results", "search", "run", "intellisense"]
+SCREENS = ["editor", "git-changes", "git-graph", "db-query", "db-results", "search", "run", "intellisense", "menu"]
 DIALOGS = {"help": "Help - all commands"}
 FORBIDDEN = re.compile(r"/home/|/Users/|(?i:vritik|valabdas)")
 SGR = re.compile(r"\x1b\[([0-9;:]*)m")

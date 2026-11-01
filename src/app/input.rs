@@ -331,6 +331,36 @@ impl App {
             }
             _ => {}
         }
+        if matches!(code, KeyCode::Up | KeyCode::Down) {
+            self.preview_entry();
+        }
+    }
+
+    /// The mouse over the open menu: the entry under it is chosen (a code entry shows its
+    /// answers beside the menu, Q73), the preview's row under it is marked.
+    fn menu_mouse(&mut self, point: (u16, u16)) {
+        let entry = self
+            .regions
+            .entry_menu_items
+            .iter()
+            .position(|(_, area)| contains(*area, point));
+        if let Some(index) = entry
+            && let Some(menu) = &mut self.entry_menu
+        {
+            menu.selected = index;
+            self.preview_entry();
+        }
+        let row = self
+            .regions
+            .preview_rows
+            .iter()
+            .find(|(_, area)| contains(*area, point))
+            .map(|(row, _)| *row);
+        if let Some(preview) = &mut self.menu_preview
+            && (row.is_some() || entry.is_some())
+        {
+            preview.hovered = row;
+        }
     }
 
     pub fn search_paste(&mut self, text: &str) {
@@ -747,6 +777,16 @@ impl App {
                     return;
                 }
                 if self.entry_menu.is_some() {
+                    if let Some(row) = self
+                        .regions
+                        .preview_rows
+                        .iter()
+                        .find(|(_, area)| contains(*area, point))
+                        .map(|(row, _)| *row)
+                    {
+                        self.choose_preview_row(row);
+                        return;
+                    }
                     let action = self
                         .regions
                         .entry_menu_items
@@ -1154,11 +1194,13 @@ impl App {
                     self.drop_tab(drag, zone);
                 }
             }
+            MouseEventKind::Moved if self.entry_menu.is_some() => self.menu_mouse(point),
             MouseEventKind::Moved => {
                 self.hover(point);
                 let at = self.text_under(point);
-                self.mark_link(at, mouse.modifiers.contains(KeyModifiers::CONTROL));
-                self.rest_mouse(point, at);
+                let ctrl = mouse.modifiers.contains(KeyModifiers::CONTROL);
+                self.mark_link(at, ctrl);
+                self.rest_mouse(point, at, ctrl);
             }
             // Shift turns the wheel sideways, for terminals without a horizontal wheel.
             MouseEventKind::ScrollUp => self.scroll_at(point, true, sideways(mouse)),
@@ -1691,6 +1733,16 @@ mod tests {
             column,
             row,
             modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    /// The mouse with Ctrl held, as the terminal sends it.
+    fn ctrl_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
+        app.handle_mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::CONTROL,
         });
     }
 
@@ -2458,7 +2510,7 @@ mod tests {
     }
 
     #[test]
-    fn the_mouse_resting_on_a_word_asks_for_its_hover_once_and_leaving_closes_it() {
+    fn ctrl_and_the_mouse_resting_on_a_word_ask_for_its_hover_once_and_leaving_closes_it() {
         use crate::{app::intellisense::HOVER_DELAY, lsp::Event};
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.rs");
@@ -2469,17 +2521,22 @@ mod tests {
         app.regions.pane_bodies[0] = app.regions.editor_body;
         let text_x = 30 + 1 + 4;
         let hover = ("textDocument/hover".to_owned(), 1, 8);
-        // «total» is at columns 8 to 12 of row 1: nothing is asked before the mouse rests.
+        assert_eq!(HOVER_DELAY, Duration::from_secs(2));
+        // «total» is at columns 8 to 12 of row 1: the mouse alone asks nothing (Q72).
         mouse(&mut app, MouseEventKind::Moved, text_x + 9, 4);
-        app.tick_at(Instant::now() + Duration::from_millis(100));
+        app.tick_at(Instant::now() + HOVER_DELAY * 2);
+        assert!(asked(&app).is_empty() && app.hover.is_none());
+        // With Ctrl, nothing before it rests 2 s.
+        ctrl_mouse(&mut app, MouseEventKind::Moved, text_x + 9, 4);
+        app.tick_at(Instant::now() + Duration::from_millis(400));
         assert!(asked(&app).is_empty());
         // Inside the same word it keeps waiting; then it is asked once, at the word's start.
-        mouse(&mut app, MouseEventKind::Moved, text_x + 11, 4);
+        ctrl_mouse(&mut app, MouseEventKind::Moved, text_x + 11, 4);
         let rested = Instant::now() + HOVER_DELAY + Duration::from_millis(50);
         app.tick_at(rested);
         app.tick_at(rested + Duration::from_millis(500));
         assert_eq!(asked(&app), std::slice::from_ref(&hover));
-        mouse(&mut app, MouseEventKind::Moved, text_x + 10, 4);
+        ctrl_mouse(&mut app, MouseEventKind::Moved, text_x + 10, 4);
         app.tick_at(rested + Duration::from_secs(1));
         assert_eq!(
             asked(&app),
@@ -2504,13 +2561,24 @@ mod tests {
             app.hover.as_ref().unwrap().text.as_deref(),
             Some("```rust\nlet total: u32\n```")
         );
-        // Over the box it stays; off the word and the box it closes. Spaces ask nothing.
+        // Ctrl let go, it stays on its word and over its box; off the word and the box it
+        // closes. Spaces ask nothing.
+        mouse(&mut app, MouseEventKind::Moved, text_x + 12, 4);
+        assert!(app.hover.is_some());
         app.regions.hover = Rect::new(40, 5, 20, 3);
         mouse(&mut app, MouseEventKind::Moved, 45, 6);
         assert!(app.hover.is_some());
         mouse(&mut app, MouseEventKind::Moved, text_x + 2, 4);
         assert!(app.hover.is_none());
+        app.regions.hover = Rect::default();
         app.tick_at(rested + Duration::from_secs(1));
+        assert_eq!(asked(&app).len(), 1);
+        // Ctrl let go before the 2 s: nothing is asked. «compute» starts at column 16.
+        ctrl_mouse(&mut app, MouseEventKind::Moved, text_x + 17, 4);
+        assert!(app.hover.is_some());
+        mouse(&mut app, MouseEventKind::Moved, text_x + 18, 4);
+        assert!(app.hover.is_none());
+        app.tick_at(Instant::now() + HOVER_DELAY * 2);
         assert_eq!(asked(&app).len(), 1);
 
         // Ctrl+K asks at the cursor, also just after the word.
@@ -2546,6 +2614,50 @@ mod tests {
         app.open_files[0].move_cursor_to(1, 2);
         press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
         assert_eq!(app.status, "No symbol at the cursor");
+    }
+
+    #[test]
+    fn a_failed_server_says_why_in_the_hover_and_how_to_install_it() {
+        use crate::{app::intellisense::HOVER_DELAY, lsp::Failure};
+        let directory = tempfile::tempdir().unwrap();
+        let rust = directory.path().join("main.rs");
+        let notes = directory.path().join("notes.md");
+        std::fs::write(&rust, "fn main() {\n    let total = compute();\n}\n").unwrap();
+        std::fs::write(&notes, "a few words\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.regions.editor_body = Rect::new(30, 2, 60, 20);
+        app.regions.pane_bodies[0] = app.regions.editor_body;
+        let text_x = 30 + 1 + 4;
+        let rest = |app: &mut App, x: u16, y: u16| {
+            app.hover = None;
+            ctrl_mouse(app, MouseEventKind::Moved, x, y);
+            assert!(app.hover.is_some(), "the mouse rests on a word");
+            app.tick_at(Instant::now() + HOVER_DELAY * 2);
+            app.hover.as_ref().and_then(|hover| hover.text.clone())
+        };
+        let why = "error: Unknown binary 'rust-analyzer' in official toolchain 'stable'.";
+        app.lsp.fail("rust-analyzer", Failure::Start(why.into()));
+        app.open_file(rust.clone()).unwrap();
+        let install = format!(
+            "{} or Ctrl+click offers to install it",
+            app.keys.label(Action::Definition)
+        );
+        assert_eq!(
+            rest(&mut app, text_x + 9, 4),
+            Some(format!("rust-analyzer could not start: {why}\n\n{install}"))
+        );
+        // A server that stopped cannot be installed again: only why.
+        app.lsp.restart("rust-analyzer");
+        app.lsp
+            .fail("rust-analyzer", Failure::Stopped("killed".into()));
+        assert_eq!(
+            rest(&mut app, text_x + 9, 4),
+            Some("rust-analyzer stopped: killed".into())
+        );
+        // Without a server for the language the mouse says nothing.
+        app.open_file(notes).unwrap();
+        assert_eq!(rest(&mut app, text_x + 3, 3), None);
+        assert!(app.hover.is_none());
     }
 
     #[test]
@@ -2915,12 +3027,352 @@ mod tests {
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(app.show_bottom_terminal && app.overlay == Overlay::None);
         assert_eq!(app.status, "Installing Fake: echo installed");
-        // Help opens on the tab again and checks what the installation did.
-        assert!(app.dependencies.as_ref().unwrap().found.is_none());
+        // The row is watched; Help opens on the tab again and checks everything again.
+        let dependencies = app.dependencies.as_ref().unwrap();
+        assert_eq!(dependencies.watching.as_ref().map(|(row, _)| *row), Some(1));
+        assert!(
+            dependencies.found.is_some(),
+            "what was found stays on screen"
+        );
         press(&mut app, KeyCode::F(1), KeyModifiers::NONE);
         assert_eq!(app.help_tab, HelpTab::Dependencies);
+        assert!(
+            app.dependencies.as_ref().unwrap().reader.is_some(),
+            "checking again"
+        );
         press(&mut app, KeyCode::Left, KeyModifiers::NONE);
         assert_eq!(app.help_tab, HelpTab::Shortcuts);
+    }
+
+    #[test]
+    fn an_installation_changes_its_row_by_itself_and_a_server_that_arrives_starts() {
+        use crate::{
+            app::{Dependencies, tasks::Confirm},
+            lsp::Failure,
+            update::deps::{Component, Found},
+        };
+        let mut app = test_app();
+        let words = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let server = Component {
+            name: "rust-analyzer",
+            kind: "Language server",
+            program: "rust-analyzer",
+            probe: words(&["rust-analyzer", "--version"]),
+            install: Some(words(&["rustup", "component", "add", "rust-analyzer"])),
+            update: None,
+        };
+        app.dependencies = Some(Dependencies::checked(
+            vec![server],
+            Some(vec![Found::Missing]),
+        ));
+        app.lsp.fail(
+            "rust-analyzer",
+            Failure::Start("error: Unknown binary".into()),
+        );
+        // The installation ends: the watcher says what is there now.
+        app.component_watcher = |_, _, before| {
+            assert_eq!(before, Found::Missing);
+            let (sender, receiver) = std::sync::mpsc::channel();
+            sender
+                .send(Found::Installed(Some("rust-analyzer 1.99.1".into())))
+                .unwrap();
+            receiver
+        };
+        app.confirm = Some(Confirm {
+            title: "Install rust-analyzer".into(),
+            rows: Vec::new(),
+            line: "rustup component add rust-analyzer".into(),
+            running: "Installing rust-analyzer".into(),
+            task: false,
+            server: None,
+            component: Some(0),
+        });
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.lsp.missing("rust-analyzer"), "not before the tick");
+        app.tick_at(Instant::now());
+        let dependencies = app.dependencies.as_ref().unwrap();
+        assert_eq!(
+            dependencies.found.as_ref().unwrap()[0],
+            Found::Installed(Some("rust-analyzer 1.99.1".into()))
+        );
+        assert!(dependencies.watching.is_none());
+        // The server starts at once, without opening SozoIDE again.
+        assert!(!app.lsp.missing("rust-analyzer"));
+        assert_eq!(app.status, "rust-analyzer is installed");
+        // One that fails again waits for the next thing found: no start at every tick.
+        app.lsp.fail("rust-analyzer", Failure::Start(String::new()));
+        app.tick_at(Instant::now());
+        assert!(app.lsp.missing("rust-analyzer"));
+    }
+
+    #[test]
+    fn the_editor_menu_previews_each_code_entry_beside_it_and_a_click_opens_a_place() {
+        use crate::{
+            app::PreviewRow,
+            lsp::{Event, Goal, Place},
+        };
+        use crossterm::event::MouseButton;
+        let directory = tempfile::tempdir().unwrap();
+        let main = directory.path().join("main.rs");
+        let lib = directory.path().join("lib.rs");
+        std::fs::write(&main, "fn main() {\n    let total = compute();\n}\n").unwrap();
+        std::fs::write(&lib, "pub fn compute() -> u32 {\n    1\n}\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.open_file(main.clone()).unwrap();
+        app.regions.editor_body = Rect::new(30, 2, 60, 20);
+        app.regions.pane_bodies[0] = app.regions.editor_body;
+        let text_x = 30 + 1 + 4;
+        // The menu's entries as the view draws them: Paste, then the six questions.
+        let open_menu = |app: &mut App| {
+            mouse(
+                app,
+                MouseEventKind::Down(MouseButton::Right),
+                text_x + 18,
+                4,
+            );
+            let actions = app.entry_menu.as_ref().unwrap().actions.clone();
+            app.regions.entry_menu_items = actions
+                .iter()
+                .enumerate()
+                .map(|(index, action)| (*action, Rect::new(50, 6 + index as u16, 24, 1)))
+                .collect();
+        };
+        let version = app.active_file().unwrap().edits;
+        let place = |path: &std::path::Path, row, start, end| Place {
+            path: path.to_path_buf(),
+            row,
+            start,
+            end_row: row,
+            end,
+        };
+        let answer = |app: &mut App, goal, version, places| {
+            app.lsp_event(Event::Places {
+                path: main.clone(),
+                version,
+                goal,
+                places,
+            })
+        };
+        open_menu(&mut app);
+        assert!(app.menu_preview.is_none(), "Paste has nothing beside it");
+        // The mouse on Go to Definition asks about «compute» once, and nothing jumps.
+        mouse(&mut app, MouseEventKind::Moved, 55, 7);
+        mouse(&mut app, MouseEventKind::Moved, 60, 7);
+        assert_eq!(asked(&app), [("textDocument/definition".into(), 1, 18)]);
+        answer(
+            &mut app,
+            Goal::Definition,
+            version + 1,
+            vec![place(&lib, 0, 7, 14)],
+        );
+        assert!(
+            app.menu_preview.as_ref().unwrap().places.is_none(),
+            "another edit"
+        );
+        answer(
+            &mut app,
+            Goal::Definition,
+            version,
+            vec![place(&lib, 0, 7, 14), place(&main, 1, 16, 23)],
+        );
+        let preview = app.menu_preview.as_ref().unwrap();
+        let places = preview.places.as_ref().unwrap();
+        assert_eq!(places.len(), 2);
+        assert_eq!(places[0].text, "pub fn compute() -> u32 {");
+        assert!(app.entry_menu.is_some() && app.search.is_none());
+        assert_eq!(app.active_file().unwrap().path, main);
+        // Paste has none; the arrow down to Peek asks for it and shows the file's lines.
+        mouse(&mut app, MouseEventKind::Moved, 55, 6);
+        assert!(app.menu_preview.is_none());
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.menu_preview.as_ref().unwrap().goal, Goal::Peek);
+        answer(&mut app, Goal::Peek, version, vec![place(&lib, 0, 7, 14)]);
+        let preview = app.menu_preview.as_ref().unwrap();
+        assert_eq!(preview.lines, ["pub fn compute() -> u32 {", "    1", "}"]);
+        // A click on it opens the place in its own tab; Back returns.
+        app.regions.preview_rows = vec![(PreviewRow::Place(0), Rect::new(75, 8, 30, 3))];
+        mouse(&mut app, MouseEventKind::Moved, 80, 9);
+        assert_eq!(
+            app.menu_preview.as_ref().unwrap().hovered,
+            Some(PreviewRow::Place(0))
+        );
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 80, 9);
+        assert!(app.entry_menu.is_none() && app.menu_preview.is_none());
+        let file = app.active_file().unwrap();
+        assert_eq!(
+            (file.path.clone(), file.cursor_row, file.cursor_column),
+            (lib.clone(), 0, 7)
+        );
+        assert_eq!(app.open_files.len(), 2);
+        app.go_back();
+        assert_eq!(app.active_file().unwrap().path, main);
+
+        // The entry clicked before the answer acts when it comes: references are a list.
+        app.regions.preview_rows.clear();
+        open_menu(&mut app);
+        mouse(&mut app, MouseEventKind::Moved, 55, 12);
+        assert_eq!(app.menu_preview.as_ref().unwrap().goal, Goal::References);
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 55, 12);
+        assert!(app.entry_menu.is_none());
+        assert_eq!(app.status, "Looking for the references...");
+        answer(
+            &mut app,
+            Goal::References,
+            version,
+            vec![place(&main, 1, 16, 23), place(&lib, 0, 7, 14)],
+        );
+        assert!(app.menu_preview.is_none());
+        assert_eq!(
+            app.search.as_ref().unwrap().title.as_deref(),
+            Some("References")
+        );
+        app.search = None;
+        // With the answer already there, the entry acts at once; a closed menu takes its
+        // preview with it.
+        open_menu(&mut app);
+        mouse(&mut app, MouseEventKind::Moved, 55, 9);
+        answer(
+            &mut app,
+            Goal::Declaration,
+            version,
+            vec![place(&lib, 0, 7, 14)],
+        );
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 55, 9);
+        assert_eq!(app.active_file().unwrap().path, lib);
+        app.go_back();
+        open_menu(&mut app);
+        mouse(&mut app, MouseEventKind::Moved, 55, 10);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        app.tick_at(Instant::now() + Duration::from_secs(1));
+        assert!(app.menu_preview.is_none());
+    }
+
+    #[test]
+    fn a_missing_server_offers_its_installation_and_the_request_runs_once_it_is_there() {
+        use crate::{
+            app::PreviewRow,
+            lsp::{Failure, Goal},
+        };
+        use crossterm::event::MouseButton;
+        let directory = tempfile::tempdir().unwrap();
+        let main = directory.path().join("main.rs");
+        let script = directory.path().join("run.py");
+        std::fs::write(&main, "fn main() {\n    let total = compute();\n}\n").unwrap();
+        std::fs::write(&script, "total = 1\n").unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        app.installs = |name| {
+            Some(vec![
+                "rustup".into(),
+                "component".into(),
+                "add".into(),
+                name.into(),
+            ])
+        };
+        // Here the server is there as soon as it is watched.
+        app.watcher = |_| {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            sender.send(()).unwrap();
+            receiver
+        };
+        app.open_file(main.clone()).unwrap();
+        app.open_files[0].move_cursor_to(1, 18);
+        let why = "error: Unknown binary 'rust-analyzer' in official toolchain 'stable'.";
+        app.lsp.fail("rust-analyzer", Failure::Start(why.into()));
+        // F12 with the server unable to start: the dialog with the command, nothing yet.
+        press(&mut app, KeyCode::F(12), KeyModifiers::NONE);
+        let confirm = app.confirm.as_ref().unwrap();
+        assert_eq!(confirm.title, "Install rust-analyzer");
+        assert_eq!(
+            confirm.rows,
+            [
+                ("For", "Go to Definition in .rs files".to_owned()),
+                ("Why", format!("rust-analyzer could not start: {why}")),
+                ("Component", "rust-analyzer (Language server)".to_owned()),
+                ("Command", "rustup component add rust-analyzer".to_owned()),
+            ]
+        );
+        assert!(asked(&app).is_empty() && app.server_watch.is_none());
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.confirm.is_none() && app.server_watch.is_none());
+        assert_eq!(app.status, "Cancelled");
+        // Enter installs in the bottom terminal; once it is there the request runs again.
+        press(&mut app, KeyCode::F(12), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            app.status,
+            "Installing rust-analyzer: rustup component add rust-analyzer"
+        );
+        assert!(app.show_bottom_terminal && app.server_watch.is_some());
+        app.tick_at(Instant::now() + Duration::from_secs(1));
+        assert!(app.server_watch.is_none());
+        assert_eq!(app.lsp.installable(&main), None);
+        assert_eq!(asked(&app), [("textDocument/definition".into(), 1, 18)]);
+        assert_eq!(app.status, "Looking for the definition...");
+
+        // A request already sent when the server fails (it stopped before answering)
+        // offers the installation too.
+        app.lsp.asked.clear();
+        app.focus = Focus::Editor;
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert!(app.hover.is_some() && app.confirm.is_none());
+        app.lsp.fail("rust-analyzer", Failure::Start(String::new()));
+        app.tick_at(Instant::now() + Duration::from_secs(2));
+        assert!(app.hover.is_none());
+        assert_eq!(
+            app.confirm.as_ref().unwrap().rows[0].1,
+            "Information on the symbol in .rs files"
+        );
+        // A server that never comes is said.
+        app.watcher = |_| std::sync::mpsc::channel().1;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        app.tick_at(Instant::now() + Duration::from_secs(3));
+        assert_eq!(app.status, "rust-analyzer is still not installed");
+        assert!(app.server_watch.is_none());
+
+        // The preview of the menu says why and its Install row offers the same.
+        app.focus = Focus::Editor;
+        app.regions.editor_body = Rect::new(30, 2, 60, 20);
+        app.regions.pane_bodies[0] = app.regions.editor_body;
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Right),
+            30 + 1 + 4 + 18,
+            4,
+        );
+        let actions = app.entry_menu.as_ref().unwrap().actions.clone();
+        app.regions.entry_menu_items = actions
+            .iter()
+            .enumerate()
+            .map(|(index, action)| (*action, Rect::new(50, 6 + index as u16, 24, 1)))
+            .collect();
+        mouse(&mut app, MouseEventKind::Moved, 55, 7);
+        let preview = app.menu_preview.as_ref().unwrap();
+        assert_eq!(
+            preview.failure.as_deref(),
+            Some("rust-analyzer could not start")
+        );
+        assert!(preview.install);
+        app.choose_preview_row(PreviewRow::Install);
+        assert_eq!(app.confirm.as_ref().unwrap().title, "Install rust-analyzer");
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+        // Without a package manager for it, or after a crash, the footer only says why.
+        app.installs = |_| None;
+        app.lsp.fail("pyright-langserver", Failure::Missing);
+        app.open_file(script).unwrap();
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert!(app.confirm.is_none());
+        assert_eq!(
+            app.status,
+            "pyright-langserver is not installed. No package manager here installs it: do it by hand"
+        );
+        app.lsp.restart("pyright-langserver");
+        app.lsp
+            .fail("pyright-langserver", Failure::Stopped("killed".into()));
+        app.ask_places(Goal::References);
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "pyright-langserver stopped: killed");
     }
 
     #[test]

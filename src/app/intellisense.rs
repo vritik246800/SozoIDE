@@ -4,23 +4,25 @@
 
 use std::{
     path::{Path, PathBuf},
+    sync::mpsc::{Receiver, TryRecvError},
     time::{Duration, Instant},
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::App;
+use super::{App, EntryAction, keys::Action, tasks::Confirm};
 use crate::{
     editor::{SearchMatch, SearchState},
-    lsp::{Event, Goal, Item, Place, char_column},
+    lsp::{Event, Goal, Item, Place, char_column, server_for},
+    run::shell_line,
 };
 
 /// How often edited text goes to the server: typing never waits for it.
 pub const SYNC_INTERVAL: Duration = Duration::from_millis(250);
 /// Rows of the list of suggestions.
 pub const SHOWN_ITEMS: usize = 8;
-/// How long the mouse rests on a word before its hover is asked (F31).
-pub const HOVER_DELAY: Duration = Duration::from_millis(400);
+/// How long the mouse rests on a word with Ctrl before its hover is asked (F31, Q72).
+pub const HOVER_DELAY: Duration = Duration::from_secs(2);
 /// Places Back remembers.
 const MOST_BACK: usize = 50;
 
@@ -50,6 +52,92 @@ pub struct Peek {
     pub top: usize,
 }
 
+/// A question to a language server about the symbol at a place of the file at `path` (F31):
+/// kept to ask it again once its server is installed (Q74).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Request {
+    Places {
+        goal: Goal,
+        path: PathBuf,
+        row: usize,
+        column: usize,
+    },
+    /// At the word that starts at `start`.
+    Hover {
+        path: PathBuf,
+        row: usize,
+        start: usize,
+    },
+}
+
+impl Request {
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Places { path, .. } | Self::Hover { path, .. } => path,
+        }
+    }
+
+    /// What it was for, as the install dialog says it.
+    fn purpose(&self) -> String {
+        let what = match self {
+            Self::Places { goal, .. } => EntryAction::Code(*goal).label(),
+            Self::Hover { .. } => Action::Hover.title(),
+        };
+        match self.path().extension() {
+            Some(extension) => format!("{what} in .{} files", extension.to_string_lossy()),
+            None => what.to_owned(),
+        }
+    }
+}
+
+/// A language server being installed in the bottom terminal (Q74): once it is there, the
+/// request that needed it is asked again.
+pub struct ServerWatch {
+    pub name: &'static str,
+    arrived: Receiver<()>,
+    request: Request,
+}
+
+/// A row of the menu's preview that a click acts on: a place, the rest of the list or the
+/// installation of the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewRow {
+    Place(usize),
+    More,
+    Install,
+}
+
+/// The answers beside the editor's menu for its code entry under the mouse (F31, Q73), about
+/// the symbol at the cursor when the menu opened: asked once, then the places (with the lines
+/// of the definition's file for Peek) or why there are none.
+pub struct MenuPreview {
+    pub goal: Goal,
+    pub path: PathBuf,
+    pub version: u64,
+    pub row: usize,
+    pub column: usize,
+    pub places: Option<Vec<SearchMatch>>,
+    pub lines: Vec<String>,
+    pub failure: Option<String>,
+    /// Whether installing the server would answer it.
+    pub install: bool,
+    /// The row under the mouse.
+    pub hovered: Option<PreviewRow>,
+    /// The entry was clicked before the answer: it acts when the answer comes.
+    act: bool,
+}
+
+impl MenuPreview {
+    fn request(&self) -> Request {
+        Request::Places {
+            goal: self.goal,
+            path: self.path.clone(),
+            row: self.row,
+            column: self.column,
+        }
+    }
+}
+
 /// The suggestions open under the cursor: for the word that starts at `start` on `row`.
 pub struct Completion {
     pub items: Vec<Item>,
@@ -73,6 +161,17 @@ impl Completion {
         }
         starting.extend(containing);
         starting
+    }
+}
+
+/// What the answers to `goal` are called: in a sentence and as a title.
+pub fn goal_names(goal: Goal) -> (&'static str, &'static str) {
+    match goal {
+        Goal::References => ("references", "References"),
+        Goal::Declaration => ("declaration", "Declarations"),
+        Goal::TypeDefinition => ("type definition", "Type definitions"),
+        Goal::Implementation => ("implementations", "Implementations"),
+        Goal::Definition | Goal::Peek => ("definition", "Definitions"),
     }
 }
 
@@ -248,20 +347,12 @@ impl App {
             return;
         };
         let file = &self.open_files[index];
-        let line = file.lines.get(file.cursor_row).cloned().unwrap_or_default();
-        let asked = self.lsp.places(
+        self.ask(Request::Places {
             goal,
-            &file.path,
-            file.edits,
-            file.cursor_row,
-            file.cursor_column,
-            &line,
-        );
-        self.status = match asked {
-            Ok(()) if goal == Goal::References => "Looking for the references...".into(),
-            Ok(()) => "Looking for the definition...".into(),
-            Err(message) => message,
-        };
+            path: file.path.clone(),
+            row: file.cursor_row,
+            column: file.cursor_column,
+        });
     }
 
     /// Ctrl+K: the hover of the word at the cursor, asked at once.
@@ -275,31 +366,333 @@ impl App {
             self.status = "No symbol at the cursor".into();
             return;
         };
-        let hover = Hover {
+        self.ask(Request::Hover {
+            path: file.path.clone(),
+            row: file.cursor_row,
+            start,
+        });
+    }
+
+    /// Asks `request` about its file as it is now (its edits go to the server first): the
+    /// footer says what it waits for, or why it cannot, and a server that is missing offers
+    /// to install itself (Q74).
+    fn ask(&mut self, request: Request) {
+        let Some(file) = self
+            .open_files
+            .iter()
+            .find(|file| file.path == request.path())
+        else {
+            return;
+        };
+        if self.lsp.behind(&file.path, file.edits) {
+            self.lsp.change(&file.path, &file.text(), file.edits);
+        }
+        let version = file.edits;
+        let asked = match &request {
+            Request::Places {
+                goal,
+                path,
+                row,
+                column,
+            } => {
+                let line = file.lines.get(*row).cloned().unwrap_or_default();
+                let asked = self.lsp.places(*goal, path, version, *row, *column, &line);
+                if asked.is_ok() {
+                    self.status = if *goal == Goal::References {
+                        "Looking for the references...".into()
+                    } else {
+                        "Looking for the definition...".into()
+                    };
+                }
+                asked
+            }
+            Request::Hover { path, row, start } => {
+                let line = file.lines.get(*row).cloned().unwrap_or_default();
+                let asked = self.lsp.hover(path, version, *row, *start, &line);
+                if asked.is_ok() {
+                    self.hover = Some(Hover {
+                        path: path.clone(),
+                        version,
+                        row: *row,
+                        start: *start,
+                        mouse: None,
+                        since: Instant::now(),
+                        asked: true,
+                        text: None,
+                        scroll: 0,
+                        overflow: 0,
+                    });
+                }
+                asked
+            }
+        };
+        match asked {
+            Ok(()) => self.waiting = Some(request),
+            Err(message) => self.offer_install(request, message),
+        }
+    }
+
+    /// `request` failed with `message`: when its server is missing or could not start and
+    /// this system can install it, the command dialog offers to (Q74, only after Enter as
+    /// Q65 asks) and the request runs again once it is there; otherwise the footer says why.
+    pub(super) fn offer_install(&mut self, request: Request, message: String) {
+        let Some(name) = self.lsp.installable(request.path()) else {
+            self.status = message;
+            return;
+        };
+        if self
+            .server_watch
+            .as_ref()
+            .is_some_and(|watch| watch.name == name)
+        {
+            self.status = format!("Waiting for {name} to be installed...");
+            return;
+        }
+        let Some(command) = (self.installs)(name) else {
+            self.status = format!("{message}. No package manager here installs it: do it by hand");
+            return;
+        };
+        let line = shell_line(&command, std::env::consts::OS);
+        self.confirm = Some(Confirm {
+            title: format!("Install {name}"),
+            rows: vec![
+                ("For", request.purpose()),
+                ("Why", message),
+                ("Component", format!("{name} (Language server)")),
+                ("Command", line.clone()),
+            ],
+            running: format!("Installing {name}: {line}"),
+            line,
+            task: false,
+            server: Some((name, request)),
+            component: None,
+        });
+    }
+
+    /// Enter on the install dialog: the server is watched until it is there.
+    pub(super) fn watch_server(&mut self, name: &'static str, request: Request) {
+        self.server_watch = Some(ServerWatch {
+            name,
+            arrived: (self.watcher)(name),
+            request,
+        });
+    }
+
+    /// In the tick: a server installed is started again with the files of its language, and
+    /// the request that needed it is asked again; one that never came is said.
+    fn tick_install(&mut self) {
+        let Some(watch) = &self.server_watch else {
+            return;
+        };
+        match watch.arrived.try_recv() {
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.status = format!("{} is still not installed", watch.name);
+                self.server_watch = None;
+            }
+            Ok(()) => {
+                let Some(watch) = self.server_watch.take() else {
+                    return;
+                };
+                self.start_again(watch.name);
+                self.ask(watch.request);
+            }
+        }
+    }
+
+    /// Server `name`, now installed, starts again with the open files of its language.
+    pub(super) fn start_again(&mut self, name: &str) {
+        self.lsp.restart(name);
+        for file in &self.open_files {
+            if file.is_text()
+                && server_for(&file.path).is_some_and(|server| server.0 == name)
+                && let Some(message) = self.lsp.open(&file.path, &file.text(), file.edits)
+            {
+                self.status = message;
+            }
+        }
+    }
+
+    /// In the tick: a request still waiting when its server failed (it stopped before
+    /// answering: rustup's `rust-analyzer` without its component) offers the installation;
+    /// so does the menu's preview, which says why.
+    fn tick_failures(&mut self) {
+        if let Some(request) = self.waiting.clone()
+            && let Some((name, failure)) = self.lsp.failure(request.path())
+        {
+            let message = failure.message(name);
+            self.waiting = None;
+            if request.path()
+                == self
+                    .hover
+                    .as_ref()
+                    .map_or(Path::new(""), |hover| &hover.path)
+            {
+                self.hover = None;
+            }
+            self.offer_install(request, message);
+        }
+        if self.entry_menu.is_none()
+            && self
+                .menu_preview
+                .as_ref()
+                .is_some_and(|preview| !preview.act)
+        {
+            self.menu_preview = None;
+        }
+        let failed = self.menu_preview.as_ref().and_then(|preview| {
+            let waiting = preview.places.is_none() && preview.failure.is_none();
+            let (name, failure) = self.lsp.failure(&preview.path).filter(|_| waiting)?;
+            Some((
+                failure.message(name),
+                self.lsp.installable(&preview.path).is_some(),
+            ))
+        });
+        if let Some((message, install)) = failed
+            && let Some(preview) = &mut self.menu_preview
+        {
+            if preview.act {
+                let request = preview.request();
+                self.menu_preview = None;
+                self.offer_install(request, message);
+            } else {
+                preview.failure = Some(message);
+                preview.install = install;
+            }
+        }
+    }
+
+    /// The menu's entry under the mouse or the arrows changed (Q73): a code entry asks its
+    /// question about the symbol at the cursor once, and its answers fill the preview beside
+    /// the menu; other entries have none.
+    pub(super) fn preview_entry(&mut self) {
+        let goal = match self
+            .entry_menu
+            .as_ref()
+            .filter(|menu| menu.editor)
+            .and_then(|menu| menu.actions.get(menu.selected))
+        {
+            Some(EntryAction::Code(goal)) => *goal,
+            _ => {
+                self.menu_preview = None;
+                return;
+            }
+        };
+        if self
+            .menu_preview
+            .as_ref()
+            .is_some_and(|preview| preview.goal == goal)
+        {
+            return;
+        }
+        let Some(index) = self.sync_active() else {
+            return;
+        };
+        let file = &self.open_files[index];
+        let line = file.lines.get(file.cursor_row).cloned().unwrap_or_default();
+        let mut preview = MenuPreview {
+            goal,
             path: file.path.clone(),
             version: file.edits,
             row: file.cursor_row,
-            start,
-            mouse: None,
-            since: Instant::now(),
-            asked: true,
-            text: None,
-            scroll: 0,
-            overflow: 0,
+            column: file.cursor_column,
+            places: None,
+            lines: Vec::new(),
+            failure: None,
+            install: false,
+            hovered: None,
+            act: false,
         };
-        match self
-            .lsp
-            .hover(&hover.path, hover.version, hover.row, start, &line)
-        {
-            Ok(()) => self.hover = Some(hover),
-            Err(message) => self.status = message,
+        if let Err(message) = self.lsp.places(
+            goal,
+            &preview.path,
+            preview.version,
+            preview.row,
+            preview.column,
+            &line,
+        ) {
+            preview.install = self.lsp.installable(&preview.path).is_some();
+            preview.failure = Some(message);
+        }
+        self.menu_preview = Some(preview);
+    }
+
+    /// A code entry of the editor's menu clicked: what its answers say, now or once they come;
+    /// a server that is missing offers to install itself.
+    pub(super) fn code_entry(&mut self, goal: Goal) {
+        let Some(preview) = self
+            .menu_preview
+            .as_mut()
+            .filter(|preview| preview.goal == goal)
+        else {
+            self.menu_preview = None;
+            return self.ask_places(goal);
+        };
+        if let Some(message) = preview.failure.clone() {
+            let request = preview.request();
+            self.menu_preview = None;
+            return self.offer_install(request, message);
+        }
+        match preview.places.take() {
+            Some(matches) => {
+                self.menu_preview = None;
+                self.act_on(goal, matches);
+            }
+            None => {
+                preview.act = true;
+                self.status = if goal == Goal::References {
+                    "Looking for the references...".into()
+                } else {
+                    "Looking for the definition...".into()
+                };
+            }
+        }
+    }
+
+    /// A click on a row of the preview: a place opens (in its own tab when it is another
+    /// file), More shows them all as the entry does, Install offers the server.
+    pub(super) fn choose_preview_row(&mut self, row: PreviewRow) {
+        self.entry_menu = None;
+        let Some(mut preview) = self.menu_preview.take() else {
+            return;
+        };
+        match row {
+            PreviewRow::Place(index) => {
+                if let Some(found) = preview
+                    .places
+                    .as_mut()
+                    .filter(|places| index < places.len())
+                    .map(|places| places.swap_remove(index))
+                {
+                    self.jump_to(found.path, found.line, found.column);
+                }
+            }
+            PreviewRow::More => {
+                if let Some(matches) = preview.places.take() {
+                    self.act_on(preview.goal, matches);
+                }
+            }
+            PreviewRow::Install => {
+                let message = preview.failure.take().unwrap_or_default();
+                self.offer_install(preview.request(), message);
+            }
         }
     }
 
     /// The mouse moved to `point`, over character `column` of `row` in the file at `index`
-    /// (none outside the text): on a word, its hover is asked once it rests there; elsewhere a
-    /// hover the mouse opened closes, unless the mouse is over its box.
-    pub(super) fn rest_mouse(&mut self, point: (u16, u16), at: Option<(usize, usize, usize)>) {
+    /// (none outside the text), with Ctrl held or not: on a word with Ctrl, its hover is asked
+    /// once it rests there (Q72; the terminal sends no Ctrl alone, so the time counts from the
+    /// last move with it); without Ctrl a hover not asked yet is dropped and an open one stays
+    /// on its word and its box; elsewhere a hover the mouse opened closes.
+    pub(super) fn rest_mouse(
+        &mut self,
+        point: (u16, u16),
+        at: Option<(usize, usize, usize)>,
+        ctrl: bool,
+    ) {
+        if super::input::contains(self.regions.hover, point) {
+            return;
+        }
         let word = at.and_then(|(index, row, column)| {
             let file = self.open_files.get(index)?;
             let line = file.lines.get(row)?;
@@ -307,11 +700,17 @@ impl App {
             let start = word_at(line, column)?;
             Some((file, row, start))
         });
+        let mouse = self
+            .hover
+            .as_ref()
+            .is_some_and(|hover| hover.mouse.is_some());
         if let Some((file, row, start)) = word {
             let same = self.hover.as_ref().is_some_and(|hover| {
                 hover.path == file.path && (hover.row, hover.start) == (row, start)
             });
-            if !same {
+            if same && !ctrl && self.hover.as_ref().is_some_and(|hover| !hover.asked) {
+                self.hover = None;
+            } else if !same && ctrl {
                 self.hover = Some(Hover {
                     path: file.path.clone(),
                     version: file.edits,
@@ -324,13 +723,10 @@ impl App {
                     scroll: 0,
                     overflow: 0,
                 });
+            } else if !same && mouse {
+                self.hover = None;
             }
-        } else if self
-            .hover
-            .as_ref()
-            .is_some_and(|hover| hover.mouse.is_some())
-            && !super::input::contains(self.regions.hover, point)
-        {
+        } else if mouse {
             self.hover = None;
         }
     }
@@ -370,13 +766,23 @@ impl App {
             self.lsp.change(&file.path, &file.text(), file.edits);
         }
         let line = file.lines.get(row).cloned().unwrap_or_default();
-        // Without a server the mouse says nothing: it only passed by.
-        if self
-            .lsp
-            .hover(&path, file.edits, row, start, &line)
-            .is_err()
-        {
-            self.hover = None;
+        if let Err(message) = self.lsp.hover(&path, file.edits, row, start, &line) {
+            // A server that failed says why in the box, and how to install it (Q75); without
+            // one for the language the mouse says nothing.
+            let why = self
+                .lsp
+                .failure(&path)
+                .map(|_| match self.lsp.installable(&path) {
+                    Some(_) => format!(
+                        "{message}\n\n{} or Ctrl+click offers to install it",
+                        self.keys.label(super::keys::Action::Definition)
+                    ),
+                    None => message,
+                });
+            match (why, self.hover.as_mut()) {
+                (Some(why), Some(hover)) => hover.text = Some(why),
+                _ => self.hover = None,
+            }
         }
     }
 
@@ -453,8 +859,34 @@ impl App {
         }
     }
 
-    /// The answer to F12, Alt+F12 or Shift+F12 for the active file at edit `version`.
+    /// The answer to F12, Alt+F12, Shift+F12 or a code entry of the editor's menu for the
+    /// active file at edit `version`; the menu's preview takes the one it waits for.
     fn places_answered(&mut self, path: PathBuf, version: u64, goal: Goal, places: Vec<Place>) {
+        let previewed = self.menu_preview.as_ref().is_some_and(|preview| {
+            preview.goal == goal
+                && preview.path == path
+                && preview.version == version
+                && preview.places.is_none()
+                && preview.failure.is_none()
+        });
+        if previewed {
+            let matches = self.matches_of(&places);
+            let lines = match matches.first() {
+                Some(first) if goal == Goal::Peek => file_lines(self, &first.path),
+                _ => Vec::new(),
+            };
+            let Some(preview) = &mut self.menu_preview else {
+                return;
+            };
+            if preview.act {
+                self.menu_preview = None;
+                self.act_on(goal, matches);
+            } else {
+                preview.places = Some(matches);
+                preview.lines = lines;
+            }
+            return;
+        }
         let Some(file) = self.active_tab.and_then(|index| self.open_files.get(index)) else {
             return;
         };
@@ -462,20 +894,23 @@ impl App {
         if file.path != path || file.edits != version {
             return;
         }
-        let (name, title) = match goal {
-            Goal::References => ("references", "References"),
-            Goal::Declaration => ("declaration", "Declarations"),
-            Goal::TypeDefinition => ("type definition", "Type definitions"),
-            Goal::Implementation => ("implementations", "Implementations"),
-            Goal::Definition | Goal::Peek => ("definition", "Definitions"),
-        };
-        if places.is_empty() {
-            self.status = format!("No {name} found");
-            return;
+        if self
+            .waiting
+            .as_ref()
+            .is_some_and(|request| request.path() == path)
+        {
+            self.waiting = None;
         }
+        let matches = self.matches_of(&places);
+        self.act_on(goal, matches);
+    }
+
+    /// The places of an answer, with their line of text and the symbol's columns in
+    /// characters.
+    fn matches_of(&self, places: &[Place]) -> Vec<SearchMatch> {
         let mut matches = Vec::new();
         let mut read: Option<(PathBuf, Vec<String>)> = None;
-        for place in &places {
+        for place in places {
             if read.as_ref().is_none_or(|(path, _)| *path != place.path) {
                 read = Some((place.path.clone(), file_lines(self, &place.path)));
             }
@@ -494,6 +929,17 @@ impl App {
                 length: end.saturating_sub(column),
                 text,
             });
+        }
+        matches
+    }
+
+    /// What the places answer `goal`: one goes there, Peek shows it in a box, several (and
+    /// references, always) are a list; none is said.
+    fn act_on(&mut self, goal: Goal, mut matches: Vec<SearchMatch>) {
+        let (name, title) = goal_names(goal);
+        if matches.is_empty() {
+            self.status = format!("No {name} found");
+            return;
         }
         self.status.clear();
         match goal {
@@ -546,6 +992,8 @@ impl App {
         for event in self.lsp.poll() {
             self.lsp_event(event);
         }
+        self.tick_failures();
+        self.tick_install();
         self.tick_hover(now);
     }
 
@@ -602,6 +1050,9 @@ impl App {
                 }) else {
                     return;
                 };
+                if hover.mouse.is_none() {
+                    self.waiting = None;
+                }
                 if text.is_empty() {
                     if hover.mouse.is_none() {
                         self.status = "Nothing to show for this symbol".into();

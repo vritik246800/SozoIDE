@@ -148,6 +148,18 @@ capture() {
   sleep 0.6
   tmux capture-pane -e -p -t demo >"/out/$1.ansi"
 }
+# Where TEXT first is on the screen, as "column row" counted from 1 (characters, not bytes).
+place() {
+  tmux capture-pane -p -t demo |
+    TEXT="$1" perl -CSD -ne 'my $i = index($_, $ENV{TEXT}); if ($i >= 0) { print $i + 1, " ", $., "\n"; exit }'
+}
+# The mouse as the terminal sends it (SGR): button 2 pressed and let go is a right-click,
+# 35 a move.
+mouse() {
+  tmux send-keys -t demo -l $'\e'"[<$1;$2;$3M"
+  [ "$1" = 35 ] || tmux send-keys -t demo -l $'\e'"[<$1;$2;$3m"
+  sleep 0.4
+}
 
 tmux -f /dev/null new-session -d -s demo -x 132 -y 34 -c "$project" \
   "env TERM=xterm-256color SHELL=/bin/bash SOZO_REDUCED_MOTION=1 $sozo"
@@ -241,5 +253,15 @@ keys Enter
 text '    schedule(1)[0].'
 wait_for ' 1/'
 capture intellisense
+# The right-click menu on the call of schedule, the mouse on Find References: the answers in
+# the small box beside the menu (F31, Q73).
+keys Escape
+read -r column row < <(place 'schedule(1)')
+mouse 2 "$((column + 2))" "$row"
+wait_for 'Find References'
+read -r column row < <(place 'Find References')
+mouse 35 "$((column + 3))" "$row"
+wait_for 'References ('
+capture menu
 tmux kill-server
 echo "Captured $(ls /out | wc -l) screens into /out"

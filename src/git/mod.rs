@@ -7,4 +7,4 @@ pub(crate) mod view;
 
 pub use model::*;
 pub use panel::*;
-pub use repository::{ExplorerChanges, explorer_changes};
+pub use repository::{ExplorerChanges, explorer_changes, line_marks};

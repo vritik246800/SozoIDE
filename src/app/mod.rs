@@ -12,7 +12,7 @@ use ratatui_image::picker::Picker;
 use crate::{
     database::controller::DatabaseController,
     editor::{OpenFile, SearchState},
-    git::{ChangeArea, ExplorerChanges, FileStatus, controller::GitController},
+    git::{ChangeArea, ExplorerChanges, FileStatus, LineMark, controller::GitController},
     terminal::Terminals,
     update::{Notes, UpdateState, Updater, Welcome, notes_since},
 };
@@ -31,7 +31,7 @@ pub use explorer::{
     EntryAction, EntryMenu, FileEntry, FolderCount, Kind, NamePrompt, PropertiesDialog, grouped,
     human_size,
 };
-pub use intellisense::{Completion, SHOWN_ITEMS};
+pub use intellisense::{Completion, PreviewRow, SHOWN_ITEMS, goal_names};
 pub use keys::{Action, KeyEditor, Keymap};
 use layout::{DragTarget, TabDrag, inner_size};
 pub use layout::{
@@ -43,6 +43,13 @@ pub use tasks::{Dependencies, HelpTab};
 
 /// How often the open files and the Explorer are compared with the disk.
 const WATCH_INTERVAL: Duration = Duration::from_secs(1);
+/// How soon after an edit the Git marks of the editor's margin are read again (F34).
+const MARKS_INTERVAL: Duration = Duration::from_millis(250);
+
+/// The Git marks of the lines of the open files (F34): by file, the edit count they were read
+/// at and each row's mark.
+pub type LineMarks =
+    std::collections::HashMap<PathBuf, (u64, std::collections::HashMap<usize, LineMark>)>;
 
 /// The bottom terminal opens up to three shells, each in a tab; the right one always has two
 /// (F04, Q59).
@@ -132,6 +139,19 @@ pub struct App {
     /// The word under the mouse while Ctrl is held: file, row, first and last column.
     pub link: Option<(usize, usize, usize, usize)>,
     pub back: Vec<(PathBuf, usize, usize)>,
+    /// The answers beside the editor's menu (Q73) and the request a server is still to answer.
+    pub menu_preview: Option<intellisense::MenuPreview>,
+    waiting: Option<intellisense::Request>,
+    /// A language server being installed (Q74), and how one is installed and watched here:
+    /// `deps` outside the tests.
+    pub server_watch: Option<intellisense::ServerWatch>,
+    installs: fn(&str) -> Option<Vec<String>>,
+    watcher: fn(&str) -> std::sync::mpsc::Receiver<()>,
+    component_watcher: fn(
+        &'static str,
+        Vec<String>,
+        crate::update::deps::Found,
+    ) -> std::sync::mpsc::Receiver<crate::update::deps::Found>,
     lsp_synced: Instant,
     /// F32: a command waiting for Enter, the projects of a monorepo to choose from, the one
     /// chosen, the commands already confirmed and whether a task may still be running.
@@ -155,6 +175,16 @@ pub struct App {
     /// running in the background, one at a time.
     pub git_changes: ExplorerChanges,
     git_changes_reader: Option<Receiver<ExplorerChanges>>,
+    /// The same for the lines of the open files, in the editor's margin (F34), and when it was
+    /// last asked.
+    pub line_marks: LineMarks,
+    line_marks_reader: Option<Receiver<LineMarks>>,
+    /// The repository's `.git` folder, when of a repository; the times of what a commit, a
+    /// stage, a checkout or a fetch change; whether the Source Control is behind them (F35).
+    git_dir: Option<PathBuf>,
+    git_stamp: Vec<Option<SystemTime>>,
+    git_moved: bool,
+    line_marks_asked: Instant,
     /// A mouse drag that started in the editor text selects.
     selecting: bool,
     /// Where a drag over a 3D model was last: moving from there turns it.
@@ -258,6 +288,12 @@ impl App {
             peek: None,
             link: None,
             back: Vec::new(),
+            menu_preview: None,
+            waiting: None,
+            server_watch: None,
+            installs: crate::update::deps::server_install,
+            watcher: crate::update::deps::watch,
+            component_watcher: crate::update::deps::watch_component,
             lsp_synced: now,
             breakpoints: Default::default(),
             debug_build: None,
@@ -268,6 +304,12 @@ impl App {
             folders: Vec::new(),
             git_changes: ExplorerChanges::new(),
             git_changes_reader: None,
+            line_marks: LineMarks::new(),
+            line_marks_reader: None,
+            git_dir: None,
+            git_stamp: Vec::new(),
+            git_moved: false,
+            line_marks_asked: now,
             selecting: false,
             turning: None,
             scrubbing: false,
@@ -351,12 +393,16 @@ impl App {
         self.tick_properties();
         match self.git_changes_reader.as_ref().map(Receiver::try_recv) {
             Some(Ok(changes)) => {
+                if changes != self.git_changes {
+                    self.git_moved = true;
+                }
                 self.git_changes = changes;
                 self.git_changes_reader = None;
             }
             Some(Err(TryRecvError::Disconnected)) => self.git_changes_reader = None,
             _ => {}
         }
+        self.tick_line_marks(now);
         self.tick_dependencies();
         self.tick_lsp(now);
         self.tick_debug();
@@ -400,6 +446,46 @@ impl App {
         }
         // Edits and Git itself change the marks without touching the folders.
         self.read_git_changes();
+        let stamp = self.git_stamp();
+        if stamp != self.git_stamp {
+            self.git_stamp = stamp;
+            self.git_moved = true;
+        }
+        // The Source Control on screen follows commits and changes made elsewhere, never in
+        // the middle of one of its own operations (F35).
+        if self.git_moved && self.show_git && !self.git.operation {
+            self.git_moved = false;
+            self.git.follow();
+        }
+    }
+
+    /// The times of the repository's `HEAD`, index, reflog and refs.
+    fn git_stamp(&mut self) -> Vec<Option<SystemTime>> {
+        if self.git_dir.is_none() {
+            self.git_dir = self
+                .root
+                .ancestors()
+                .map(|folder| folder.join(".git"))
+                .find(|git| git.is_dir());
+        }
+        let Some(git) = &self.git_dir else {
+            return Vec::new();
+        };
+        [
+            "HEAD",
+            "index",
+            "logs/HEAD",
+            "refs/heads",
+            "packed-refs",
+            "FETCH_HEAD",
+        ]
+        .iter()
+        .map(|name| {
+            std::fs::metadata(git.join(name))
+                .and_then(|data| data.modified())
+                .ok()
+        })
+        .collect()
     }
 
     /// Asks Git in the background what changed in the project (F01); a slow repository never
@@ -412,6 +498,54 @@ impl App {
         let root = self.root.clone();
         std::thread::spawn(move || sender.send(crate::git::explorer_changes(&root)));
         self.git_changes_reader = Some(receiver);
+    }
+
+    /// The Git marks of the open files' lines (F34): the reading that came, then another in
+    /// the background after an edit (at most every `MARKS_INTERVAL`) and every
+    /// `WATCH_INTERVAL` (a commit or a stage changes them too); one at a time.
+    fn tick_line_marks(&mut self, now: Instant) {
+        match self.line_marks_reader.as_ref().map(Receiver::try_recv) {
+            Some(Ok(marks)) => {
+                self.line_marks = marks;
+                self.line_marks_reader = None;
+            }
+            Some(Err(TryRecvError::Disconnected)) => self.line_marks_reader = None,
+            _ => {}
+        }
+        let since = now.saturating_duration_since(self.line_marks_asked);
+        let edited = self.open_files.iter().any(|file| {
+            file.is_text()
+                && self
+                    .line_marks
+                    .get(&file.path)
+                    .is_none_or(|(edits, _)| *edits != file.edits)
+        });
+        if self.line_marks_reader.is_some()
+            || !(since >= WATCH_INTERVAL || edited && since >= MARKS_INTERVAL)
+        {
+            return;
+        }
+        self.line_marks_asked = now;
+        // ponytail: every open file is compared again each second; only the ones on screen
+        // if many big files make it slow.
+        let files = self
+            .open_files
+            .iter()
+            .filter(|file| file.is_text())
+            .map(|file| (file.path.clone(), file.edits, file.text()))
+            .collect::<Vec<_>>();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let marks = files
+                .into_iter()
+                .map(|(path, edits, text)| {
+                    let marks = crate::git::line_marks(&path, &text);
+                    (path, (edits, marks))
+                })
+                .collect();
+            let _ = sender.send(marks);
+        });
+        self.line_marks_reader = Some(receiver);
     }
 
     /// Git's change of an Explorer entry: a file's own, or the strongest below a folder.
@@ -599,6 +733,7 @@ impl App {
             selected: 0,
             editor: true,
         });
+        self.menu_preview = None;
     }
 
     /// Cut, Copy or Paste from the editor's menu.
@@ -617,7 +752,7 @@ impl App {
                 text
             }
             EntryAction::Paste => return self.paste_clipboard(),
-            EntryAction::Code(goal) => return self.ask_places(goal),
+            EntryAction::Code(goal) => return self.code_entry(goal),
             _ => None,
         };
         if let Some(text) = text {
@@ -992,6 +1127,156 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_open_source_control_follows_commits_and_changes_made_elsewhere() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .current_dir(root)
+                .args([
+                    "-c",
+                    "user.name=Test User",
+                    "-c",
+                    "user.email=test@example.com",
+                ])
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .unwrap()
+                .status;
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "first"]);
+        let mut app = App::new(root.to_path_buf()).unwrap();
+        let settle = |app: &mut App| {
+            let started = Instant::now();
+            while app.git.operation || app.git.following() || app.git_changes_reader.is_some() {
+                assert!(started.elapsed() < Duration::from_secs(10));
+                std::thread::sleep(Duration::from_millis(20));
+                app.tick_at(Instant::now());
+            }
+        };
+        let commits = |app: &App| app.git.panel.lock().unwrap().commits.len();
+        app.show_git = true;
+        app.git.open();
+        settle(&mut app);
+        app.watch_disk();
+        settle(&mut app);
+        assert_eq!(commits(&app), 1);
+        // Nothing changed: nothing is read again.
+        app.watch_disk();
+        assert!(!app.git.operation && !app.git.following());
+        // A commit made in a terminal reaches the panel by itself, read in the background
+        // without an operation: the panel is never left saying it is busy (E50).
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        git(&["commit", "-q", "-am", "second"]);
+        app.watch_disk();
+        assert!(!app.git.operation);
+        settle(&mut app);
+        app.watch_disk();
+        settle(&mut app);
+        assert_eq!(commits(&app), 2);
+        // Hidden, it waits; shown, it catches up.
+        app.show_git = false;
+        std::fs::write(root.join("a.txt"), "three\n").unwrap();
+        git(&["commit", "-q", "-am", "third"]);
+        app.watch_disk();
+        settle(&mut app);
+        assert!(!app.git.following() && commits(&app) == 2);
+        app.show_git = true;
+        app.watch_disk();
+        settle(&mut app);
+        assert_eq!(commits(&app), 3);
+        // A file changed without a commit shows in Changes.
+        std::fs::write(root.join("b.txt"), "new\n").unwrap();
+        app.watch_disk();
+        settle(&mut app);
+        app.watch_disk();
+        settle(&mut app);
+        let panel = app.git.panel.lock().unwrap();
+        assert!(
+            panel
+                .status
+                .untracked
+                .iter()
+                .any(|change| change.path.ends_with("b.txt"))
+        );
+    }
+
+    #[test]
+    fn open_files_get_their_git_marks_in_the_background_after_edits_and_commits() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .current_dir(root)
+                .args([
+                    "-c",
+                    "user.name=Test User",
+                    "-c",
+                    "user.email=test@example.com",
+                ])
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .unwrap()
+                .status;
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        let path = root.join("main.rs");
+        std::fs::write(&path, "fn main() {\n    let a = 1;\n}\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "Base"]);
+        let mut app = App::new(root.to_path_buf()).unwrap();
+        app.open_file(path.clone()).unwrap();
+        // Waits for the reading of the file at its edit count, as the tick gets it.
+        let marks = |app: &mut App, later: Duration| {
+            let edits = app.open_files[0].edits;
+            let started = Instant::now();
+            app.tick_at(Instant::now() + later);
+            loop {
+                app.tick_at(Instant::now() + later);
+                if let Some((read, marks)) = app.line_marks.get(&path)
+                    && *read == edits
+                    && app.line_marks_reader.is_none()
+                {
+                    let mut marks = marks
+                        .iter()
+                        .map(|(row, mark)| (*row, *mark))
+                        .collect::<Vec<_>>();
+                    marks.sort_by_key(|(row, _)| *row);
+                    return marks;
+                }
+                assert!(started.elapsed() < Duration::from_secs(10), "no marks");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        assert_eq!(marks(&mut app, WATCH_INTERVAL), []);
+        // Edits not saved yet are marked: line 2 changed, a line added after the last.
+        let press = |app: &mut App, code| app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+        app.open_files[0].move_cursor_to(1, 12);
+        press(&mut app, KeyCode::Char('2'));
+        app.open_files[0].move_cursor_to(2, 1);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.open_files[0].lines[1], "    let a = 21;");
+        assert_eq!(
+            marks(&mut app, MARKS_INTERVAL),
+            [(1, LineMark::Modified), (3, LineMark::Added)]
+        );
+        // Committed, they go at the next look (Git changes them without an edit).
+        app.save_file(0);
+        git(&["commit", "-q", "-am", "Edit"]);
+        app.line_marks_asked = Instant::now();
+        assert_eq!(marks(&mut app, WATCH_INTERVAL * 2), []);
+    }
+
+    #[test]
     fn opens_links_with_the_browser_of_each_system() {
         let program = |os| {
             let command = opener(os, "https://example.com");
@@ -1204,7 +1489,8 @@ mod tests {
         app.open_files[0].make_autosave_due();
         app.tick();
 
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ab!\nnext");
+        // The newline at the end of the file stays (E47).
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ab!\nnext\n");
         assert!(!app.active_file().unwrap().dirty);
     }
 
