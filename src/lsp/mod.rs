@@ -4,7 +4,7 @@
 //! only writes to it and reads what a thread already received, so typing never waits for it.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::{Path, PathBuf},
 };
 
@@ -166,13 +166,39 @@ pub enum Event {
     Message(String),
 }
 
+/// Why a server is not running: it is not installed, it stopped before answering `initialize`
+/// (it could not start: rustup's `rust-analyzer` without its component) or after, with the
+/// last line it wrote on its errors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Failure {
+    Missing,
+    Start(String),
+    Stopped(String),
+}
+
+impl Failure {
+    /// What the footer says about server `name`.
+    pub fn message(&self, name: &str) -> String {
+        let (what, why) = match self {
+            Self::Missing => return format!("{name} is not installed"),
+            Self::Start(why) => ("could not start", why),
+            Self::Stopped(why) => ("stopped", why),
+        };
+        if why.is_empty() {
+            format!("{name} {what}")
+        } else {
+            format!("{name} {what}: {why}")
+        }
+    }
+}
+
 pub struct Lsp {
     root: PathBuf,
     /// Off in the tests, which must not start the servers of the machine they run on.
     enabled: bool,
     clients: HashMap<&'static str, Client>,
-    /// Servers that could not start: said once, not tried again.
-    failed: HashSet<&'static str>,
+    /// Servers that are not running and why: said once, not tried again until `restart`.
+    failed: HashMap<&'static str, Failure>,
     /// The open documents, with the edit count last sent.
     documents: HashMap<PathBuf, u64>,
     pub diagnostics: HashMap<PathBuf, Vec<Diagnostic>>,
@@ -186,7 +212,7 @@ impl Lsp {
             root,
             enabled,
             clients: HashMap::new(),
-            failed: HashSet::new(),
+            failed: HashMap::new(),
             documents: HashMap::new(),
             diagnostics: HashMap::new(),
             asked: Vec::new(),
@@ -198,12 +224,12 @@ impl Lsp {
         let Some((name, arguments, _)) = server_for(path) else {
             return Ok(None);
         };
-        if !self.enabled || self.failed.contains(name) {
+        if !self.enabled || self.failed.contains_key(name) {
             return Ok(None);
         }
         if !self.clients.contains_key(name) {
             let Some(command) = crate::update::deps::server_command(name, arguments) else {
-                self.failed.insert(name);
+                self.failed.insert(name, Failure::Missing);
                 return Err(format!(
                     "Install {name} for IntelliSense: Help, then Dependencies"
                 ));
@@ -213,7 +239,8 @@ impl Lsp {
                     self.clients.insert(name, client);
                 }
                 Err(error) => {
-                    self.failed.insert(name);
+                    self.failed
+                        .insert(name, Failure::Start(format!("{error:#}")));
                     return Err(format!("{error:#}"));
                 }
             }
@@ -345,6 +372,9 @@ impl Lsp {
             );
         };
         let character = utf16_column(line, column);
+        if let Some(failure) = self.failed.get(name) {
+            return Err(failure.message(name));
+        }
         if !self.enabled {
             self.asked
                 .push((method.to_owned(), path.to_path_buf(), row, character));
@@ -391,16 +421,63 @@ impl Lsp {
             for message in client.received() {
                 handle(client, message, &mut self.diagnostics, &mut events);
             }
+            client.send_later();
             if !client.alive() {
                 stopped.push(*name);
             }
         }
         for name in stopped {
-            self.clients.remove(name);
-            self.failed.insert(name);
-            events.push(Event::Message(format!("{name} stopped")));
+            let Some(client) = self.clients.remove(name) else {
+                continue;
+            };
+            let why = client.last_error();
+            let failure = if client.ready {
+                Failure::Stopped(why)
+            } else {
+                Failure::Start(why)
+            };
+            events.push(Event::Message(failure.message(name)));
+            self.failed.insert(name, failure);
         }
         events
+    }
+
+    /// Why the server of `path` is not running, if it failed.
+    pub fn failure(&self, path: &Path) -> Option<(&'static str, &Failure)> {
+        let name = server_for(path)?.0;
+        self.failed.get(name).map(|failure| (name, failure))
+    }
+
+    /// The server `path` needs that installing would bring: one not installed, or one that
+    /// could not start.
+    pub fn installable(&self, path: &Path) -> Option<&'static str> {
+        self.failure(path)
+            .filter(|(_, failure)| !matches!(failure, Failure::Stopped(_)))
+            .map(|(name, _)| name)
+    }
+
+    /// Whether server `name` failed in a way installing it answers: not installed, or it could
+    /// not start.
+    pub fn missing(&self, name: &str) -> bool {
+        self.failed
+            .get(name)
+            .is_some_and(|failure| !matches!(failure, Failure::Stopped(_)))
+    }
+
+    /// After installing `name`: its failure is forgotten and so are its documents and their
+    /// problems, which the app opens again (the server starts with the first).
+    pub fn restart(&mut self, name: &str) {
+        self.failed.remove(name);
+        self.clients.remove(name);
+        let other = |path: &PathBuf| server_for(path).is_none_or(|server| server.0 != name);
+        self.documents.retain(|path, _| other(path));
+        self.diagnostics.retain(|path, _| other(path));
+    }
+
+    /// A server that failed, for the tests.
+    #[cfg(test)]
+    pub fn fail(&mut self, name: &'static str, failure: Failure) {
+        self.failed.insert(name, failure);
     }
 }
 
@@ -423,7 +500,7 @@ fn handle(
             client.answer(id, result);
         }
         (Some(id), None) => {
-            let Some(pending) = id.as_i64().and_then(|id| client.pending.remove(&id)) else {
+            let Some(pending) = id.as_i64().and_then(|id| client.answered(id, &message)) else {
                 return;
             };
             if pending == Pending::Initialize {
@@ -438,6 +515,10 @@ fn handle(
             if let Some(path) = params["uri"].as_str().and_then(uri::to_path) {
                 diagnostics.insert(path, parse_diagnostics(&params["diagnostics"]));
             }
+        }
+        // rust-analyzer says when it has loaded the project.
+        (None, Some("experimental/serverStatus")) => {
+            client.quiescent = message["params"]["quiescent"].as_bool();
         }
         (None, Some("window/showMessage")) if message["params"]["type"] == 1 => {
             if let Some(text) = message["params"]["message"].as_str() {
@@ -865,6 +946,90 @@ mod tests {
                 ("textDocument/implementation", rust.to_path_buf(), 0, 0),
             ]
         );
+    }
+
+    #[test]
+    fn failed_servers_say_why_and_start_again_after_installing() {
+        let mut lsp = Lsp::new(PathBuf::from("/project"), false);
+        let rust = Path::new("/project/a.rs");
+        let python = Path::new("/project/b.py");
+        let c = Path::new("/project/c.c");
+        let why = "error: Unknown binary 'rust-analyzer' in official toolchain 'stable'.";
+        lsp.fail("rust-analyzer", Failure::Start(why.into()));
+        lsp.fail("pyright-langserver", Failure::Missing);
+        lsp.fail("clangd", Failure::Stopped("killed".into()));
+        assert_eq!(
+            lsp.places(Goal::Definition, rust, 1, 0, 0, "x"),
+            Err(format!("rust-analyzer could not start: {why}"))
+        );
+        assert_eq!(
+            lsp.hover(python, 1, 0, 0, "x"),
+            Err("pyright-langserver is not installed".into())
+        );
+        assert_eq!(
+            lsp.places(Goal::References, c, 1, 0, 0, "x"),
+            Err("clangd stopped: killed".into())
+        );
+        assert!(lsp.asked.is_empty());
+        // Installing brings the ones that are missing or could not start, not a crash.
+        assert_eq!(lsp.installable(rust), Some("rust-analyzer"));
+        assert_eq!(lsp.installable(python), Some("pyright-langserver"));
+        assert_eq!(lsp.installable(c), None);
+        assert_eq!(lsp.installable(Path::new("/project/notes.md")), None);
+        assert_eq!(
+            Failure::Start(String::new()).message("gopls"),
+            "gopls could not start"
+        );
+
+        // After installing, the server is asked again and its documents open again.
+        lsp.documents.insert(rust.to_path_buf(), 4);
+        lsp.documents.insert(python.to_path_buf(), 2);
+        lsp.diagnostics.insert(rust.to_path_buf(), Vec::new());
+        lsp.restart("rust-analyzer");
+        assert!(!lsp.documents.contains_key(rust) && lsp.documents.contains_key(python));
+        assert!(lsp.diagnostics.is_empty());
+        assert_eq!(lsp.installable(rust), None);
+        lsp.places(Goal::Definition, rust, 1, 0, 0, "x").unwrap();
+        assert_eq!(lsp.asked.len(), 1);
+
+        // A server that stops before answering `initialize` could not start; after, it
+        // stopped. Both are said once and stay failed.
+        let folder = tempfile::tempdir().unwrap();
+        let command = ["git", "hash-object", "--stdin"].map(str::to_owned);
+        for (ready, said) in [(false, "clangd could not start"), (true, "clangd stopped")] {
+            let mut client = Client::start(&command, folder.path()).unwrap();
+            client.ready = ready;
+            client.kill();
+            lsp.failed.remove("clangd");
+            lsp.clients.insert("clangd", client);
+            assert_eq!(lsp.poll(), [Event::Message(said.into())]);
+            assert!(lsp.clients.is_empty());
+            assert_eq!(lsp.poll(), []);
+        }
+        assert_eq!(
+            lsp.failure(c),
+            Some(("clangd", &Failure::Stopped(String::new())))
+        );
+    }
+
+    #[test]
+    fn the_server_says_when_it_has_loaded_the_project() {
+        let folder = tempfile::tempdir().unwrap();
+        let command = ["git", "hash-object", "--stdin"].map(str::to_owned);
+        let mut client = Client::start(&command, folder.path()).unwrap();
+        client.initialized();
+        let mut diagnostics = HashMap::new();
+        let mut events = Vec::new();
+        for (quiescent, loading) in [(false, true), (true, false)] {
+            let status = json!({
+                "method": "experimental/serverStatus",
+                "params": {"health": "ok", "quiescent": quiescent},
+            });
+            handle(&mut client, status, &mut diagnostics, &mut events);
+            assert_eq!(client.quiescent, Some(quiescent));
+            assert_eq!(client.loading(), loading);
+        }
+        assert!(events.is_empty());
     }
 
     #[test]

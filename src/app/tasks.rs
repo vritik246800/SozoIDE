@@ -21,6 +21,12 @@ pub struct Confirm {
     pub running: String,
     /// A project task (Shift+F5 stops it); an installation goes back to Help to be checked.
     pub task: bool,
+    /// A language server the editor needed (Q74): watched until it is there, then the request
+    /// runs again.
+    pub server: Option<(&'static str, super::intellisense::Request)>,
+    /// The row of the Dependencies tab being installed or updated: watched until it changes
+    /// (F35).
+    pub component: Option<usize>,
 }
 
 /// The projects of a monorepo to choose from, for `task`.
@@ -44,7 +50,9 @@ pub struct Dependencies {
     pub components: Vec<Component>,
     pub found: Option<Vec<Found>>,
     pub selected: usize,
-    reader: Option<Receiver<Vec<Found>>>,
+    pub(super) reader: Option<Receiver<Vec<Found>>>,
+    /// The row being installed or updated and what will say it changed (F35).
+    pub watching: Option<(usize, Receiver<Found>)>,
 }
 
 impl Dependencies {
@@ -56,6 +64,7 @@ impl Dependencies {
             found,
             selected: 0,
             reader: None,
+            watching: None,
         }
     }
 
@@ -157,6 +166,8 @@ impl App {
             line,
             running,
             task: true,
+            server: None,
+            component: None,
         });
     }
 
@@ -180,14 +191,33 @@ impl App {
             KeyCode::Enter => {
                 if let Some(confirm) = self.confirm.take() {
                     if !confirm.task {
-                        // Help's check sees what the installation did when it opens again.
-                        if let Some(dependencies) = &mut self.dependencies {
-                            dependencies.found = None;
+                        // The row changes by itself once the installation is done (F35); the
+                        // terminal takes the focus, for a password.
+                        if let Some(index) = confirm.component
+                            && let Some(dependencies) = &mut self.dependencies
+                        {
+                            let component = &dependencies.components[index];
+                            let before = dependencies
+                                .found
+                                .as_ref()
+                                .and_then(|found| found.get(index).cloned())
+                                .unwrap_or(Found::Missing);
+                            dependencies.watching = Some((
+                                index,
+                                (self.component_watcher)(
+                                    component.program,
+                                    component.probe.clone(),
+                                    before,
+                                ),
+                            ));
                         }
                         self.overlay = super::Overlay::None;
                     }
                     self.confirmed.insert(confirm.line.clone());
                     self.type_command(&confirm.line, confirm.running, confirm.task);
+                    if let Some((name, request)) = confirm.server {
+                        self.watch_server(name, request);
+                    }
                 }
             }
             KeyCode::Esc => {
@@ -257,8 +287,11 @@ impl App {
             found: None,
             selected: 0,
             reader: None,
+            watching: None,
         });
-        if dependencies.found.is_none() && dependencies.reader.is_none() {
+        // Every time the tab opens, from what was found before: something may have been
+        // installed or removed since (F35).
+        if dependencies.reader.is_none() {
             dependencies.reader = Some(deps::check(&dependencies.components));
         }
     }
@@ -272,18 +305,69 @@ impl App {
         self.open_dependencies();
     }
 
-    /// In the tick: the check's result.
+    /// In the tick: the check's result, and the row being installed or updated once it
+    /// changes; a language server now there starts at once (F35).
     pub(super) fn tick_dependencies(&mut self) {
         let Some(dependencies) = &mut self.dependencies else {
             return;
         };
+        let mut changed = false;
         match dependencies.reader.as_ref().map(Receiver::try_recv) {
             Some(Ok(found)) => {
                 dependencies.found = Some(found);
                 dependencies.reader = None;
+                changed = true;
             }
             Some(Err(TryRecvError::Disconnected)) => dependencies.reader = None,
             _ => {}
+        }
+        if let Some((index, watched)) = &dependencies.watching {
+            match watched.try_recv() {
+                Ok(now) => {
+                    if let Some(found) = dependencies
+                        .found
+                        .as_mut()
+                        .and_then(|found| found.get_mut(*index))
+                    {
+                        *found = now;
+                    }
+                    dependencies.watching = None;
+                    changed = true;
+                }
+                Err(TryRecvError::Disconnected) => dependencies.watching = None,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        // Only when something new was found: a server that fails again waits for the next.
+        if !changed {
+            return;
+        }
+        let arrived = dependencies
+            .found
+            .iter()
+            .flat_map(|found| dependencies.components.iter().zip(found))
+            .filter(|(component, found)| {
+                component.kind == "Language server" && matches!(found, Found::Installed(_))
+            })
+            .map(|(component, _)| component.name)
+            .collect::<Vec<_>>();
+        for name in arrived {
+            // CSS's and JSON's come with HTML's.
+            let names: &[&str] = if name == "vscode-html-language-server" {
+                &[
+                    name,
+                    "vscode-css-language-server",
+                    "vscode-json-language-server",
+                ]
+            } else {
+                &[name]
+            };
+            for name in names {
+                if self.lsp.missing(name) {
+                    self.start_again(name);
+                    self.status = format!("{name} is installed");
+                }
+            }
         }
     }
 
@@ -355,6 +439,8 @@ impl App {
             ),
             line,
             task: false,
+            server: None,
+            component: Some(dependencies.selected),
         });
     }
 

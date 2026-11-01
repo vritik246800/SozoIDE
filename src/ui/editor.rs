@@ -15,10 +15,12 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 use crate::{
     app::{
         Action, App, BOTTOM_TERMINALS, DropZone, EntryAction, Focus, FolderCount, Keymap, Kind,
-        Regions, SHOWN_ITEMS, SplitDirection, grouped, human_size, video_areas,
+        PreviewRow, Regions, SHOWN_ITEMS, SplitDirection, goal_names, grouped, human_size,
+        video_areas,
     },
     branding::ASCII_LOGO,
     editor::{MarkdownDocument, OpenFile, Row as MarkdownRow, file_icon, highlight_lines},
+    git::LineMark,
     lsp::{Diagnostic, char_column},
     media::Video,
 };
@@ -148,17 +150,19 @@ fn render_sideways_bar(
 /// The Explorer's right-click menu at the mouse, kept on screen (F01).
 pub(super) fn render_entry_menu(frame: &mut Frame, app: &mut App, screen: Rect) {
     app.regions.entry_menu_items.clear();
+    app.regions.preview_rows.clear();
     let Some(menu) = &app.entry_menu else {
         return;
     };
-    // As wide as its longest entry (the editor's questions to the language server, F31).
-    let width = menu
+    // As wide as its longest entry (the editor's questions to the language server, F31), with
+    // room for the `▸` of the answers beside it (Q73).
+    let longest = menu
         .actions
         .iter()
-        .map(|action| action.label().len() as u16 + 4)
+        .map(|action| action.label().len())
         .max()
-        .unwrap_or(0)
-        .max(16);
+        .unwrap_or(0);
+    let width = (longest as u16 + 6).max(16);
     let height = menu.actions.len() as u16 + 2;
     let x = menu.position.0.min(screen.right().saturating_sub(width));
     let y = menu.position.1.min(screen.bottom().saturating_sub(height));
@@ -169,19 +173,201 @@ pub(super) fn render_entry_menu(frame: &mut Frame, app: &mut App, screen: Rect) 
         .border_style(Style::default().fg(ACTIVE));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let mut entry = None;
     for (index, action) in menu.actions.iter().enumerate() {
         let row = Rect::new(inner.x, inner.y + index as u16, inner.width, 1).intersection(inner);
-        let style = if index == menu.selected {
+        let selected = index == menu.selected;
+        let style = if selected {
             Style::default().fg(ACTIVE).add_modifier(Modifier::REVERSED)
         } else {
             Style::default().fg(TEXT)
         };
-        frame.render_widget(
-            Paragraph::new(format!(" {}", action.label())).style(style),
-            row,
-        );
+        let mut spans = vec![Span::raw(format!(" {:<longest$} ", action.label()))];
+        if let EntryAction::Code(goal) = action {
+            spans.push(Span::styled("▸", Style::default().fg(MUTED)));
+            if selected {
+                entry = Some((*goal, row.y));
+            }
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)).style(style), row);
         app.regions.entry_menu_items.push((*action, row));
     }
+    if let Some((goal, y)) = entry.filter(|_| menu.editor) {
+        render_menu_preview(frame, app, area, goal, y, screen);
+    }
+}
+
+/// The answers beside the editor's menu for its code entry `goal` on row `y` (F31, Q73): at the
+/// entry's height, right of the menu, or left of it without room there.
+fn render_menu_preview(
+    frame: &mut Frame,
+    app: &mut App,
+    menu: Rect,
+    goal: crate::lsp::Goal,
+    y: u16,
+    screen: Rect,
+) {
+    const MOST_PLACES: usize = 8;
+    const WIDEST: usize = 58;
+    let Some(preview) = app
+        .menu_preview
+        .as_ref()
+        .filter(|preview| preview.goal == goal)
+    else {
+        return;
+    };
+    let shown = |path: &std::path::Path| {
+        path.strip_prefix(&app.root)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    };
+    let (name, plural) = goal_names(goal);
+    let mut title = format!(" {plural} ");
+    let mut rows: Vec<(Option<PreviewRow>, Line<'static>)> = Vec::new();
+    match (&preview.failure, &preview.places) {
+        (Some(why), _) => {
+            for line in wrap_words(why, WIDEST) {
+                rows.push((
+                    None,
+                    Line::styled(format!(" {line} "), Style::default().fg(TEXT)),
+                ));
+            }
+            if preview.install {
+                rows.push((None, Line::raw("")));
+                rows.push((
+                    Some(PreviewRow::Install),
+                    Line::styled(
+                        " Install ",
+                        Style::default()
+                            .fg(ACTIVE)
+                            .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                    ),
+                ));
+            }
+        }
+        (None, None) => {
+            let spinner = crate::animation::spinner(app.motion.elapsed());
+            let mut line = busy(spinner, "Looking\u{2026}");
+            line.spans[1].style = Style::default().fg(MUTED);
+            line.spans.insert(0, Span::raw(" "));
+            rows.push((None, line));
+        }
+        (None, Some(places)) if places.is_empty() => {
+            rows.push((
+                None,
+                Line::styled(format!(" No {name} found "), Style::default().fg(MUTED)),
+            ));
+        }
+        (None, Some(places)) if goal == crate::lsp::Goal::Peek => {
+            let found = &places[0];
+            title = format!(" {}:{} ", shown(&found.path), found.line + 1);
+            let end = (found.line + MOST_PLACES).min(preview.lines.len());
+            let lines = &preview.lines[found.line.min(end)..end];
+            let width = end.max(1).to_string().len();
+            for (offset, spans) in highlight_lines(&found.path, lines).into_iter().enumerate() {
+                let row = found.line + offset;
+                let number = if row == found.line { ACTIVE } else { MUTED };
+                let mut line = vec![Span::styled(
+                    format!(" {:>width$} │ ", row + 1),
+                    Style::default().fg(number),
+                )];
+                line.extend(spans);
+                line.push(Span::raw(" "));
+                rows.push((Some(PreviewRow::Place(0)), Line::from(line)));
+            }
+        }
+        (None, Some(places)) => {
+            title = format!(" {plural} ({}) ", places.len());
+            for (index, place) in places.iter().take(MOST_PLACES).enumerate() {
+                let row = PreviewRow::Place(index);
+                let line = Line::from(vec![
+                    Span::styled(
+                        format!(" {}:{}  ", shown(&place.path), place.line + 1),
+                        Style::default().fg(MUTED),
+                    ),
+                    Span::styled(format!("{} ", place.text.trim()), Style::default().fg(TEXT)),
+                ]);
+                rows.push((Some(row), line));
+            }
+            if places.len() > MOST_PLACES {
+                rows.push((
+                    Some(PreviewRow::More),
+                    Line::styled(
+                        format!(" +{} more ", places.len() - MOST_PLACES),
+                        Style::default().fg(MUTED),
+                    ),
+                ));
+            }
+        }
+    }
+    let widest = rows
+        .iter()
+        .map(|(_, line)| line.width())
+        .chain([title.chars().count()])
+        .max()
+        .unwrap_or(0)
+        .clamp(16, WIDEST + 2) as u16;
+    let (width, height) = (widest + 2, rows.len() as u16 + 2);
+    let x = if menu.right() + width <= screen.right() {
+        menu.right()
+    } else {
+        menu.x.saturating_sub(width)
+    };
+    let y = y
+        .saturating_sub(1)
+        .min(screen.bottom().saturating_sub(height))
+        .max(screen.y);
+    let area = Rect::new(x, y, width, height).intersection(screen);
+    frame.render_widget(Clear, area);
+    let block = intelligence_block().title(Span::styled(title, Style::default().fg(ACTIVE)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    // The answer under the mouse in ACTIVE inverse; Peek's code is one place, not marked.
+    let hovered = preview
+        .hovered
+        .filter(|row| *row != PreviewRow::Install && goal != crate::lsp::Goal::Peek);
+    for (offset, (row, mut line)) in rows.into_iter().enumerate() {
+        let area = Rect::new(inner.x, inner.y + offset as u16, inner.width, 1).intersection(inner);
+        let marked = row.is_some() && row == hovered;
+        let style = Style::default().fg(ACTIVE).add_modifier(Modifier::REVERSED);
+        if marked {
+            for span in &mut line.spans {
+                span.style = style;
+            }
+        }
+        let paragraph = Paragraph::new(line);
+        frame.render_widget(
+            if marked {
+                paragraph.style(style)
+            } else {
+                paragraph
+            },
+            area,
+        );
+        if let Some(row) = row {
+            app.regions.preview_rows.push((row, area));
+        }
+    }
+}
+
+/// `text` in lines of at most `width` characters, broken between words.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    for word in text.split_whitespace() {
+        let Some(last) = lines.last_mut() else {
+            break;
+        };
+        if !last.is_empty() && last.chars().count() + 1 + word.chars().count() > width {
+            lines.push(word.to_owned());
+        } else {
+            if !last.is_empty() {
+                last.push(' ');
+            }
+            last.push_str(word);
+        }
+    }
+    lines
 }
 
 /// The Properties of an Explorer entry (F30): a folder says «Calculating…» until its count
@@ -560,6 +746,7 @@ pub(super) fn render_editor(frame: &mut Frame, app: &mut App, regions: &mut Regi
                 let margin = Margin {
                     breakpoints: app.breakpoints.get(path).unwrap_or(&none),
                     paused: app.paused_row(path),
+                    git: app.line_marks.get(path).map(|(_, marks)| marks),
                 };
                 render_file(
                     frame,
@@ -776,6 +963,21 @@ fn render_debug(frame: &mut Frame, app: &App, body: Rect) {
 struct Margin<'a> {
     breakpoints: &'a std::collections::BTreeSet<usize>,
     paused: Option<usize>,
+    /// Each row's change since the last commit (F34).
+    git: Option<&'a std::collections::HashMap<usize, LineMark>>,
+}
+
+/// The cell between a line's number and its text: its Git mark (F34), or the bar in the
+/// number's colour.
+fn git_mark(mark: Option<&LineMark>, number: Style) -> Span<'static> {
+    let (glyph, colour) = match mark {
+        Some(LineMark::Added) => ("▎", Color::Green),
+        Some(LineMark::Modified) => ("▎", Color::Yellow),
+        Some(LineMark::DeletedBelow) => ("▁", Color::Red),
+        Some(LineMark::DeletedAbove) => ("▔", Color::Red),
+        None => return Span::styled("|", number),
+    };
+    Span::styled(glyph, Style::default().fg(colour))
 }
 
 /// The suggestions of the language server under the cursor of the active file (F26).
@@ -899,12 +1101,15 @@ fn render_hover(frame: &mut Frame, app: &mut App, regions: &mut Regions, index: 
     let lines = text.lines().map(str::to_owned).collect::<Vec<_>>();
     let highlighted = highlight_lines(std::path::Path::new("hover.md"), &lines);
     let document = MarkdownDocument::parse(&lines);
+    // The frames of code blocks and tables are wider than their source (E49).
+    // ponytail: a frame wider than the box still wraps; let the box grow past 60 if it matters.
     let inner_width = lines
         .iter()
         .map(|line| Line::from(line.as_str()).width())
         .max()
         .unwrap_or(0)
-        .clamp(10, 78)
+        .max(document.width())
+        .clamp(10, 58)
         .min(usize::from(body.width.saturating_sub(2)));
     let rendered = lines
         .iter()
@@ -920,7 +1125,8 @@ fn render_hover(frame: &mut Frame, app: &mut App, regions: &mut Regions, index: 
         .collect::<Vec<_>>();
     let paragraph = Paragraph::new(rendered).wrap(Wrap { trim: false });
     let total = paragraph.line_count(inner_width as u16) as u16;
-    let area = box_by(anchor, inner_width as u16 + 2, total.min(14) + 2, body);
+    // Small, as the right-click menu (Q72).
+    let area = box_by(anchor, inner_width as u16 + 2, total.min(10) + 2, body);
     let overflow = total.saturating_sub(area.height.saturating_sub(2));
     let scroll = hover.scroll.min(overflow);
     let mut block = intelligence_block();
@@ -1177,10 +1383,12 @@ fn render_file(
                 }
                 _ => Span::raw(" "),
             };
+            let git = margin.git.zip(row).and_then(|(marks, row)| marks.get(&row));
             let mut line = vec![
                 Span::styled(number, number_style),
                 mark,
-                Span::styled("| ", number_style),
+                git_mark(git, number_style),
+                Span::styled(" ", number_style),
             ];
             line.extend(skip_columns(spans, scroll_x));
             Line::from(line)

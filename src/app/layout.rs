@@ -174,6 +174,8 @@ pub struct Regions {
     pub search_next: Rect,
     pub tab_items: Vec<(usize, Rect, Rect)>,
     pub entry_menu_items: Vec<(super::EntryAction, Rect)>,
+    /// The rows of the preview beside the editor's menu (Q73) that a click acts on.
+    pub preview_rows: Vec<(super::PreviewRow, Rect)>,
     /// The Properties dialog: a click outside it closes it.
     pub properties: Rect,
     /// The hover and Peek boxes of Code Intelligence (F31): the wheel scrolls them, the mouse

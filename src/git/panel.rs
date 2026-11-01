@@ -571,6 +571,44 @@ mod tests {
         assert!(explorer_changes(plain.path()).is_empty());
     }
 
+    #[test]
+    fn editor_lines_are_marked_added_changed_or_deleted_against_the_last_commit() {
+        use std::collections::HashMap;
+        let (directory, repo) = init_repo();
+        let root = directory.path();
+        let base = "one\ntwo\nthree\nfour\nfive\nsix\n";
+        write(root, "src/main.rs", base);
+        let path = root.join("src/main.rs");
+        assert!(
+            line_marks(&path, "other\n").is_empty(),
+            "before the first commit"
+        );
+        commit_all(&repo, "Base");
+        // Line 2 changed, a line added after line 3, the last two deleted after «four».
+        assert_eq!(
+            line_marks(&path, "one\nTWO\nthree\nnew\nfour\n"),
+            HashMap::from([
+                (1, LineMark::Modified),
+                (3, LineMark::Added),
+                (4, LineMark::DeletedBelow),
+            ])
+        );
+        // The first line deleted: marked above the new first line.
+        assert_eq!(
+            line_marks(&path, "two\nthree\nfour\nfive\nsix\n"),
+            HashMap::from([(0, LineMark::DeletedAbove)])
+        );
+        // The same text has no marks, also with \r\n (Windows' autocrlf).
+        assert!(line_marks(&path, base).is_empty());
+        assert!(line_marks(&path, &base.replace('\n', "\r\n")).is_empty());
+        // Nor a file Git does not follow, nor one outside a repository.
+        write(root, "new.rs", "fresh\n");
+        assert!(line_marks(&root.join("new.rs"), "changed\n").is_empty());
+        let plain = TempDir::new().unwrap();
+        write(plain.path(), "file.txt", "text\n");
+        assert!(line_marks(&plain.path().join("file.txt"), "other\n").is_empty());
+    }
+
     fn checkout(repo: &Repository, branch: &str) {
         let reference = format!("refs/heads/{branch}");
         let commit = repo
