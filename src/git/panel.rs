@@ -6,6 +6,7 @@ use git2::Repository;
 use super::{model::*, repository::*};
 
 /// What a refresh reads the repository from (`GitPanel::source`).
+#[derive(Clone, PartialEq)]
 pub struct Source {
     root: PathBuf,
     diff: (DiffKind, Option<PathBuf>, Option<String>),
@@ -21,6 +22,8 @@ pub struct Snapshot {
     launchpad: LaunchpadSummary,
     inspected: Option<CommitDetails>,
     diff: DiffView,
+    /// What it was read for: a diff or a commit opened since stays (E51).
+    from: Source,
 }
 
 #[derive(Debug)]
@@ -228,6 +231,7 @@ impl GitPanel {
     /// Reads the repository without the panel, so that a refresh that follows changes made
     /// elsewhere never holds what is on screen (F35); none outside a repository.
     pub fn read(source: Source) -> Result<Option<Snapshot>> {
+        let from = source.clone();
         let repo = match Repository::discover(&source.root) {
             Ok(repo) => repo,
             Err(error) if error.code() == git2::ErrorCode::NotFound => return Ok(None),
@@ -258,6 +262,7 @@ impl GitPanel {
             launchpad,
             inspected,
             diff,
+            from,
         }))
     }
 
@@ -273,14 +278,18 @@ impl GitPanel {
         self.commits = snapshot.commits;
         self.branches = snapshot.branches;
         self.launchpad = snapshot.launchpad;
-        if snapshot.inspected.is_some() {
+        // A diff or a commit opened while it was read is newer than what was read for it.
+        let now = self.source();
+        if now.inspected == snapshot.from.inspected && snapshot.inspected.is_some() {
             self.inspected_commit = snapshot.inspected;
         }
-        // The same diff keeps its folds; another one starts unfolded.
-        if snapshot.diff.files.len() != self.diff.files.len() {
-            self.diff_folds.clear();
+        if now.diff == snapshot.from.diff {
+            // The same diff keeps its folds; another one starts unfolded.
+            if snapshot.diff.files.len() != self.diff.files.len() {
+                self.diff_folds.clear();
+            }
+            self.diff = snapshot.diff;
         }
-        self.diff = snapshot.diff;
         self.select(self.selected);
     }
 
@@ -696,6 +705,31 @@ mod tests {
         panel.refresh().unwrap();
         panel.select_next();
         assert_eq!(panel.selected, 0);
+    }
+
+    #[test]
+    fn a_refresh_read_in_the_background_keeps_a_diff_opened_meanwhile() {
+        let (directory, repo) = init_repo();
+        write(directory.path(), "file.txt", "first\n");
+        let mut panel = GitPanel::new(directory.path());
+        // Read for the panel as it was, without a diff; a file appears and a diff opens.
+        let early = GitPanel::read(panel.source()).unwrap();
+        write(directory.path(), "other.txt", "second\n");
+        panel.diff_selected().unwrap();
+        assert!(added(&panel).contains(&"first".to_owned()));
+        // What was read fills the lists, and the diff opened since stays (E51).
+        panel.apply(early);
+        assert!(
+            added(&panel).contains(&"first".to_owned()),
+            "the diff is kept"
+        );
+        assert_eq!(panel.status.untracked.len(), 1);
+        // Read for the diff on screen: it is refreshed with the rest.
+        let late = GitPanel::read(panel.source()).unwrap();
+        panel.apply(late);
+        assert_eq!(panel.status.untracked.len(), 2);
+        assert!(added(&panel).contains(&"first".to_owned()));
+        drop(repo);
     }
 
     #[test]
