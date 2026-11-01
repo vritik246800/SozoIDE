@@ -10,6 +10,23 @@ pub struct Notes {
 
 pub const NOTES: &[Notes] = &[
     Notes {
+        version: "0.8.0",
+        new: &[
+            "Right-click a word in the editor and move over Go to Definition, Peek, Declaration, Type Definition, Implementations or Find References: the answers show in a small box beside the menu, and a click opens one, in a new tab when it is another file",
+            "Hold Ctrl and rest the mouse on a word for 2 seconds for its type and documentation, in a small box; Ctrl+K still opens it at once",
+            "A language server that is not installed, or cannot start, offers to install itself with the command of your system; after Enter it installs in the bottom terminal and SozoIDE goes on with what you asked",
+            "Git marks in the editor margin, as in VS Code: lines added, changed and deleted since the last commit, also before saving",
+            "Live: the Help > Dependencies row changes by itself after an install or an update, a language server installed there starts at once, the open Source Control follows commits and changes made elsewhere, and the Database reads its tables again after CREATE, ALTER or DROP",
+            "Go to the definition, references and the hover work the same in Rust, C, C++, Java and every language with a server",
+        ],
+        fixed: &[
+            "rust-analyzer from rustup without its component stopped at once and Help showed it installed: now SozoIDE says why and offers to install it",
+            "The first question to rust-analyzer while it loads the project no longer ends in \"content modified\" or \"No definition found\": it is asked again",
+            "The frames of code in the hover box no longer break onto two rows",
+            "A new line or joining two lines no longer removes the newline at the end of the saved file",
+        ],
+    },
+    Notes {
         version: "0.7.9",
         new: &[
             "Rest the mouse on a word, or press Ctrl+K, to read its type and documentation from the language server",
