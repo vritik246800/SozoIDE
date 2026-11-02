@@ -10,6 +10,15 @@ pub struct Notes {
 
 pub const NOTES: &[Notes] = &[
     Notes {
+        version: "0.8.1",
+        new: &[
+            "Markdown tables written with the dashes that smart punctuation types, as in |:—:|, are drawn and aligned too",
+        ],
+        fixed: &[
+            "A Markdown table whose alignment row has one or two hyphens, as in |:-:|, is drawn instead of left as text",
+        ],
+    },
+    Notes {
         version: "0.8.0",
         new: &[
             "Right-click a word in the editor and move over Go to Definition, Peek, Declaration, Type Definition, Implementations or Find References: the answers show in a small box beside the menu, and a click opens one, in a new tab when it is another file",
