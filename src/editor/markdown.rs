@@ -836,12 +836,21 @@ fn parse_table(lines: &[String], code: &[bool], start: usize) -> Option<Markdown
     })
 }
 
+/// One dash or more, as GitHub reads them, with an optional `:` on each side. The en and em
+/// dashes that smart punctuation makes of `--` count as hyphens.
 fn parse_separator_cell(cell: &Cell) -> Option<CellAlignment> {
     let text = cell.text.as_str();
-    let left = text.starts_with(':');
-    let right = text.ends_with(':');
-    let dashes = text.trim_matches(':');
-    if dashes.chars().count() < 3 || !dashes.chars().all(|character| character == '-') {
+    let (left, text) = text
+        .strip_prefix(':')
+        .map_or((false, text), |rest| (true, rest));
+    let (right, dashes) = text
+        .strip_suffix(':')
+        .map_or((false, text), |rest| (true, rest));
+    if dashes.is_empty()
+        || !dashes
+            .chars()
+            .all(|character| matches!(character, '-' | '–' | '—'))
+    {
         return None;
     }
     Some(match (left, right) {
@@ -1086,9 +1095,39 @@ mod tests {
             text(&rendered(&document, &lines, 6, &[0]).unwrap()),
             "│   x │  1  │"
         );
+    }
 
-        let invalid = vec!["| A | B |".to_owned(), "| -- | --- |".to_owned()];
-        assert!(MarkdownDocument::parse(&invalid).tables.is_empty());
+    #[test]
+    fn alignment_rows_take_one_dash_and_the_dashes_of_smart_punctuation() {
+        let body = |separator: &str| {
+            let lines = vec![
+                "| Name | Age |".to_owned(),
+                separator.to_owned(),
+                "| Al | 4 |".to_owned(),
+            ];
+            let document = MarkdownDocument::parse(&lines);
+            (!document.tables.is_empty())
+                .then(|| text(&rendered(&document, &lines, 2, &[9]).unwrap()))
+        };
+        // One hyphen is enough, as on GitHub.
+        assert_eq!(body("|:-:|-:|").as_deref(), Some("│  Al  │   4 │"));
+        assert_eq!(body("| :--: | :--: |").as_deref(), Some("│  Al  │  4  │"));
+        assert_eq!(body("| - | :- |").as_deref(), Some("│ Al   │ 4   │"));
+        assert_eq!(body("| -- | --- |").as_deref(), Some("│ Al   │ 4   │"));
+        // The dashes smart punctuation makes of "--" count as hyphens.
+        assert_eq!(body("|:—:|:—:|").as_deref(), Some("│  Al  │  4  │"));
+        assert_eq!(body("| :–: | —: |").as_deref(), Some("│  Al  │   4 │"));
+        assert_eq!(body("| :———: | –––: |").as_deref(), Some("│  Al  │   4 │"));
+        for invalid in [
+            "| :: | --- |",
+            "| : | --- |",
+            "| ::-:: | --- |",
+            "| - - | --- |",
+            "| :-x | --- |",
+            "| = | --- |",
+        ] {
+            assert_eq!(body(invalid), None, "{invalid}");
+        }
     }
 
     #[test]
