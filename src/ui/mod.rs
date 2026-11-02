@@ -1759,6 +1759,8 @@ mod tests {
             crossterm::event::KeyCode::F(1),
             crossterm::event::KeyModifiers::NONE,
         ));
+        // A busy runner can pause here (E53): opening the tab starts no check of its own.
+        std::thread::sleep(std::time::Duration::from_millis(100));
         let now = std::time::Instant::now();
         app.tick_at(now);
         app.tick_at(now + std::time::Duration::from_millis(400));

@@ -56,14 +56,15 @@ pub struct Dependencies {
 }
 
 impl Dependencies {
-    /// A tab already checked, for the tests.
+    /// A tab already checked, for the tests. Without a result it is still checking: it has
+    /// a reader with nobody to answer, so opening the tab starts no real check (E53).
     #[cfg(test)]
     pub fn checked(components: Vec<Component>, found: Option<Vec<Found>>) -> Self {
         Self {
+            reader: found.is_none().then(|| std::sync::mpsc::channel().1),
             components,
             found,
             selected: 0,
-            reader: None,
             watching: None,
         }
     }
