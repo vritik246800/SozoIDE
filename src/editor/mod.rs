@@ -787,6 +787,7 @@ pub fn find_document(target: &str, from: Option<&Path>, root: &Path) -> Option<P
     // ponytail: walks the folder at each click; an index if vaults get slow.
     let files = ignore::WalkBuilder::new(root)
         .hidden(false)
+        .sort_by_file_name(Ord::cmp)
         .build()
         .flatten()
         .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
