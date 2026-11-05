@@ -186,6 +186,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_session_from_before_the_layout_still_opens() {
+        let text = r#"
+expanded = []
+explorer = true
+bottom_terminal = false
+right_terminal = false
+explorer_width = 30
+right_terminal_width = 42
+bottom_terminal_height = 12
+tabs = []
+"#;
+        let session: Session = toml::from_str(text).unwrap();
+        assert_eq!(session.tiles, None);
+        assert_eq!(session.other_lengths, None);
+    }
+
+    #[test]
     fn a_folder_opens_with_its_folders_tabs_cursors_and_panels_as_it_was_left() {
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("project");

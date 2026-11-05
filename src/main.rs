@@ -24,8 +24,9 @@ use anyhow::{Context, Result, bail};
 use app::App;
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -42,6 +43,8 @@ fn main() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // Without it a paste arrives as typing: each new line would run in a terminal (E58).
+    let _ = execute!(stdout, EnableBracketedPaste);
     let _ = execute!(
         stdout,
         PushKeyboardEnhancementFlags(
@@ -56,7 +59,11 @@ fn main() -> Result<()> {
     let result = run(&mut terminal, &mut app);
     app.database.shutdown();
     disable_raw_mode()?;
-    let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    let _ = execute!(
+        terminal.backend_mut(),
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste
+    );
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
