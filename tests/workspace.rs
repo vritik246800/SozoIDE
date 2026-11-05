@@ -94,6 +94,48 @@ fn the_editor_moves_by_the_free_part_of_its_tab_bar() {
 
 #[cfg(unix)]
 #[test]
+fn a_corner_moves_a_panel_with_a_preview_and_a_border_resizes_it_after() {
+    let home = Home::new();
+    let sozo = with_all_panels(&home);
+    let right = sozo.find("Right terminal");
+    let bottom = sozo.find("Bottom terminal");
+    // Its bottom left corner: the window ends one row under the status bar's row.
+    let corner = (common::ROWS - 2, bottom.1 - 4);
+    sozo.send(format!("\x1b[<0;{};{}M", corner.1 + 1, corner.0 + 1));
+    sozo.send(format!("\x1b[<32;{};{}M", right.1 + 8, right.0 + 3));
+    sozo.wait_for("Bottom terminal here");
+    assert_eq!(
+        sozo.find("Bottom terminal [").0,
+        bottom.0,
+        "not moved before letting go"
+    );
+    sozo.send(format!("\x1b[<0;{};{}m", right.1 + 8, right.0 + 3));
+    sozo.wait_until("the terminal above the right one", |_| {
+        sozo.locate("Bottom terminal")
+            .is_some_and(|(row, column)| row < right.0 + 3 && column > COLUMNS / 2)
+    });
+
+    // Now it is there, its bottom border makes it taller.
+    let moved = sozo.find("Bottom terminal");
+    let under = sozo.find("Right terminal");
+    let border = (under.0 - 2, moved.1 + 6);
+    sozo.drag(border, (border.0 + 4, border.1));
+    sozo.wait_until("a taller terminal", |_| {
+        sozo.locate("Right terminal")
+            .is_some_and(|(row, _)| row == under.0 + 3)
+    });
+    // And its left border makes it wider, for the column it shares.
+    let border = (moved.0 + 3, moved.1 - 4);
+    sozo.drag(border, (border.0, border.1 - 7));
+    sozo.wait_until("a wider terminal", |_| {
+        sozo.locate("Bottom terminal")
+            .is_some_and(|(_, column)| column + 6 == moved.1)
+    });
+    sozo.quit();
+}
+
+#[cfg(unix)]
+#[test]
 fn a_click_on_a_title_moves_nothing_and_a_divider_resizes_on_its_side() {
     let home = Home::new();
     let sozo = with_all_panels(&home);

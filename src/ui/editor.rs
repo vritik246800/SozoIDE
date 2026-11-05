@@ -835,25 +835,22 @@ fn render_empty(frame: &mut Frame, keys: &Keymap, focused: bool, area: Rect) {
 /// The half of the editor a dragged tab would take, all of it for the centre, or the pane
 /// that would take it.
 /// Where a panel held by its title would land (F39).
-pub(super) fn render_panel_drop(frame: &mut Frame, app: &App, regions: &Regions) {
+pub(super) fn render_panel_drop(frame: &mut Frame, app: &App) {
     let Some((panel, target, zone)) = app
         .panel_drag
         .and_then(|drag| drag.zone.map(|(target, zone)| (drag.panel, target, zone)))
     else {
         return;
     };
-    let area = target.map_or(regions.body, |target| regions.tiling.area(target));
-    let halves = [Constraint::Percentage(50), Constraint::Percentage(50)];
-    let [left, right] = Layout::horizontal(halves).areas(area);
-    let [top, bottom] = Layout::vertical(halves).areas(area);
-    let (place, title) = match (zone, target) {
-        (DropZone::Left, _) => (left, format!(" {} here ", panel.name())),
-        (DropZone::Right, _) => (right, format!(" {} here ", panel.name())),
-        (DropZone::Top, _) => (top, format!(" {} here ", panel.name())),
-        (DropZone::Bottom, _) => (bottom, format!(" {} here ", panel.name())),
-        (_, Some(target)) => (area, format!(" Swap with {} ", target.name())),
-        (_, None) => return,
+    let Some(place) = app.panel_landing() else {
+        return;
     };
+    let title = match (zone, target) {
+        (DropZone::Center, Some(target)) => format!(" Swap with {} ", target.name()),
+        _ => format!(" {} here ", panel.name()),
+    };
+    // A solid box: what is under it goes, as it will when the panel lands.
+    frame.render_widget(Clear, place);
     render_drop_box(frame, place, &title);
 }
 

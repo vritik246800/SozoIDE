@@ -144,10 +144,12 @@ pub(crate) fn panel_block(title: String, focused: bool) -> Block<'static> {
 }
 
 pub(crate) fn render_handle(frame: &mut Frame, area: Rect, vertical: bool) {
-    let symbol = if vertical { "│" } else { "─" };
-    let lines = (0..area.width.max(area.height))
-        .map(|_| Line::from(symbol))
-        .collect::<Vec<_>>();
+    // Rows of one cell, or one row across.
+    let lines = if vertical {
+        vec![Line::from("│"); usize::from(area.height)]
+    } else {
+        vec![Line::from("─".repeat(usize::from(area.width)))]
+    };
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().fg(BORDER)),
         area,
@@ -287,6 +289,20 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, layout::Position};
 
     use super::*;
+
+    #[test]
+    fn a_divider_fills_its_length_in_either_direction() {
+        let mut terminal = Terminal::new(TestBackend::new(6, 3)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_handle(frame, Rect::new(0, 1, 6, 1), false);
+                render_handle(frame, Rect::new(5, 0, 1, 1), true);
+            })
+            .unwrap();
+        let text = terminal.backend().to_string();
+        assert!(text.contains("──────"), "{text}");
+        assert!(text.contains("     │"), "{text}");
+    }
 
     fn text(line: &Line) -> String {
         line.spans

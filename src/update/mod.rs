@@ -34,12 +34,12 @@ const CURRENT: &str = env!("CARGO_PKG_VERSION");
 /// Release builds check at startup; debug builds (tests, `cargo run`) and
 /// `SOZO_NO_UPDATE_CHECK=1` never touch the network.
 pub fn enabled() -> bool {
-    !cfg!(debug_assertions) && env::var_os("SOZO_NO_UPDATE_CHECK").is_none()
+    !cfg!(debug_assertions) && !cfg!(test) && env::var_os("SOZO_NO_UPDATE_CHECK").is_none()
 }
 
 /// Release builds count a new installation or update once (F20); `SOZO_NO_TELEMETRY=1` opts out.
 fn counts() -> bool {
-    !cfg!(debug_assertions) && env::var_os("SOZO_NO_TELEMETRY").is_none()
+    !cfg!(debug_assertions) && !cfg!(test) && env::var_os("SOZO_NO_TELEMETRY").is_none()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,6 +124,7 @@ impl Updater {
             state: UpdateState::Idle,
             version: String::new(),
             settings: ProjectDirs::from("", "", "SozoIDE")
+                .filter(|_| !cfg!(test))
                 .map(|directories| directories.config_dir().join("update.toml")),
             receiver: None,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -624,8 +625,8 @@ mod tests {
         assert_eq!(
             versions("0.3.1"),
             [
-                CURRENT, "0.8.1", "0.8.0", "0.7.9", "0.7.3", "0.7.2", "0.7.1", "0.7.0", "0.6.0",
-                "0.5.0", "0.4.0", "0.3.3", "0.3.2"
+                CURRENT, "0.8.2", "0.8.1", "0.8.0", "0.7.9", "0.7.3", "0.7.2", "0.7.1", "0.7.0",
+                "0.6.0", "0.5.0", "0.4.0", "0.3.3", "0.3.2"
             ]
         );
         assert_eq!(versions("0.1.4").len(), NOTES.len());

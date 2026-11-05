@@ -406,10 +406,10 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             color: Color::Magenta,
             keys: vec![
                 (
-                    Fixed("Drag a panel's title"),
-                    "To a side of a panel, its centre or the window's edge",
+                    Fixed("Drag a title or corner"),
+                    "Move the panel; a box shows where it lands",
                 ),
-                (Fixed("Drag a divider"), "Resize the panels around it"),
+                (Fixed("Drag a border"), "Resize it, wherever the panel is"),
             ],
         },
         HelpSection {

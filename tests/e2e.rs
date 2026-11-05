@@ -20,6 +20,12 @@ fn application_starts_and_restores_host_terminal_on_quit() {
         .unwrap();
     let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_sozo"));
     command.cwd(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    // A release build writes its settings: never in the ones of whoever runs the tests.
+    let home = tempfile::tempdir().unwrap();
+    if cfg!(unix) {
+        command.env("HOME", home.path());
+        command.env("XDG_CONFIG_HOME", home.path());
+    }
     let mut child = pair.slave.spawn_command(command).unwrap();
     drop(pair.slave);
 
@@ -99,6 +105,12 @@ fn starts_inside_tmux_when_nobody_answers_the_image_query() {
         .unwrap();
     let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_sozo"));
     command.cwd(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    // A release build writes its settings: never in the ones of whoever runs the tests.
+    let home = tempfile::tempdir().unwrap();
+    if cfg!(unix) {
+        command.env("HOME", home.path());
+        command.env("XDG_CONFIG_HOME", home.path());
+    }
     command.env("TERM", "tmux-256color");
     command.env("PATH", concat!(env!("CARGO_MANIFEST_DIR"), "/tests"));
     command.env_remove("TMUX");
