@@ -14,6 +14,7 @@ use crate::{
     },
     branding::{self, ASCII_LOGO, ASCII_LOGO_LARGE},
     editor::{MAX_MATCHES, SearchMatch, SearchScope, file_icon},
+    update::deps::purpose,
     update::{NOTES, Notes, UpdateState, deps::Found},
 };
 
@@ -388,12 +389,27 @@ fn help_sections(os: &str) -> Vec<HelpSection> {
             keys: vec![
                 bound(Action::NextTerminal),
                 bound(Action::PreviousTerminal),
+                bound(Action::LeaveTerminal),
+                (Fixed("Ctrl+letter"), "Goes to the program in the terminal"),
+                (Fixed("Wheel, mouse"), "Go to programs that use them"),
+                (Fixed("Shift+drag"), "Select text over such a program"),
                 (
                     Fixed("+ / x on the tabs"),
                     "New / close a bottom terminal (1 to 3)",
                 ),
                 (Fixed("Drag the mouse"), "Select text; letting go copies it"),
                 (Fixed("Shift+Enter"), "New line without running it"),
+            ],
+        },
+        HelpSection {
+            title: "Layout",
+            color: Color::Magenta,
+            keys: vec![
+                (
+                    Fixed("Drag a panel's title"),
+                    "To a side of a panel, its centre or the window's edge",
+                ),
+                (Fixed("Drag a divider"), "Resize the panels around it"),
             ],
         },
         HelpSection {
@@ -853,7 +869,7 @@ pub(super) fn render_help(frame: &mut Frame, app: &mut App, area: Rect) {
                 render_dependencies(frame, dependencies.as_ref(), body, &mut rows);
                 frame.render_widget(
                     Paragraph::new(
-                        " Up/Down or a click: choose   Enter: install or update   R: check again   Esc: close",
+                        " Up/Down or a click: choose   Enter: install or update   R: check again   T: tmux on/off   Esc: close",
                     )
                     .style(Style::default().fg(MUTED)),
                     hint,
@@ -1322,10 +1338,12 @@ fn tutorial_steps(os: &str, keys: &Keymap) -> [(&'static str, String); TUTORIAL_
         (
             "Terminals",
             format!(
-                "{} opens the bottom terminal and {} the right one. Drag the dividers to resize \
-                 the panels; the mouse wheel scrolls the history.",
+                "{} opens the bottom terminal and {} the right one, and {} leaves them: there \
+                 Ctrl and a letter go to the program. Drag a divider to resize the panels, or a \
+                 panel's title to move it anywhere.",
                 key(Action::BottomTerminal),
-                key(Action::RightTerminal)
+                key(Action::RightTerminal),
+                key(Action::LeaveTerminal)
             ),
         ),
         (
@@ -1362,6 +1380,81 @@ fn tutorial_steps(os: &str, keys: &Keymap) -> [(&'static str, String); TUTORIAL_
 }
 
 /// The first start (F17): one page at a time, with Next and Skip always in reach.
+/// The first thing a new installation sees, and a new version when it brings a tool (F36):
+/// what makes SozoIDE better, to install now or skip.
+pub(super) fn render_setup(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(setup) = &app.setup else {
+        return;
+    };
+    let later = format!(
+        "Skipped something? Help ({}), then Dependencies, installs it any time.",
+        app.keys.label(Action::Help)
+    );
+    let rows = setup.components.len() as u16;
+    let area = dialog_area(area, 84, rows + 8);
+    let progress = app.motion.overlay();
+    let mut places = Vec::new();
+    let (mut next_area, mut skip_area) = (Rect::default(), Rect::default());
+    render_dialog(
+        frame,
+        area,
+        progress,
+        " Best experience ".to_owned(),
+        |frame, inner| {
+            let parts = Layout::vertical([
+                Constraint::Length(2),
+                Constraint::Length(rows),
+                Constraint::Length(2),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+            frame.render_widget(
+                Paragraph::new(
+                    "SozoIDE runs without these. Each one you add turns on a part of it:",
+                )
+                .style(Style::default().fg(TEXT)),
+                parts[0],
+            );
+            for (index, component) in setup.components.iter().enumerate() {
+                let found = setup.found.as_ref().map(|found| &found[index]);
+                let (mark, state, colour) = match found {
+                    None => ("   ", "Checking".to_owned(), MUTED),
+                    Some(Found::Installed(_)) => ("   ", "Installed".to_owned(), Color::Green),
+                    Some(Found::Missing) if setup.chosen[index] => {
+                        ("[x]", "Missing".to_owned(), Color::Yellow)
+                    }
+                    Some(Found::Missing) if setup.can_install(index) => {
+                        ("[ ]", "Missing".to_owned(), Color::Yellow)
+                    }
+                    Some(Found::Missing) => ("   ", "By hand".to_owned(), Color::Yellow),
+                };
+                let mut line = Line::from(vec![
+                    Span::styled(format!("{mark} "), Style::default().fg(ACTIVE)),
+                    Span::styled(format!("{:<8}", component.name), Style::default().fg(TEXT)),
+                    Span::styled(format!("{state:<11}"), Style::default().fg(colour)),
+                    Span::styled(purpose(component.program), Style::default().fg(MUTED)),
+                ]);
+                if index == setup.selected {
+                    line = line.style(Style::default().add_modifier(Modifier::REVERSED));
+                }
+                let row = Rect::new(parts[1].x, parts[1].y + index as u16, parts[1].width, 1);
+                frame.render_widget(Paragraph::new(line), row);
+                places.push((index, row));
+            }
+            frame.render_widget(
+                Paragraph::new(later.as_str())
+                    .style(Style::default().fg(MUTED))
+                    .wrap(Wrap { trim: true }),
+                parts[2],
+            );
+            (next_area, skip_area) = buttons(frame, parts[3], " Install [Enter] ", " Skip [Esc] ");
+        },
+    );
+    app.regions.dependency_rows = places;
+    app.regions.dialog_next = next_area;
+    app.regions.dialog_skip = skip_area;
+}
+
 pub(super) fn render_tutorial(frame: &mut Frame, app: &mut App, area: Rect) {
     let steps = tutorial_steps(std::env::consts::OS, &app.keys);
     let step = app.tutorial_step.min(TUTORIAL_STEPS - 1);
@@ -1834,7 +1927,7 @@ mod tests {
                 .starts_with("│ Ctrl+Q"),
             "{line}"
         );
-        assert_eq!(places.len(), 30, "29 commands and Database twice");
+        assert_eq!(places.len(), 31, "30 commands and Database twice");
         let (single, places) = help_page("linux", 40, false, &keys, &editor);
         assert!(single.len() > page.len());
         assert!(single.iter().all(|line| line.width() == 40));

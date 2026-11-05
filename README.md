@@ -43,6 +43,7 @@
 - Edits save themselves after two idle seconds and before you switch tabs or quit. A file changed by another program is read again (your unsaved edits are kept).
 - Select with the mouse or `Shift` and the arrows, `Ctrl+A` for everything; copy, cut and paste with `Ctrl+C`, `Ctrl+X`, `Ctrl+V` or the right-click menu, through the system clipboard (and OSC 52 over SSH). `Ctrl+Z` undoes, a word or a paste at a time.
 - Syntax highlighting for more than 30 languages, from Rust, Go, C, Java and Python to SQL, JSP, Astro and Mermaid, and for configuration files by their name (`.env`, `Cargo.lock`, `.config`, `.properties`, `Dockerfile`, `Makefile`, `.gitignore`…).
+- `[[Links]]` in Markdown, as in Obsidian, show only their text; a click opens the document in a new tab, or goes to its tab.
 - Markdown drawn as you read it: headings, quotes, rules, framed code blocks, aligned tables with inline formatting, *italic*, **bold** and ==highlight==, and Mermaid diagrams in box-drawing characters (flowchart, sequence, class, state, C4, ZenUML, Kanban, Radar, Treemap and more). The source comes back under the cursor or the mouse.
 - `Ctrl+P` finds in the file as you type and marks every match (`◂ 3/12 ▸`); `Ctrl+Shift+P` searches the whole folder in the background, groups the results by file and skips what `.gitignore` lists.
 
@@ -118,7 +119,13 @@ cwd = "backend"   # optional, from the project's root
 
 ### Terminals
 
-A bottom and a right terminal, each with its own shell, with scrollback on the mouse wheel or Page Up and Page Down. The bottom one opens up to three shells, each in a tab: click `+` for another one and the `x` of a tab to close it (one always stays). The right one always has two tabs. `Ctrl+PageDown` and `Ctrl+PageUp` switch tabs. Drag the mouse over a terminal to select its text: letting go copies it. `Shift+Enter` writes a new line without running it, as zsh, fish and tools like Claude Code expect (your terminal has to tell SozoIDE about Shift: kitty, WezTerm, Ghostty, iTerm2 and Windows do). Drag the dividers to resize every panel. On Windows the terminals need Windows 10 version 1809 or newer; on an older one SozoIDE opens without them.
+A bottom and a right terminal, each with its own shell, that work as any terminal: full-screen programs such as Claude Code, vim and htop get the wheel, the mouse and every key, `Ctrl` and a letter go to the program (`F6` leaves the terminal), and a shell has 10,000 rows of scrollback on the wheel or Page Up and Page Down. The bottom one opens up to three shells, each in a tab: click `+` for another one and the `x` of a tab to close it (one always stays). The right one always has two tabs. `Ctrl+PageDown` and `Ctrl+PageUp` switch tabs. Drag the mouse over a terminal to select its text: letting go copies it. `Shift+Enter` writes a new line without running it, as zsh, fish and tools like Claude Code expect (your terminal has to tell SozoIDE about Shift: kitty, WezTerm, Ghostty, iTerm2 and Windows do). Drag the dividers to resize every panel. On Windows the terminals need Windows 10 version 1809 or newer; on an older one SozoIDE opens without them.
+
+On macOS and Linux, tmux is optional: with it installed, `T` in Help's Dependencies tab runs each shell in a tmux session of its folder, so it keeps running after SozoIDE closes, and comes back the next time. Your tmux configuration stays as it is. On Windows tmux lives inside WSL, so the terminals are the plain ones.
+
+### Layout
+
+Drag a panel by its title to place it, the editor too, from the free part of its tab bar: to a side of another panel to share its place, to its centre to swap them, or to the edge of the window to take that whole edge. The rest adjusts, as in a tiling window manager, the dividers resize what is around them, and each folder remembers its layout.
 
 ### Your own shortcuts
 
@@ -154,16 +161,17 @@ The installers are not signed yet:
 - **macOS:** if the app does not open, go to System Settings, Privacy & Security, and choose Open Anyway.
 - **Windows:** if SmartScreen appears, choose More info, then Run anyway.
 
-Each release includes `SHA256SUMS.txt`. Check a download with `shasum -a 256 -c SHA256SUMS.txt --ignore-missing` on macOS, `sha256sum -c SHA256SUMS.txt --ignore-missing` on Linux, or `Get-FileHash` on Windows.
+Each release includes `SHA256SUMS.txt`, and updates from inside SozoIDE check the package against it before installing. Check a download with `shasum -a 256 -c SHA256SUMS.txt --ignore-missing` on macOS, `sha256sum -c SHA256SUMS.txt --ignore-missing` on Linux, or `Get-FileHash` on Windows.
 
 ### Requirements
 
 - A [Nerd Font](https://www.nerdfonts.com/) in your terminal for the icons.
-- SozoIDE runs `git` (Source Control), `curl` (updates), `ffmpeg` with `ffprobe` and `ffplay` (videos and their sound) and the language servers instead of linking them. After a new installation and after each update the footer says what is missing; Help's Dependencies tab (`F1`, then `Right`) shows each one and installs it, after `Enter`, in the bottom terminal:
+- SozoIDE runs `git` (Source Control), `curl` (updates), `ffmpeg` with `ffprobe` and `ffplay` (videos and their sound) and the language servers instead of linking them. On the first start, and after an update that brings a new tool, a panel lists what makes SozoIDE better (`git`, `curl`, `ffmpeg`, `tmux`): choose what to install or skip it. After a new installation and after each update the footer says what is missing; Help's Dependencies tab (`F1`, then `Right`) shows each one and installs it, after `Enter`, in the bottom terminal:
 
 | Tool | macOS | Windows | Linux |
 | --- | --- | --- | --- |
 | `git`, `curl`, `ffmpeg` | Homebrew | `winget` | `apt-get` or `dnf` (also recommended by the DEB and RPM packages) |
+| `tmux` (optional) | Homebrew | inside WSL | `apt-get` or `dnf` (also recommended by the DEB and RPM packages) |
 | rust-analyzer | `rustup` or Homebrew | `rustup` | `rustup` |
 | clangd | Xcode command line tools | `winget` (LLVM) | `apt-get` or `dnf` |
 | pyright, typescript-language-server | `npm` (or `pip` for pyright) | `npm` | `npm` |
@@ -173,6 +181,8 @@ Each release includes `SHA256SUMS.txt`. Check a download with `shasum -a 256 -c 
 | Rust, Node.js, Python, Java, Go, Docker, CMake | Homebrew | `winget` | `apt-get` or `dnf` |
 
 On Linux the command starts with `sudo`, which asks for your password in the terminal.
+
+From a terminal, `install-tools.sh` (macOS, Linux) and `install-tools.cmd` (Windows), attached to each release, install the same tools: they skip what is there, ask first, and `--check` only says what is missing.
 
 ## Usage
 
@@ -192,7 +202,8 @@ These are the keys SozoIDE comes with; change them in Help.
 | `Ctrl+Shift+B` (macOS: `Ctrl+Option+B`, Linux: `Ctrl+Alt+B`) | Show or hide the right terminal |
 | `Ctrl+PageDown` / `Ctrl+PageUp` (terminal) | Next / previous tab of the terminal |
 | Click `+` / `x` (bottom terminal) | Another shell in a tab, up to three / close that tab |
-| Drag the mouse (terminal) | Select text; letting go copies it |
+| `F6` (terminal) | Leave the terminal; with the focus there, `Ctrl` and a letter go to the program that runs in it |
+| Drag the mouse (terminal) | Select text; letting go copies it. Over a program that uses the mouse, `Shift`+drag selects |
 | `Shift+Enter` (terminal) | New line without running it |
 | `Ctrl+G` | Open or close Source Control |
 | `Ctrl+D` | Open or close Database |
@@ -204,7 +215,10 @@ These are the keys SozoIDE comes with; change them in Help.
 | `Ctrl+W` | Close the active tab |
 | `Ctrl+Enter` or `F5` | Run the SQL query |
 | `F1` | Help with every command; `Left` / `Right` switch to the Dependencies tab and back |
-| `Up`/`Down`, `Enter`, `R` (Dependencies) | Choose a tool; show its install or update command, then `Enter` runs it; check again |
+| `Up`/`Down`, `Enter`, `R`, `T` (Dependencies) | Choose a tool; show its install or update command, then `Enter` runs it; check again; tmux on or off (macOS, Linux) |
+| Drag a panel's title | To a side of a panel to share its place, to its centre to swap them, or to the window's edge; the editor moves from the free part of its tab bar |
+| Drag a divider | Resize the panels on either side |
+| Click a `[[link]]` (Markdown) | Open the document in a new tab, or go to its tab |
 | Click a key, or `Tab` and `Enter` (Help) | Change that shortcut: press the new keys; `Esc` gives up, `R` then `Enter` resets them all |
 | `F2` | About, with the version |
 | `Ctrl+Q` | Quit and restore the terminal |
@@ -212,7 +226,7 @@ These are the keys SozoIDE comes with; change them in Help.
 | `Enter` | Open, activate or confirm |
 | `Esc` | Close the dialog or panel |
 | `Page Up` / `Page Down` | Scroll the editor or the terminal history |
-| Mouse wheel | Scroll panels and terminal history |
+| Mouse wheel | Scroll panels and terminal history; full-screen programs in a terminal get it |
 | `Shift` + mouse wheel | Scroll the editor or the Explorer sideways |
 | Mouse wheel on the tabs, `‹` / `›` | Scroll the tab bar |
 | Drag a divider | Resize the Explorer and the terminals |

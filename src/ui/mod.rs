@@ -10,7 +10,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::app::{Action, App, Focus, Overlay, Regions};
+use crate::app::{Action, App, Focus, Overlay, Panel, Regions, SplitDirection};
 
 pub(crate) use components::{
     ACTIVE, BORDER, CURRENT_MATCH, MATCH, MUTED, TEXT, bar, busy, centered, key, panel_block,
@@ -19,8 +19,8 @@ pub(crate) use components::{
 pub(crate) use components::{mark_columns, select_columns, skip_columns};
 use components::{render_handle, sweep};
 use editor::{
-    render_editor, render_entry_menu, render_explorer, render_name_prompt, render_properties,
-    render_tabs, render_terminal,
+    render_editor, render_entry_menu, render_explorer, render_name_prompt, render_panel_drop,
+    render_properties, render_tabs, render_terminal,
 };
 use overlays::{
     render_about, render_help, render_search, render_splash, render_tutorial, render_update,
@@ -51,57 +51,25 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .split(area);
 
-    let explorer_width = scale_length(app.explorer_width, app.motion.explorer());
-    let right_terminal_width = scale_length(app.right_terminal_width, app.motion.right_terminal());
-    let bottom_terminal_height =
-        scale_length(app.bottom_terminal_height, app.motion.bottom_terminal());
-    let mut horizontal_constraints = Vec::new();
-    if explorer_width > 0 {
-        horizontal_constraints.push(Constraint::Length(explorer_width));
-        horizontal_constraints.push(Constraint::Length(1));
-    }
-    horizontal_constraints.push(Constraint::Min(20));
-    if right_terminal_width > 0 {
-        horizontal_constraints.push(Constraint::Length(1));
-        horizontal_constraints.push(Constraint::Length(right_terminal_width));
-    }
-    let horizontal = Layout::horizontal(horizontal_constraints).split(vertical[1]);
-    let mut center_index = 0;
+    let tiling = app.tiles.place(vertical[1], &|panel, direction| {
+        app.panel_length(panel, direction)
+    });
     let mut regions = Regions {
         body: vertical[1],
+        explorer: tiling.area(Panel::Explorer),
+        editor: tiling.area(Panel::Editor),
+        bottom_terminal: tiling.area(Panel::BottomTerminal),
+        right_terminal: tiling.area(Panel::RightTerminal),
         ..Regions::default()
     };
     render_header(frame, app, &mut regions, vertical[0]);
-    if explorer_width > 0 {
-        regions.explorer = horizontal[0];
-        regions.explorer_handle = horizontal[1];
-        center_index = 2;
-    }
-    regions.editor = horizontal[center_index];
-    if right_terminal_width > 0 {
-        regions.right_handle = horizontal[center_index + 1];
-        regions.right_terminal = horizontal[center_index + 2];
-    }
-
-    let center = if bottom_terminal_height > 0 {
-        Layout::vertical([
-            Constraint::Min(3),
-            Constraint::Length(1),
-            Constraint::Length(bottom_terminal_height),
-        ])
-        .split(regions.editor)
-    } else {
-        Layout::vertical([Constraint::Min(3)]).split(regions.editor)
-    };
-    let editor_area = center[0];
-    if bottom_terminal_height > 0 {
-        regions.bottom_handle = center[1];
-        regions.bottom_terminal = center[2];
-    }
-
-    if explorer_width > 0 {
+    let editor_area = regions.editor;
+    if !regions.explorer.is_empty() {
         render_explorer(frame, app, regions.explorer);
-        render_handle(frame, regions.explorer_handle, true);
+    }
+    for divider in &tiling.dividers {
+        let vertical = divider.direction == Some(SplitDirection::Columns);
+        render_handle(frame, divider.handle, vertical);
     }
     if app.show_database || app.show_git {
         // Source Control and Database take the text area under the focused pane's tabs.
@@ -123,16 +91,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         render_editor(frame, app, &mut regions, editor_area);
     }
     let content_area = regions.editor;
-    if bottom_terminal_height > 0 {
-        render_handle(frame, regions.bottom_handle, false);
+    if !regions.bottom_terminal.is_empty() {
         let area = regions.bottom_terminal;
         render_terminal(frame, app, &mut regions, area, Focus::BottomTerminal);
     }
-    if right_terminal_width > 0 {
-        render_handle(frame, regions.right_handle, true);
+    if !regions.right_terminal.is_empty() {
         let area = regions.right_terminal;
         render_terminal(frame, app, &mut regions, area, Focus::RightTerminal);
     }
+    regions.tiling = tiling;
+    render_panel_drop(frame, app, &regions);
     render_footer(frame, app, vertical[2]);
     app.regions = regions;
     app.resize_terminals();
@@ -178,6 +146,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     render_name_prompt(frame, app, area);
     render_properties(frame, app, area);
     match app.overlay {
+        Overlay::Setup => overlays::render_setup(frame, app, area),
         Overlay::Help => render_help(frame, app, area),
         Overlay::About => render_about(frame, app, area),
         Overlay::Tutorial => render_tutorial(frame, app, area),
@@ -325,9 +294,9 @@ mod tests {
         assert!(app.regions.editor.height > 0);
         assert!(app.regions.bottom_terminal.height > 0);
         assert!(app.regions.right_terminal.width > 0);
-        assert!(app.regions.explorer_handle.width > 0);
-        assert!(app.regions.bottom_handle.height > 0);
-        assert!(app.regions.right_handle.width > 0);
+        let dividers = &app.regions.tiling.dividers;
+        assert_eq!(dividers.len(), 3);
+        assert!(dividers[0].handle.width > 0 && dividers[2].handle.height > 0);
         assert_eq!(app.regions.tab_items.len(), 2);
         let content = terminal
             .backend()
@@ -1273,7 +1242,7 @@ mod tests {
         let mut app = App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap();
         app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
         settle(&mut app);
-        let mut tall = Terminal::new(TestBackend::new(140, 80)).unwrap();
+        let mut tall = Terminal::new(TestBackend::new(140, 100)).unwrap();
         tall.draw(|frame| draw(frame, &mut app)).unwrap();
         let text = buffer_text(&tall);
         for section in [
@@ -1759,6 +1728,8 @@ mod tests {
             crossterm::event::KeyCode::F(1),
             crossterm::event::KeyModifiers::NONE,
         ));
+        // A busy runner can pause here (E53): opening the tab starts no check of its own.
+        std::thread::sleep(std::time::Duration::from_millis(100));
         let now = std::time::Instant::now();
         app.tick_at(now);
         app.tick_at(now + std::time::Duration::from_millis(400));

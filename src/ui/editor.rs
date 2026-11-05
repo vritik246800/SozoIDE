@@ -834,6 +834,43 @@ fn render_empty(frame: &mut Frame, keys: &Keymap, focused: bool, area: Rect) {
 
 /// The half of the editor a dragged tab would take, all of it for the centre, or the pane
 /// that would take it.
+/// Where a panel held by its title would land (F39).
+pub(super) fn render_panel_drop(frame: &mut Frame, app: &App, regions: &Regions) {
+    let Some((panel, target, zone)) = app
+        .panel_drag
+        .and_then(|drag| drag.zone.map(|(target, zone)| (drag.panel, target, zone)))
+    else {
+        return;
+    };
+    let area = target.map_or(regions.body, |target| regions.tiling.area(target));
+    let halves = [Constraint::Percentage(50), Constraint::Percentage(50)];
+    let [left, right] = Layout::horizontal(halves).areas(area);
+    let [top, bottom] = Layout::vertical(halves).areas(area);
+    let (place, title) = match (zone, target) {
+        (DropZone::Left, _) => (left, format!(" {} here ", panel.name())),
+        (DropZone::Right, _) => (right, format!(" {} here ", panel.name())),
+        (DropZone::Top, _) => (top, format!(" {} here ", panel.name())),
+        (DropZone::Bottom, _) => (bottom, format!(" {} here ", panel.name())),
+        (_, Some(target)) => (area, format!(" Swap with {} ", target.name())),
+        (_, None) => return,
+    };
+    render_drop_box(frame, place, &title);
+}
+
+fn render_drop_box(frame: &mut Frame, area: Rect, title: &str) {
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Double)
+            .border_style(Style::default().fg(ACTIVE))
+            .title(Span::styled(
+                title.to_owned(),
+                Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
+            )),
+        area,
+    );
+}
+
 fn render_drop_preview(frame: &mut Frame, regions: &Regions, zone: DropZone) {
     let area = regions.editor_body;
     let halves = [Constraint::Percentage(50), Constraint::Percentage(50)];
@@ -847,17 +884,7 @@ fn render_drop_preview(frame: &mut Frame, regions: &Regions, zone: DropZone) {
         DropZone::Center => (area, " Single editor "),
         DropZone::Pane(pane) => (regions.pane_areas[pane], " Move here "),
     };
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Double)
-            .border_style(Style::default().fg(ACTIVE))
-            .title(Span::styled(
-                title,
-                Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
-            )),
-        target,
-    );
+    render_drop_box(frame, target, title);
 }
 
 /// The search matches in the file of tab `index` while the search is open: row, column and

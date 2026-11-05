@@ -223,6 +223,12 @@ pub fn file_icon(path: &Path) -> (char, Color) {
 /// The name shown in the editor title: the common languages by name, other files by the syntax
 /// that highlights them (`DotENV`, `Git Ignore`, `Dockerfile`…).
 pub fn language_name(path: &Path, first_line: &str) -> &'static str {
+    if path
+        .file_name()
+        .is_some_and(|name| name == ".classpath" || name == ".factorypath")
+    {
+        return "XML";
+    }
     let named = match extension(path).as_str() {
         "java" => "Java",
         "rs" => "Rust",
@@ -314,6 +320,10 @@ fn config_syntax(name: &str, extension: &str, first_line: &str) -> Option<&'stat
             "yaml"
         });
     }
+    // Eclipse's project files.
+    if matches!(name, ".classpath" | ".project" | ".factorypath") {
+        return Some("xml");
+    }
     match extension {
         "config" => Some(if start.starts_with('<') { "xml" } else { "ini" }),
         "lock" | "resolved" => Some(if object {
@@ -373,6 +383,24 @@ pub struct FileHighlight {
 impl FileHighlight {
     /// The spans of every line of `lines`, highlighting only what changed since the last call.
     pub fn update(&mut self, path: &Path, lines: &[String]) -> Vec<Vec<Span<'static>>> {
+        if extension(path) == "astro"
+            && let Some(end) = astro_frontmatter(lines)
+        {
+            // The syntax of HTML colours a `<script>`, and only that: the `---` go back after.
+            let mut seen = lines.to_vec();
+            seen[0] = "<script>".to_owned();
+            seen[end] = "</script>".to_owned();
+            let mut spans = self.highlight(path, &seen);
+            let fence = Style::default().fg(Color::DarkGray);
+            for row in [0, end] {
+                spans[row] = vec![Span::styled(lines[row].clone(), fence)];
+            }
+            return spans;
+        }
+        self.highlight(path, lines)
+    }
+
+    fn highlight(&mut self, path: &Path, lines: &[String]) -> Vec<Vec<Span<'static>>> {
         if is_mermaid_path(path) {
             return lines
                 .iter()
@@ -449,6 +477,17 @@ impl FileHighlight {
             })
             .collect()
     }
+}
+
+/// The row that ends the `---` block at the top of an Astro component, its script.
+fn astro_frontmatter(lines: &[String]) -> Option<usize> {
+    if lines.first()?.trim_end() != "---" {
+        return None;
+    }
+    let rows = lines.iter().enumerate().skip(1);
+    rows.into_iter()
+        .find(|(_, line)| line.trim_end() == "---")
+        .map(|(row, _)| row)
 }
 
 /// The spans of one line, from the state at its start, which becomes the state at its end.
@@ -935,6 +974,48 @@ mod tests {
                 .iter()
                 .all(|span| span.style.fg != Some(Color::White))
         );
+    }
+
+    fn text_of(spans: &[Span]) -> String {
+        spans.iter().map(|span| span.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn astro_frontmatter_is_coloured_as_script() {
+        let lines = [
+            "---",
+            "const title = \"Sozo\";",
+            "---",
+            "<h1 class=\"big\">{title}</h1>",
+        ]
+        .map(str::to_owned);
+        let path = Path::new("page.astro");
+        let spans = FileHighlight::default().update(path, &lines);
+        // The text stays as written, also the fences that fed the syntax a `<script>`.
+        for (spans, line) in spans.iter().zip(&lines) {
+            assert_eq!(&text_of(spans), line);
+        }
+        assert!(spans[1].len() > 2, "the script has colours: {:?}", spans[1]);
+        assert!(spans[3].len() > 2, "so has the template");
+        // Without frontmatter, HTML as before; a `---` that never ends is not one.
+        assert!(FileHighlight::default().update(path, &lines[3..])[0].len() > 2);
+        assert_eq!(astro_frontmatter(&lines[..2]), None);
+        assert_eq!(astro_frontmatter(&lines), Some(2));
+    }
+
+    #[test]
+    fn eclipse_project_files_are_xml() {
+        for name in [".classpath", ".project", ".factorypath"] {
+            let path = Path::new(name);
+            assert_eq!(
+                syntax_for(path, "<?xml version=\"1.0\"?>").name,
+                "XML",
+                "{name}"
+            );
+        }
+        assert_eq!(language_name(Path::new(".classpath"), ""), "XML");
+        let lines = ["<classpath kind=\"src\"/>".to_owned()];
+        assert!(FileHighlight::default().update(Path::new(".classpath"), &lines)[0].len() > 2);
     }
 
     #[test]

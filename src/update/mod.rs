@@ -18,6 +18,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub mod deps;
 mod install;
@@ -64,6 +65,12 @@ struct Settings {
     skipped: Option<String>,
     /// The last version that started on this machine; none means a new installation.
     seen: Option<String>,
+    /// The tools the Setup dialog already offered (F36): each one is offered once.
+    #[serde(default)]
+    offered: Vec<String>,
+    /// The terminals run in tmux (F38).
+    #[serde(default)]
+    tmux: bool,
 }
 
 impl Settings {
@@ -212,7 +219,8 @@ impl Updater {
         };
         let name = asset_name(env::consts::OS, env::consts::ARCH, package.extension());
         let url = package_url(&name);
-        let file = env::temp_dir().join(name);
+        let sums = package_url(SUMS);
+        let file = env::temp_dir().join(&name);
         self.cancel = Arc::new(AtomicBool::new(false));
         let cancel = self.cancel.clone();
         let sender = self.channel();
@@ -221,9 +229,17 @@ impl Updater {
             total: None,
         };
         thread::spawn(move || {
-            let message = match download(&url, &file, &cancel, &sender) {
+            let verified = download(&url, &file, &cancel, &sender).and_then(|()| {
+                let sums = curl(&["-fsSL", "--max-time", "60", &sums])
+                    .context("Could not check the update: no SHA256SUMS.txt in the release")?;
+                verify(&file, &name, &sums)
+            });
+            let message = match verified {
                 Ok(()) => Message::Downloaded(file),
-                Err(error) => Message::Failed(error.to_string()),
+                Err(error) => {
+                    let _ = fs::remove_file(&file);
+                    Message::Failed(format!("{error:#}"))
+                }
             };
             let _ = sender.send(message);
         });
@@ -252,6 +268,41 @@ impl Updater {
             settings.save(path);
         }
         welcome
+    }
+
+    /// Whether the Setup dialog has something new to say (F36): a tool of `tools` this machine
+    /// does not `have` and that was not offered before. Remembers them, so it says it once; a
+    /// version that needs a new tool brings it to `tools`.
+    pub fn setup_due(&self, tools: &[&str], have: impl Fn(&str) -> bool) -> bool {
+        let Some(path) = &self.settings else {
+            return false;
+        };
+        let mut settings = Settings::load(path);
+        let due = tools
+            .iter()
+            .any(|tool| !have(tool) && !settings.offered.iter().any(|known| known == tool));
+        for tool in tools {
+            if !settings.offered.iter().any(|known| known == tool) {
+                settings.offered.push((*tool).to_owned());
+            }
+        }
+        settings.save(path);
+        due
+    }
+
+    /// Whether the terminals run in tmux (F38).
+    pub fn tmux(&self) -> bool {
+        self.settings
+            .as_ref()
+            .is_some_and(|path| Settings::load(path).tmux)
+    }
+
+    pub fn set_tmux(&self, on: bool) {
+        if let Some(path) = &self.settings {
+            let mut settings = Settings::load(path);
+            settings.tmux = on;
+            settings.save(path);
+        }
     }
 
     /// Never offers this version again.
@@ -297,6 +348,32 @@ impl Updater {
 pub fn asset_name(os: &str, arch: &str, extension: &str) -> String {
     let arch = if arch == "aarch64" { "arm64" } else { arch };
     format!("SozoIDE-{os}-{arch}.{extension}")
+}
+
+/// The checksums of a release's packages, one `<sha256>  <name>` per line.
+const SUMS: &str = "SHA256SUMS.txt";
+
+/// Whether `file` is the package `name` of the release `sums` came from: nothing installs
+/// otherwise (F16).
+fn verify(file: &Path, name: &str, sums: &str) -> Result<()> {
+    let expected = sums
+        .lines()
+        .filter_map(|line| line.split_once(char::is_whitespace))
+        .find(|(_, file)| file.trim_start().trim_start_matches('*') == name)
+        .map(|(hash, _)| hash.to_ascii_lowercase())
+        .with_context(|| format!("Could not check the update: {name} is not in {SUMS}"))?;
+    let mut hasher = Sha256::new();
+    let mut package = fs::File::open(file).context("Could not read the update")?;
+    std::io::copy(&mut package, &mut hasher).context("Could not read the update")?;
+    let found = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if found != expected {
+        bail!("The update does not match {SUMS}: it was not installed");
+    }
+    Ok(())
 }
 
 /// Always the latest release when the download starts, even if a newer one came out after the
@@ -468,6 +545,63 @@ mod tests {
     }
 
     #[test]
+    fn the_setup_dialog_comes_once_and_again_only_for_a_tool_it_never_offered() {
+        let directory = tempfile::tempdir().unwrap();
+        let updater = updater_in(directory.path());
+        let nothing = |_: &str| false;
+        // Everything installed: no dialog, and nothing to say later either.
+        assert!(!updater.setup_due(&["git"], |_| true));
+        assert!(!updater.setup_due(&["git"], nothing));
+        // A new installation without ffmpeg, once.
+        assert!(updater.setup_due(&["git", "ffmpeg"], nothing));
+        assert!(!updater.setup_due(&["git", "ffmpeg"], nothing));
+        // A version that brings tmux asks about tmux, whatever the user skipped before.
+        assert!(updater.setup_due(&["git", "ffmpeg", "tmux"], nothing));
+        assert!(!updater.setup_due(&["git", "ffmpeg", "tmux"], nothing));
+        // The other settings stay, and an old file reads.
+        let path = directory.path().join("update.toml");
+        fs::write(&path, "seen = \"0.8.1\"\n").unwrap();
+        assert!(updater.setup_due(&["tmux"], nothing));
+        assert_eq!(Settings::load(&path).seen.as_deref(), Some("0.8.1"));
+    }
+
+    #[test]
+    fn tmux_is_off_until_it_is_turned_on() {
+        let directory = tempfile::tempdir().unwrap();
+        let updater = updater_in(directory.path());
+        assert!(!updater.tmux());
+        updater.set_tmux(true);
+        assert!(updater.tmux());
+        updater.set_tmux(false);
+        assert!(!updater.tmux());
+    }
+
+    #[test]
+    fn only_the_package_the_release_lists_passes() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("package");
+        fs::write(&file, "abc").unwrap();
+        // SHA-256 of "abc", from FIPS 180.
+        let hash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let name = "SozoIDE-macos-arm64.dmg";
+        let sums = format!("0000  SozoIDE-windows-x86_64.msi\n{hash}  {name}\n");
+        assert!(verify(&file, name, &sums).is_ok());
+        // As `sha256sum -b` writes it, and in capitals.
+        let binary = format!("{}  *{name}\n", hash.to_uppercase());
+        assert!(verify(&file, name, &binary).is_ok());
+
+        fs::write(&file, "abd").unwrap();
+        let error = verify(&file, name, &sums).unwrap_err().to_string();
+        assert!(error.contains("does not match SHA256SUMS.txt"), "{error}");
+
+        let error = verify(&file, "SozoIDE-linux-x86_64.deb", &sums)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is not in SHA256SUMS.txt"), "{error}");
+        assert!(verify(&directory.path().join("gone"), name, &sums).is_err());
+    }
+
+    #[test]
     fn release_notes_belong_to_this_version() {
         assert_eq!(NOTES[0].version, CURRENT);
         assert!(!NOTES[0].new.is_empty());
@@ -490,8 +624,8 @@ mod tests {
         assert_eq!(
             versions("0.3.1"),
             [
-                CURRENT, "0.8.0", "0.7.9", "0.7.3", "0.7.2", "0.7.1", "0.7.0", "0.6.0", "0.5.0",
-                "0.4.0", "0.3.3", "0.3.2"
+                CURRENT, "0.8.1", "0.8.0", "0.7.9", "0.7.3", "0.7.2", "0.7.1", "0.7.0", "0.6.0",
+                "0.5.0", "0.4.0", "0.3.3", "0.3.2"
             ]
         );
         assert_eq!(versions("0.1.4").len(), NOTES.len());

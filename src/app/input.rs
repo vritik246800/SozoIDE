@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
 use crate::{
@@ -8,12 +8,13 @@ use crate::{
     lsp::Goal,
     media::Control,
     run::Task,
+    terminal::MouseAction,
     update::UpdateState,
 };
 
 use super::{
-    Action, App, DragTarget, DropZone, EntryAction, Focus, HelpTab, NotesFilter, Overlay,
-    TUTORIAL_STEPS, TabDrag, TerminalSelection, video_areas,
+    Action, App, DropZone, EntryAction, Focus, HelpTab, NotesFilter, Overlay, Panel, PanelDrag,
+    SplitDirection, TUTORIAL_STEPS, TabDrag, TerminalSelection, video_areas,
 };
 
 impl App {
@@ -34,6 +35,12 @@ impl App {
             self.should_quit = true;
             return;
         }
+        // The program in a terminal gets Ctrl and a letter, as in any terminal (Q81).
+        let action = action.filter(|_| {
+            !(self.terminal_has_the_keys()
+                && key.modifiers == KeyModifiers::CONTROL
+                && matches!(key.code, KeyCode::Char(_)))
+        });
         // The first key closes the splash; while the IDE is drawn over it, keys already reach
         // the IDE.
         if self.splash_visible && !self.motion.splash_closing() {
@@ -168,6 +175,14 @@ impl App {
                 };
                 return;
             }
+            // Out of a terminal that takes every Ctrl key (Q81).
+            Some(Action::LeaveTerminal)
+                if matches!(self.focus, Focus::BottomTerminal | Focus::RightTerminal) =>
+            {
+                self.terminal_selection = None;
+                self.focus = Focus::Editor;
+                return;
+            }
             // The tabs of the terminal with the focus (F04).
             Some(Action::NextTerminal | Action::PreviousTerminal)
                 if matches!(self.focus, Focus::BottomTerminal | Focus::RightTerminal) =>
@@ -201,6 +216,18 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Whether a key goes to a terminal: it has the focus and nothing is open over it.
+    fn terminal_has_the_keys(&self) -> bool {
+        matches!(self.focus, Focus::BottomTerminal | Focus::RightTerminal)
+            && self.overlay == Overlay::None
+            && self.search.is_none()
+            && self.confirm.is_none()
+            && self.project_choice.is_none()
+            && self.entry_menu.is_none()
+            && self.name_prompt.is_none()
+            && self.properties.is_none()
     }
 
     fn handle_search_key(&mut self, key: KeyEvent) {
@@ -398,6 +425,10 @@ impl App {
                 return;
             }
         }
+        if self.overlay == Overlay::Setup {
+            self.handle_setup_key(key);
+            return;
+        }
         let code = key.code;
         let closes = code == KeyCode::Esc
             || matches!(self.keys.action(key), Some(Action::Help | Action::About));
@@ -491,7 +522,7 @@ impl App {
         self.motion.open_overlay(now);
     }
 
-    fn close_overlay(&mut self) {
+    pub(super) fn close_overlay(&mut self) {
         self.motion.close_overlay(std::time::Instant::now());
     }
 
@@ -802,16 +833,16 @@ impl App {
                 if !contains(self.regions.editor, point) {
                     self.flush_active_file();
                 }
-                if self.show_explorer && contains(self.regions.explorer_handle, point) {
-                    self.drag = Some(DragTarget::Explorer);
-                    return;
-                }
-                if self.show_right_terminal && contains(self.regions.right_handle, point) {
-                    self.drag = Some(DragTarget::RightTerminal);
-                    return;
-                }
-                if self.show_bottom_terminal && contains(self.regions.bottom_handle, point) {
-                    self.drag = Some(DragTarget::BottomTerminal);
+                if let Some(divider) = self
+                    .regions
+                    .tiling
+                    .dividers
+                    .iter()
+                    .find(|divider| contains(divider.handle, point))
+                    .cloned()
+                    .filter(|_| self.overlay == Overlay::None)
+                {
+                    self.drag = Some(divider);
                     return;
                 }
                 if contains(self.regions.header_help, point) {
@@ -916,6 +947,18 @@ impl App {
                     self.filter_notes(filter);
                     return;
                 }
+                if self.overlay == Overlay::Setup
+                    && !self.motion.overlay_closing()
+                    && let Some((row, _)) = self
+                        .regions
+                        .dependency_rows
+                        .iter()
+                        .find(|(_, area)| contains(*area, point))
+                        .copied()
+                {
+                    self.click_setup_row(row);
+                    return;
+                }
                 if self.overlay != Overlay::None && !self.motion.overlay_closing() {
                     let regions = &self.regions;
                     let key = if contains(regions.about_repository, point) {
@@ -937,6 +980,22 @@ impl App {
                     return;
                 }
                 if self.overlay != Overlay::None {
+                    return;
+                }
+                if let Some(panel) = self.panel_title_at(point) {
+                    self.focus = match panel {
+                        Panel::Explorer => Focus::Explorer,
+                        Panel::Editor if self.show_git => Focus::Git,
+                        Panel::Editor if self.show_database => Focus::Database,
+                        Panel::Editor => Focus::Editor,
+                        Panel::BottomTerminal => Focus::BottomTerminal,
+                        Panel::RightTerminal => Focus::RightTerminal,
+                    };
+                    self.panel_drag = Some(PanelDrag {
+                        panel,
+                        from: point,
+                        zone: None,
+                    });
                     return;
                 }
                 if self.show_database && contains(self.database.regions.area, point) {
@@ -1001,11 +1060,9 @@ impl App {
                     self.add_terminal();
                 } else if self.show_bottom_terminal && contains(self.regions.bottom_terminal, point)
                 {
-                    self.focus = Focus::BottomTerminal;
-                    self.start_terminal_selection(Focus::BottomTerminal, point);
+                    self.press_terminal(Focus::BottomTerminal, mouse, point);
                 } else if self.show_right_terminal && contains(self.regions.right_terminal, point) {
-                    self.focus = Focus::RightTerminal;
-                    self.start_terminal_selection(Focus::RightTerminal, point);
+                    self.press_terminal(Focus::RightTerminal, mouse, point);
                 } else if contains(self.regions.editor_body, point) {
                     self.focus = Focus::Editor;
                     if self.show_git || self.show_database {
@@ -1048,6 +1105,12 @@ impl App {
                         let extend = mouse.modifiers.contains(KeyModifiers::SHIFT);
                         let (row, visual_column) = text_position(file, area, point);
                         let column = file.cursor_column_for_click(row, visual_column);
+                        // A `[[ ]]` opens its document (F40).
+                        if mouse.modifiers.is_empty()
+                            && let Some(target) = file.wiki_link_at(row, column)
+                        {
+                            return self.open_wiki_link(&target);
+                        }
                         file.mark(extend);
                         file.move_cursor_to(row, column);
                         if !extend {
@@ -1062,6 +1125,16 @@ impl App {
                             self.selecting = true;
                         }
                     }
+                }
+            }
+            MouseEventKind::Down(button @ (MouseButton::Right | MouseButton::Middle))
+                if self.terminal_wants_mouse(point) =>
+            {
+                let number = u8::from(button == MouseButton::Right) + 1;
+                if let Some(panel) = self.terminal_at(point) {
+                    self.focus = panel;
+                    self.terminal_mouse = Some((panel, number));
+                    self.mouse_to_terminal(panel, MouseAction::Press(number), mouse);
                 }
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Right) => {
@@ -1097,6 +1170,21 @@ impl App {
                 } else {
                     self.entry_menu = None;
                 }
+            }
+            MouseEventKind::Drag(_) if self.terminal_mouse.is_some() => {
+                if let Some((panel, button)) = self.terminal_mouse {
+                    self.mouse_to_terminal(panel, MouseAction::Motion(Some(button)), mouse);
+                }
+            }
+            MouseEventKind::Up(_) if self.terminal_mouse.is_some() => {
+                if let Some((panel, button)) = self.terminal_mouse.take() {
+                    self.mouse_to_terminal(panel, MouseAction::Release(button), mouse);
+                }
+            }
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left)
+                if self.panel_drag.is_some() =>
+            {
+                self.drag_panel(point);
             }
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) if self.scrubbing => {
                 self.scrub_video(point, false);
@@ -1156,31 +1244,15 @@ impl App {
                     };
                 }
             }
-            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => match self.drag {
-                Some(DragTarget::Explorer) => {
-                    self.explorer_width = mouse.column.saturating_add(1).clamp(18, 80)
-                }
-                Some(DragTarget::RightTerminal) => {
-                    self.right_terminal_width = self
-                        .regions
-                        .body
-                        .width
-                        .saturating_sub(mouse.column.saturating_sub(self.regions.body.x))
-                        .clamp(24, 100);
-                }
-                Some(DragTarget::BottomTerminal) => {
-                    self.bottom_terminal_height = self
-                        .regions
-                        .body
-                        .height
-                        .saturating_sub(mouse.row.saturating_sub(self.regions.body.y))
-                        .clamp(6, 40);
-                }
-                None => {}
-            },
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => self.drag_divider(point),
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
                 if self.scrubbing {
                     self.scrub_video(point, true);
+                }
+                if let Some(drag) = self.panel_drag.take()
+                    && let Some((target, zone)) = drag.zone
+                {
+                    self.tiles = self.tiles.clone().moved(drag.panel, target, zone);
                 }
                 self.drag = None;
                 self.selecting = false;
@@ -1196,6 +1268,9 @@ impl App {
             }
             MouseEventKind::Moved if self.entry_menu.is_some() => self.menu_mouse(point),
             MouseEventKind::Moved => {
+                if let Some(panel) = self.terminal_at(point) {
+                    self.mouse_to_terminal(panel, MouseAction::Motion(None), mouse);
+                }
                 self.hover(point);
                 let at = self.text_under(point);
                 let ctrl = mouse.modifiers.contains(KeyModifiers::CONTROL);
@@ -1273,7 +1348,10 @@ impl App {
             .find(|panel| contains(self.terminal_area(*panel), point))
         {
             self.terminal_selection = None;
-            self.terminals(panel).current().scroll(up, 3);
+            let cell = clamped_cell(self.terminal_area(panel), point);
+            self.terminals(panel)
+                .current_mut()
+                .wheel(up, cell, KeyModifiers::NONE);
         } else if let Some(index) = self.pane_at(point) {
             // The wheel zooms a model; pictures and videos do not scroll.
             if let Some(media) = &mut self.open_files[index].media {
@@ -1379,6 +1457,160 @@ impl App {
             self.regions.right_terminal
         } else {
             self.regions.bottom_terminal
+        }
+    }
+
+    /// The terminal drawn under `point`, inside its border.
+    fn terminal_at(&self, point: (u16, u16)) -> Option<Focus> {
+        if self.overlay != Overlay::None {
+            return None;
+        }
+        [Focus::BottomTerminal, Focus::RightTerminal]
+            .into_iter()
+            .find(|panel| contains(inner_area(self.terminal_area(*panel)), point))
+    }
+
+    /// Whether the program in the terminal under `point` asked for the mouse (F37).
+    fn terminal_wants_mouse(&self, point: (u16, u16)) -> bool {
+        self.terminal_at(point).is_some_and(|panel| {
+            let terminals = if panel == Focus::RightTerminal {
+                &self.right_terminal
+            } else {
+                &self.bottom_terminal
+            };
+            terminals.current().wants_mouse()
+        })
+    }
+
+    fn mouse_to_terminal(&mut self, panel: Focus, action: MouseAction, mouse: MouseEvent) {
+        let cell = clamped_cell(self.terminal_area(panel), (mouse.column, mouse.row));
+        self.terminals(panel)
+            .current_mut()
+            .send_mouse(action, cell, mouse.modifiers);
+    }
+
+    /// A left press in a terminal: to the program that asked for the mouse, unless Shift says
+    /// to choose text, as terminals do (F37, Q57).
+    fn press_terminal(&mut self, panel: Focus, mouse: MouseEvent, point: (u16, u16)) {
+        self.focus = panel;
+        if self.terminal_wants_mouse(point) && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+            self.terminal_mouse = Some((panel, 0));
+            self.mouse_to_terminal(panel, MouseAction::Press(0), mouse);
+        } else {
+            self.start_terminal_selection(panel, point);
+        }
+    }
+
+    /// The panel whose title is under `point` (F39): the top border, or the tab bar of the
+    /// editor where no tab is. A panel is taken from there.
+    fn panel_title_at(&self, point: (u16, u16)) -> Option<Panel> {
+        let regions = &self.regions;
+        let taken = regions
+            .tab_items
+            .iter()
+            .any(|(_, tab, close)| contains(*tab, point) || contains(*close, point))
+            || regions
+                .tab_arrows
+                .iter()
+                .any(|(_, _, area)| contains(*area, point))
+            || regions
+                .terminal_tabs
+                .iter()
+                .any(|(_, _, tab, close)| contains(*tab, point) || contains(*close, point))
+            || contains(regions.terminal_add, point);
+        if taken {
+            return None;
+        }
+        regions.tiling.panels.iter().find_map(|(panel, area)| {
+            let rows = if *panel == Panel::Editor { 2 } else { 1 };
+            let title = Rect::new(area.x, area.y, area.width, area.height.min(rows));
+            contains(title, point).then_some(*panel)
+        })
+    }
+
+    /// Where a panel held at `point` lands: an edge of the window takes that whole edge, a
+    /// side of another panel shares its place, its centre changes places with it.
+    fn panel_drop(&self, panel: Panel, point: (u16, u16)) -> Option<(Option<Panel>, DropZone)> {
+        let body = self.regions.body;
+        if !contains(body, point) {
+            return None;
+        }
+        let edge = if point.0 == body.x {
+            Some(DropZone::Left)
+        } else if point.0 + 1 == body.right() {
+            Some(DropZone::Right)
+        } else if point.1 == body.y {
+            Some(DropZone::Top)
+        } else if point.1 + 1 == body.bottom() {
+            Some(DropZone::Bottom)
+        } else {
+            None
+        };
+        if let Some(zone) = edge {
+            return Some((None, zone));
+        }
+        let (under, area) = self
+            .regions
+            .tiling
+            .panels
+            .iter()
+            .find(|(_, area)| contains(*area, point))?;
+        (*under != panel).then(|| (Some(*under), DropZone::at(*area, point)))
+    }
+
+    fn drag_panel(&mut self, point: (u16, u16)) {
+        let Some(mut drag) = self.panel_drag else {
+            return;
+        };
+        if point != drag.from {
+            drag.zone = self.panel_drop(drag.panel, point);
+        }
+        self.panel_drag = Some(drag);
+    }
+
+    /// A divider held with the mouse: its fixed side takes the length to the pointer.
+    fn drag_divider(&mut self, point: (u16, u16)) {
+        let Some(divider) = self.drag.clone() else {
+            return;
+        };
+        let Some(direction) = divider.direction else {
+            return;
+        };
+        let (position, start, end) = match direction {
+            SplitDirection::Columns => (point.0, divider.area.x, divider.area.right()),
+            SplitDirection::Rows => (point.1, divider.area.y, divider.area.bottom()),
+        };
+        let value = if divider.first {
+            position.saturating_sub(start)
+        } else {
+            end.saturating_sub(position + 1)
+        };
+        let length = |panel, direction| self.panel_length(panel, direction);
+        let sized = self.tiles.resized(&divider, value, &length);
+        for (panel, value) in sized {
+            self.set_panel_length(panel, direction, value);
+        }
+    }
+
+    /// Opens the document of a `[[ ]]`, or goes to its tab (F40).
+    fn open_wiki_link(&mut self, target: &str) {
+        let from = self
+            .active_tab
+            .and_then(|index| self.open_files.get(index))
+            .map(|file| file.path.clone());
+        let found = crate::editor::find_document(target, from.as_deref(), &self.root);
+        let Some(path) = found else {
+            self.status = format!("No document for [[{target}]]");
+            return;
+        };
+        let same = |open: &std::path::PathBuf| open.canonicalize().is_ok_and(|open| open == path);
+        let path = self
+            .open_files
+            .iter()
+            .find(|file| same(&file.path))
+            .map_or_else(|| path.clone(), |file| file.path.clone());
+        if let Err(error) = self.open_file(path) {
+            self.status = format!("{error:#}");
         }
     }
 
@@ -1534,6 +1766,7 @@ pub(super) fn contains(area: Rect, point: (u16, u16)) -> bool {
 mod tests {
     use std::path::PathBuf;
 
+    use super::super::{Dependencies, Tile};
     use super::*;
 
     fn test_app() -> App {
@@ -1561,6 +1794,8 @@ mod tests {
         app.handle_key(right_terminal_key);
         assert!(!app.show_explorer);
         assert!(app.show_right_terminal);
+        // Each one took the focus; out of the terminal the Ctrl keys are the commands (Q81).
+        app.handle_key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
         assert!(app.show_git);
         assert!(!app.show_database);
@@ -1656,7 +1891,9 @@ mod tests {
     fn dragging_resizers_changes_panel_dimensions() {
         let mut app = test_app();
         app.regions.body = Rect::new(0, 1, 120, 38);
-        app.regions.explorer_handle = Rect::new(30, 1, 1, 20);
+        app.regions.tiling = app.tiles.place(app.regions.body, &|panel, direction| {
+            app.panel_length(panel, direction)
+        });
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
             column: 30,
@@ -1675,7 +1912,477 @@ mod tests {
             row: 4,
             modifiers: KeyModifiers::NONE,
         });
-        assert_eq!(app.explorer_width, 40);
+        assert_eq!(app.explorer_width, 39);
+    }
+
+    /// The app drawn in a window, for the tests that click what is on screen.
+    fn drawn(columns: u16, rows: u16) -> (App, ratatui::Terminal<ratatui::backend::TestBackend>) {
+        let app = test_app();
+        let terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(columns, rows)).unwrap();
+        (app, terminal)
+    }
+
+    fn draw(app: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>) {
+        app.tick();
+        let (explorer, bottom) = (app.show_explorer, app.show_bottom_terminal);
+        app.motion
+            .settle_panels(explorer, bottom, app.show_right_terminal);
+        terminal.draw(|frame| crate::ui::draw(frame, app)).unwrap();
+    }
+
+    fn show_all(app: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>) {
+        app.show_explorer = true;
+        app.show_bottom_terminal = true;
+        app.show_right_terminal = true;
+        draw(app, terminal);
+        draw(app, terminal);
+    }
+
+    fn drag_panel(app: &mut App, from: (u16, u16), to: (u16, u16)) {
+        mouse(app, MouseEventKind::Down(MouseButton::Left), from.0, from.1);
+        mouse(app, MouseEventKind::Drag(MouseButton::Left), to.0, to.1);
+        assert!(app.panel_drag.is_some_and(|drag| drag.zone.is_some()));
+        mouse(app, MouseEventKind::Up(MouseButton::Left), to.0, to.1);
+        assert!(app.panel_drag.is_none());
+    }
+
+    #[test]
+    fn a_panel_held_by_its_title_lands_where_it_is_dropped() {
+        let (mut app, mut terminal) = drawn(120, 40);
+        show_all(&mut app, &mut terminal);
+        let right = app.regions.right_terminal;
+        let bottom = app.regions.bottom_terminal;
+        // A click on a title only gives the focus.
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            right.x + 2,
+            right.y,
+        );
+        mouse(
+            &mut app,
+            MouseEventKind::Up(MouseButton::Left),
+            right.x + 2,
+            right.y,
+        );
+        assert_eq!(app.focus, Focus::RightTerminal);
+        assert_eq!(app.tiles, Tile::default());
+
+        // The Explorer on top of the right terminal: the rest follows on the next frame.
+        let title = app.regions.explorer.y;
+        drag_panel(
+            &mut app,
+            (2, title),
+            (right.x + right.width / 2, right.y + 2),
+        );
+        draw(&mut app, &mut terminal);
+        assert_eq!(app.regions.explorer.x, right.x);
+        assert!(app.regions.right_terminal.y > app.regions.explorer.y);
+        assert_eq!(app.regions.editor.x, 0, "the editor takes the room it left");
+
+        // The bottom terminal over the whole top of the window.
+        let (title, top) = (app.regions.bottom_terminal.y, app.regions.body.y);
+        drag_panel(&mut app, (bottom.x + 2, title), (40, top));
+        draw(&mut app, &mut terminal);
+        assert_eq!(app.regions.bottom_terminal.y, app.regions.body.y);
+        assert_eq!(app.regions.bottom_terminal.width, 120);
+        assert!(app.tiles.is_complete());
+    }
+
+    #[test]
+    fn the_editor_moves_from_the_free_part_of_its_tab_bar_and_tabs_still_click() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("note.txt");
+        std::fs::write(&path, "text\n").unwrap();
+        let (mut app, mut terminal) = drawn(120, 40);
+        show_all(&mut app, &mut terminal);
+        app.open_file(path).unwrap();
+        draw(&mut app, &mut terminal);
+        let editor = app.regions.tiling.area(Panel::Editor);
+        let right = app.regions.right_terminal;
+        // On the tab it is the tab that moves, not the panel.
+        let (_, tab, _) = app.regions.tab_items[0];
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            tab.x + 1,
+            tab.y,
+        );
+        assert!(app.panel_drag.is_none() && app.tab_drag.is_some());
+        mouse(
+            &mut app,
+            MouseEventKind::Up(MouseButton::Left),
+            tab.x + 1,
+            tab.y,
+        );
+
+        drag_panel(
+            &mut app,
+            (editor.right() - 2, editor.y),
+            (right.x + right.width / 2, right.y + right.height / 2),
+        );
+        draw(&mut app, &mut terminal);
+        let moved = app.regions.tiling.area(Panel::Editor);
+        assert!(moved.x > app.regions.right_terminal.x, "swapped");
+        assert_eq!(app.regions.right_terminal.x, editor.x);
+    }
+
+    #[test]
+    fn dividers_resize_panels_on_any_side() {
+        let (mut app, mut terminal) = drawn(120, 40);
+        show_all(&mut app, &mut terminal);
+        // The right terminal, by the divider on its left.
+        let divider = app.regions.tiling.dividers[1].handle;
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            divider.x,
+            5,
+        );
+        mouse(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            divider.x - 5,
+            5,
+        );
+        mouse(
+            &mut app,
+            MouseEventKind::Up(MouseButton::Left),
+            divider.x - 5,
+            5,
+        );
+        assert_eq!(app.right_terminal_width, 47);
+        // The Explorer on top of the window: its divider sets its height.
+        app.tiles = app
+            .tiles
+            .clone()
+            .moved(Panel::Explorer, None, DropZone::Top);
+        draw(&mut app, &mut terminal);
+        let divider = app.regions.tiling.dividers[0].handle;
+        assert_eq!(divider.height, 1);
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            5,
+            divider.y,
+        );
+        mouse(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            5,
+            divider.y + 3,
+        );
+        mouse(
+            &mut app,
+            MouseEventKind::Up(MouseButton::Left),
+            5,
+            divider.y + 3,
+        );
+        assert_eq!(app.explorer_height, 15);
+        draw(&mut app, &mut terminal);
+        assert_eq!(app.regions.explorer.height, 15);
+    }
+
+    /// The program in the terminal of `panel` reads what is written to it, in a file.
+    fn program_in(app: &mut App, panel: Focus, output: &[u8]) {
+        let terminal = app.terminals(panel).current_mut();
+        terminal.parser.write().unwrap().process(output);
+    }
+
+    #[test]
+    fn a_click_goes_to_the_program_that_asked_for_the_mouse_and_shift_chooses_text() {
+        let (mut app, mut terminal) = drawn(120, 40);
+        show_all(&mut app, &mut terminal);
+        let area = app.regions.bottom_terminal;
+        let (x, y) = (area.x + 3, area.y + 2);
+        program_in(
+            &mut app,
+            Focus::BottomTerminal,
+            b"\x1b[?1000h\x1b[?1002h\x1b[?1006h",
+        );
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
+        assert_eq!(app.focus, Focus::BottomTerminal);
+        assert!(
+            app.terminal_selection.is_none(),
+            "the program has the click"
+        );
+        assert_eq!(app.terminal_mouse, Some((Focus::BottomTerminal, 0)));
+        mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), x + 1, y);
+        assert!(app.terminal_selection.is_none());
+        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), x + 1, y);
+        assert_eq!(app.terminal_mouse, None);
+
+        // With Shift, text as in any terminal.
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::SHIFT,
+        });
+        assert!(app.terminal_selection.is_some());
+        assert_eq!(app.terminal_mouse, None);
+        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), x, y);
+
+        // The right button also reaches it; a shell keeps its menu-less press.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), x, y);
+        assert_eq!(app.terminal_mouse, Some((Focus::BottomTerminal, 2)));
+        mouse(&mut app, MouseEventKind::Up(MouseButton::Right), x, y);
+        assert_eq!(app.terminal_mouse, None);
+    }
+
+    #[test]
+    fn the_wheel_does_not_move_the_history_under_a_full_screen_program() {
+        let (mut app, mut terminal) = drawn(120, 40);
+        show_all(&mut app, &mut terminal);
+        let lines = (0..200)
+            .map(|index| format!("line {index}\r\n"))
+            .collect::<String>();
+        program_in(&mut app, Focus::RightTerminal, lines.as_bytes());
+        let area = app.regions.right_terminal;
+        mouse(&mut app, MouseEventKind::ScrollUp, area.x + 3, area.y + 3);
+        assert_eq!(app.right_terminal.current().scrollback(), 3);
+        mouse(&mut app, MouseEventKind::ScrollDown, area.x + 3, area.y + 3);
+        assert_eq!(app.right_terminal.current().scrollback(), 0);
+        program_in(
+            &mut app,
+            Focus::RightTerminal,
+            b"\x1b[?1049h\x1b[?1006h\x1b[?1000h",
+        );
+        mouse(&mut app, MouseEventKind::ScrollUp, area.x + 3, area.y + 3);
+        assert_eq!(app.right_terminal.current().scrollback(), 0);
+    }
+
+    #[test]
+    fn ctrl_keys_belong_to_the_terminal_with_the_focus_and_f6_leaves_it() {
+        let mut app = test_app();
+        app.show_bottom_terminal = true;
+        app.show_git = false;
+        app.focus = Focus::BottomTerminal;
+        let ctrl = |letter| KeyEvent::new(KeyCode::Char(letter), KeyModifiers::CONTROL);
+        for letter in ['b', 'j', 'g', 'd', 'p'] {
+            app.handle_key(ctrl(letter));
+            assert_eq!(app.focus, Focus::BottomTerminal, "Ctrl+{letter}");
+            assert!(app.show_explorer && app.show_bottom_terminal);
+            assert!(!app.show_git && !app.show_database && app.search.is_none());
+        }
+        // What is not Ctrl and a letter stays the IDE's.
+        app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        assert_eq!(app.overlay, Overlay::Help);
+        app.overlay = Overlay::None;
+        app.handle_key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::Editor);
+        // Out of the terminal the same keys are the commands again.
+        app.handle_key(ctrl('b'));
+        assert!(!app.show_explorer);
+        // Ctrl+Q always quits.
+        app.focus = Focus::BottomTerminal;
+        app.handle_key(ctrl('q'));
+        assert!(app.should_quit);
+    }
+
+    fn tools() -> Vec<crate::update::deps::Component> {
+        crate::update::deps::own_tools(crate::update::deps::components(
+            "linux",
+            |tool| tool == "apt-get",
+            &[],
+        ))
+    }
+
+    fn answered(found: Vec<crate::update::deps::Found>, app: &mut App) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send(found).unwrap();
+        app.setup.as_mut().unwrap().set_reader(receiver);
+        app.tick_dependencies();
+    }
+
+    #[test]
+    fn the_setup_dialog_installs_what_is_chosen_after_saying_it_and_can_be_skipped() {
+        use crate::update::deps::Found;
+        let (mut app, mut terminal) = drawn(120, 40);
+        let key = |code| KeyEvent::from(code);
+        app.setup_checker = |_| std::sync::mpsc::channel().1;
+        app.open_setup(tools());
+        assert_eq!(app.overlay, Overlay::Setup);
+        // Still checking: nothing to install yet.
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.confirm.is_none() && app.status.contains("checking"));
+        answered(
+            vec![
+                Found::Installed(Some("git 2".into())),
+                Found::Missing,
+                Found::Missing,
+                Found::Missing,
+            ],
+            &mut app,
+        );
+        draw(&mut app, &mut terminal);
+        let screen = terminal.backend().to_string();
+        for text in [
+            "Best experience",
+            "Installed",
+            "[x]",
+            "Videos in the editor",
+            "Dependencies",
+        ] {
+            assert!(screen.contains(text), "{text}: {screen}");
+        }
+        // git is there and cannot be chosen; curl is left out by Space, ffmpeg by a click.
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(
+            app.setup.as_ref().unwrap().chosen,
+            [false, true, true, true]
+        );
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Char(' ')));
+        let row = app.regions.dependency_rows[2].1;
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            row.x + 1,
+            row.y,
+        );
+        assert_eq!(
+            app.setup.as_ref().unwrap().chosen,
+            [false, false, false, true]
+        );
+        app.handle_key(key(KeyCode::Enter));
+        let confirm = app.confirm.as_ref().unwrap();
+        assert!(
+            confirm.line.ends_with("install -y tmux"),
+            "{}",
+            confirm.line
+        );
+        // Enter again runs it in the bottom terminal, not before.
+        assert!(!app.show_bottom_terminal);
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.show_bottom_terminal && app.focus == Focus::BottomTerminal);
+        assert_eq!(app.overlay, Overlay::None);
+
+        let mut skipping = test_app();
+        skipping.setup_checker = |_| std::sync::mpsc::channel().1;
+        skipping.open_setup(tools());
+        skipping.handle_key(key(KeyCode::Esc));
+        assert!(skipping.motion.overlay_closing());
+        assert!(skipping.status.contains("Dependencies"));
+        assert!(!skipping.show_bottom_terminal);
+    }
+
+    #[test]
+    fn a_tool_this_machine_cannot_install_is_not_chosen() {
+        use crate::update::deps::Found;
+        let mut app = test_app();
+        app.setup_checker = |_| std::sync::mpsc::channel().1;
+        let mut components = tools();
+        components.truncate(1);
+        components[0].install = None;
+        app.open_setup(components);
+        answered(vec![Found::Missing], &mut app);
+        let setup = app.setup.as_ref().unwrap();
+        assert_eq!(setup.chosen, [false]);
+        assert!(!setup.can_install(0));
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert_eq!(app.setup.as_ref().unwrap().chosen, [false]);
+        // Nothing chosen: Enter closes it.
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.confirm.is_none() && app.motion.overlay_closing());
+    }
+
+    #[test]
+    fn t_in_dependencies_turns_tmux_on_only_when_it_can_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = directory.path().join("update.toml");
+        let mut app = test_app();
+        app.updater = crate::update::Updater::offering("9.9.9", settings);
+        app.dependencies = Some(Dependencies::checked(Vec::new(), None));
+        app.tmux_usable = || false;
+        app.toggle_tmux();
+        assert!(!app.updater.tmux() && app.status.contains("install it"));
+        app.tmux_usable = || true;
+        app.toggle_tmux();
+        assert!(app.updater.tmux() && app.status.contains("tmux on"));
+        app.toggle_tmux();
+        assert!(!app.updater.tmux() && app.status.contains("tmux off"));
+    }
+
+    #[test]
+    fn a_click_on_a_wiki_link_opens_its_document_or_goes_to_its_tab() {
+        let directory = tempfile::tempdir().unwrap();
+        let notes = directory.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::write(directory.path().join("guide.md"), "# Guide\n").unwrap();
+        std::fs::write(notes.join("deep.md"), "# Deep\n").unwrap();
+        std::fs::write(
+            directory.path().join("index.md"),
+            "# Top\n\nSee [[guide|the guide]] and [[deep]] and [[gone]]\n",
+        )
+        .unwrap();
+        let (mut app, mut terminal) = drawn(120, 30);
+        app.root = directory.path().to_path_buf();
+        app.show_explorer = false;
+        app.open_file(directory.path().join("index.md")).unwrap();
+        // The cursor elsewhere: the row shows only the text.
+        app.open_files[0].move_cursor_to(0, 0);
+        draw(&mut app, &mut terminal);
+        draw(&mut app, &mut terminal);
+        let screen = terminal.backend().to_string();
+        assert!(
+            screen.contains("See the guide and deep and gone"),
+            "{screen}"
+        );
+        assert!(!screen.contains("[["));
+
+        let click = |app: &mut App, terminal: &mut _, word: &str| {
+            draw(app, terminal);
+            let (row, line) = terminal_lines(terminal)
+                .into_iter()
+                .enumerate()
+                .find(|(_, line)| line.contains(word))
+                .unwrap();
+            let column = line.chars().take(line.find(word).unwrap()).count() as u16;
+            mouse(app, MouseEventKind::Moved, column, row as u16);
+            draw(app, terminal);
+            mouse(
+                app,
+                MouseEventKind::Down(MouseButton::Left),
+                column,
+                row as u16,
+            );
+            mouse(
+                app,
+                MouseEventKind::Up(MouseButton::Left),
+                column,
+                row as u16,
+            );
+        };
+        click(&mut app, &mut terminal, "the guide");
+        assert_eq!(app.open_files.len(), 2);
+        assert_eq!(app.open_files[1].name, "guide.md");
+        assert_eq!(app.active_tab, Some(1));
+
+        // Open already: the same tab comes on screen.
+        app.select_tab(0);
+        click(&mut app, &mut terminal, "the guide");
+        assert_eq!(app.open_files.len(), 2);
+        assert_eq!(app.active_tab, Some(1));
+
+        app.select_tab(0);
+        click(&mut app, &mut terminal, "deep");
+        assert_eq!(app.open_files[2].name, "deep.md");
+
+        app.select_tab(0);
+        click(&mut app, &mut terminal, "gone");
+        assert_eq!(app.open_files.len(), 3);
+        assert_eq!(app.status, "No document for [[gone]]");
+    }
+
+    fn terminal_lines(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> Vec<String> {
+        terminal
+            .backend()
+            .to_string()
+            .lines()
+            .map(|line| line.trim_matches('"').to_owned())
+            .collect()
     }
 
     #[test]

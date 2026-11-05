@@ -1,6 +1,6 @@
 [package]
 name = "SozoIDE"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2024"
 authors = ["Vritik Valabdas"]
 description = "A terminal-native integrated development environment"
@@ -33,6 +33,7 @@ rayon = "1.12"
 ratatui-image = { version = "10.0", default-features = false, features = ["crossterm"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10.9"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "mysql", "any"] }
 syntect = { version = "5.3", default-features = false, features = ["parsing", "dump-load", "default-syntaxes", "regex-fancy"] }
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "sync"] }
@@ -58,7 +59,7 @@ section = "devel"
 priority = "optional"
 # Recommended, not required: `dpkg -i` in the updater does not fail without them, and the app
 # installs what is missing (F24).
-recommends = "git, curl, ffmpeg"
+recommends = "git, curl, ffmpeg, tmux"
 assets = [
     ["target/release/sozo", "usr/bin/sozo", "755"],
     ["packaging/linux/sozoide.desktop", "usr/share/applications/sozoide.desktop", "644"],
@@ -79,6 +80,7 @@ assets = [
 git = ""
 curl = ""
 "(ffmpeg or ffmpeg-free)" = ""
+tmux = ""
 
 [package.metadata.wix]
 include = ["packaging/windows/main.wxs"]

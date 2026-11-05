@@ -105,6 +105,8 @@ jobs:
             | Fedora, openSUSE | `SozoIDE-linux-x86_64.rpm` or `SozoIDE-linux-arm64.rpm` | Open it in your software installer, or `sudo dnf install ./SozoIDE-linux-*.rpm` |
             | Other Linux | `SozoIDE-linux-x86_64.tar.gz` or `SozoIDE-linux-arm64.tar.gz` | Extract `sozo` into a folder on your PATH |
 
+            SozoIDE offers the tools that make it better (Git, curl, FFmpeg, tmux) on its first start, and Help > Dependencies installs them any time. `install-tools.sh` and `install-tools.cmd` do the same from a terminal.
+
             The installers are not signed yet. On macOS, if the app does not open, go to System Settings, Privacy & Security, and choose Open Anyway. On Windows, if SmartScreen appears, choose More info, then Run anyway. `SHA256SUMS.txt` has the checksum of every file.
 
             On its first start SozoIDE downloads the `SozoIDE-<system>-<arch>.installed.txt` file of this release once (`.updated.txt` after an update), so GitHub's download counter counts the installation or update. Nothing else is sent. Set `SOZO_NO_TELEMETRY=1` to turn it off.
@@ -114,5 +116,7 @@ jobs:
             echo "Counts one installation of SozoIDE $GITHUB_REF_NAME on $target." > "SozoIDE-$target.installed.txt"
             echo "Counts one update to SozoIDE $GITHUB_REF_NAME on $target." > "SozoIDE-$target.updated.txt"
           done
+          # The scripts that install the tools SozoIDE recommends (F38).
+          cp ../packaging/install-tools.sh ../packaging/install-tools.cmd .
           sha256sum -- * > SHA256SUMS.txt
           gh release create "$GITHUB_REF_NAME" ./* --verify-tag --generate-notes --notes "$NOTES" --title "SozoIDE $GITHUB_REF_NAME"

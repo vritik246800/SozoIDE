@@ -137,7 +137,7 @@ pub struct Component {
 /// managers this machine `has`.
 pub fn components(os: &str, has: impl Fn(&str) -> bool, sudo: &[&str]) -> Vec<Component> {
     let python = if os == "windows" { "python" } else { "python3" };
-    let system: [(&str, &str, &str, &[&str], Package); 10] = [
+    let system: [(&str, &str, &str, &[&str], Package); 11] = [
         (
             "Git",
             "Tool",
@@ -173,6 +173,19 @@ pub fn components(os: &str, has: impl Fn(&str) -> bool, sudo: &[&str]) -> Vec<Co
                 winget: "Gyan.FFmpeg",
                 apt: &["ffmpeg"],
                 dnf: &["ffmpeg-free"],
+            },
+        ),
+        // No Windows build: under Windows it lives in WSL (F38).
+        (
+            "tmux",
+            "Tool",
+            "tmux",
+            &["-V"],
+            Package {
+                brew: &["tmux"],
+                winget: "",
+                apt: &["tmux"],
+                dnf: &["tmux"],
             },
         ),
         (
@@ -262,6 +275,7 @@ pub fn components(os: &str, has: impl Fn(&str) -> bool, sudo: &[&str]) -> Vec<Co
     ];
     let mut list = system
         .into_iter()
+        .filter(|(_, _, program, _, _)| *program != "tmux" || os != "windows")
         .map(|(name, kind, program, version, package)| {
             let install = system_install(os, &package, &has, sudo);
             // rustup updates the Rust it installed.
@@ -321,6 +335,51 @@ pub fn components(os: &str, has: impl Fn(&str) -> bool, sudo: &[&str]) -> Vec<Co
         });
     }
     list
+}
+
+/// What a tool of the Setup dialog is for (F36): what the user loses without it.
+pub fn purpose(program: &str) -> &'static str {
+    match program {
+        "git" => "Source Control: changes, branches, commits, pull and push",
+        "curl" => "Updates of SozoIDE",
+        "ffmpeg" => "Videos in the editor, with their sound",
+        "tmux" => "Shells that keep running after SozoIDE closes (optional)",
+        _ => "",
+    }
+}
+
+/// The tools SozoIDE itself runs, for the Setup dialog (F36).
+pub fn own_tools(components: Vec<Component>) -> Vec<Component> {
+    components
+        .into_iter()
+        .filter(|component| component.kind == "Tool")
+        .collect()
+}
+
+/// The tmux this machine has, when it can run the terminals (F38): `mouse` is from 2.1.
+pub fn tmux_usable() -> bool {
+    Command::new("tmux")
+        .arg("-V")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && version_at_least(&String::from_utf8_lossy(&output.stdout))
+        })
+}
+
+/// `tmux 3.5a`, `tmux next-3.6` or `tmux master`: anything not an older number passes.
+fn version_at_least(text: &str) -> bool {
+    let number = text
+        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .find(|word| word.starts_with(|c: char| c.is_ascii_digit()));
+    let Some(number) = number else {
+        return !text.trim().is_empty();
+    };
+    let mut parts = number
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0)) >= (2, 1)
 }
 
 /// The command that says the version of language server or debugger `tool`.
@@ -745,13 +804,13 @@ mod tests {
         let names = mac
             .iter()
             .map(|component| component.name)
-            .take(10)
+            .take(11)
             .collect::<Vec<_>>();
         assert_eq!(
             names,
             [
-                "Git", "curl", "FFmpeg", "Rust", "Node.js", "Python", "Java", "Go", "Docker",
-                "CMake"
+                "Git", "curl", "FFmpeg", "tmux", "Rust", "Node.js", "Python", "Java", "Go",
+                "Docker", "CMake"
             ],
             "SozoIDE's own tools first"
         );
@@ -835,6 +894,45 @@ mod tests {
         // Without a package manager nothing can be installed, and nothing is said to be.
         let none = components("macos", only(&[]), &[]);
         assert!(none.iter().all(|component| component.install.is_none()));
+    }
+
+    #[test]
+    fn tmux_is_offered_where_it_runs_and_only_a_version_with_the_mouse_is_used() {
+        let linux = components("linux", |tool| tool == "apt-get", &["sudo"]);
+        let tmux = linux.iter().find(|c| c.program == "tmux").unwrap();
+        assert_eq!(tmux.kind, "Tool");
+        assert_eq!(
+            tmux.install.as_ref().unwrap().last().map(String::as_str),
+            Some("tmux")
+        );
+        assert!(
+            tmux.install.as_ref().unwrap()[0] == "sudo",
+            "asks in the terminal"
+        );
+        let macos = components("macos", |tool| tool == "brew", &[]);
+        assert!(
+            macos
+                .iter()
+                .any(|c| c.program == "tmux" && c.install.is_some())
+        );
+        // Windows has it only inside WSL.
+        let windows = components("windows", |tool| tool == "winget", &[]);
+        assert!(!windows.iter().any(|c| c.program == "tmux"));
+
+        let tools = own_tools(linux)
+            .iter()
+            .map(|component| component.program)
+            .collect::<Vec<_>>();
+        assert_eq!(tools, ["git", "curl", "ffmpeg", "tmux"]);
+        assert!(tools.iter().all(|tool| !purpose(tool).is_empty()));
+
+        assert!(version_at_least("tmux 3.5a\n"));
+        assert!(version_at_least("tmux next-3.6\n"));
+        assert!(version_at_least("tmux 2.1\n"));
+        assert!(version_at_least("tmux master\n"));
+        assert!(!version_at_least("tmux 2.0\n"));
+        assert!(!version_at_least("tmux 1.9a\n"));
+        assert!(!version_at_least(""));
     }
 
     #[test]

@@ -194,6 +194,15 @@ impl OpenFile {
     }
 
     /// Text to edit, not a picture, a PDF, a video or a model.
+    /// The target of the `[[ ]]` at `column` of row `row` of a Markdown file (F40).
+    pub fn wiki_link_at(&self, row: usize, column: usize) -> Option<String> {
+        let document = self.markdown.as_ref()?;
+        if document.is_code(row) {
+            return None;
+        }
+        markdown::wiki_link_at(self.lines.get(row)?, column)
+    }
+
     pub fn is_text(&self) -> bool {
         self.shows_text() && self.pdf.is_none()
     }
@@ -456,7 +465,13 @@ impl OpenFile {
     /// Rows that show their Markdown source: the cursor row and the row under the mouse.
     fn source_rows(&self) -> Vec<usize> {
         let mut rows = vec![self.cursor_row];
-        rows.extend(self.hover_row);
+        // The mouse over a `[[ ]]` keeps showing its text, to click it (F40).
+        rows.extend(self.hover_row.filter(|row| {
+            !self
+                .lines
+                .get(*row)
+                .is_some_and(|line| markdown::has_wiki_link(line))
+        }));
         if let Some(((start, _), (end, _))) = self.selection() {
             rows.extend(start..=end);
         }
@@ -751,8 +766,100 @@ fn byte_at(line: &str, column: usize) -> usize {
         .map_or(line.len(), |(index, _)| index)
 }
 
+/// The file a `[[target]]` means (F40), as a vault finds it: beside `from`, from `root`, then
+/// the file anywhere under `root` whose path ends in it, then the one with its name. `.md`
+/// when it has no extension.
+pub fn find_document(target: &str, from: Option<&Path>, root: &Path) -> Option<PathBuf> {
+    let target = target.replace('\\', "/");
+    let name = if Path::new(&target).extension().is_some() {
+        target
+    } else {
+        format!("{target}.md")
+    };
+    let beside = from.and_then(Path::parent).map(|folder| folder.join(&name));
+    if let Some(found) = beside
+        .into_iter()
+        .chain([root.join(&name)])
+        .find(|path| path.is_file())
+    {
+        return found.canonicalize().ok();
+    }
+    // ponytail: walks the folder at each click; an index if vaults get slow.
+    let files = ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .sort_by_file_name(Ord::cmp)
+        .build()
+        .flatten()
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+        .map(ignore::DirEntry::into_path)
+        .collect::<Vec<_>>();
+    let wanted = name.to_lowercase();
+    let last = wanted.rsplit('/').next().unwrap_or(&wanted).to_owned();
+    let lower = |path: &Path| path.to_string_lossy().replace('\\', "/").to_lowercase();
+    files
+        .iter()
+        .find(|path| lower(&full(path)).ends_with(&format!("/{wanted}")))
+        .or_else(|| {
+            files
+                .iter()
+                .find(|path| lower(path).ends_with(&format!("/{last}")))
+        })
+        .and_then(|path| path.canonicalize().ok())
+}
+
+/// `path` with the folders above it, so a vault's `Project/Docs/a` finds it from inside
+/// `Project`.
+fn full(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_wiki_link_finds_its_document_as_a_vault_does() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Project");
+        let folder = root.join("Docs/planning");
+        fs::create_dir_all(&folder).unwrap();
+        for file in [
+            "Docs/planning/CHANGELOG.md",
+            "Docs/planning/near.md",
+            "README.md",
+        ] {
+            fs::write(root.join(file), "text").unwrap();
+        }
+        fs::write(root.join("image.png"), "png").unwrap();
+        let from = folder.join("near.md");
+        let find = |target| {
+            find_document(target, Some(&from), &root)
+                .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        };
+        assert_eq!(find("near").as_deref(), Some("near.md"), "beside the file");
+        assert_eq!(
+            find("README").as_deref(),
+            Some("README.md"),
+            "from the root"
+        );
+        assert_eq!(
+            find("image.png").as_deref(),
+            Some("image.png"),
+            "its own extension"
+        );
+        assert_eq!(find("planning/CHANGELOG").as_deref(), Some("CHANGELOG.md"));
+        // A path from the vault above the project, an Obsidian one.
+        assert_eq!(
+            find("Project/Docs/planning/CHANGELOG").as_deref(),
+            Some("CHANGELOG.md")
+        );
+        assert_eq!(
+            find("changelog").as_deref(),
+            Some("CHANGELOG.md"),
+            "by name"
+        );
+        assert_eq!(find("Other/changelog").as_deref(), Some("CHANGELOG.md"));
+        assert_eq!(find("gone"), None);
+    }
+
     use super::*;
 
     /// Source line `row` as drawn on screen.

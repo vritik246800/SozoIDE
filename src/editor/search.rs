@@ -194,8 +194,10 @@ fn lower(character: char) -> char {
 /// with results; stops when `stop` is set, `send` fails or there are `MAX_MATCHES`.
 fn search_workspace(root: &Path, query: &[char], stop: &AtomicBool, send: impl Fn(Found) -> bool) {
     let mut total = 0;
+    // By name: `readdir` has an order of its own on each file system (E57).
     for entry in WalkBuilder::new(root)
         .hidden(false)
+        .sort_by_file_name(Ord::cmp)
         .filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
             name != ".git" && name != "target"
@@ -288,6 +290,27 @@ mod tests {
         search.refresh(directory.path(), Some(&file));
         wait(&mut search);
         assert_eq!(search.matches.len(), 2);
+    }
+
+    #[test]
+    fn workspace_results_come_in_order_of_name_on_every_file_system() {
+        let directory = tempfile::tempdir().unwrap();
+        let names = (0..40).map(|index| format!("f{index:02}.txt")).rev();
+        for name in names {
+            fs::write(directory.path().join(name), "needle\n").unwrap();
+        }
+        let mut search = SearchState::new(SearchScope::Workspace);
+        search.push_str("needle", directory.path(), None);
+        wait(&mut search);
+        let found = search
+            .matches
+            .iter()
+            .map(|found| found.path.clone())
+            .collect::<Vec<_>>();
+        let mut sorted = found.clone();
+        sorted.sort();
+        assert_eq!(found.len(), 40);
+        assert_eq!(found, sorted);
     }
 
     fn wait(search: &mut SearchState) {

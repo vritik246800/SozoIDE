@@ -2,13 +2,18 @@
 //! each in its base colour (or its texture at its centre), lit from the viewer's upper left,
 //! with a depth buffer, in bands of rows drawn in parallel.
 
-use std::path::Path;
+use std::{path::Path, thread};
 
 use anyhow::{Context, Result, bail};
 use glam::{Mat3, Mat4, Vec2, Vec3};
 use image::RgbaImage;
 use rayon::prelude::*;
 
+/// The stack a model is read on. Its own thread also turns what a broken file panics on, now
+/// that files are not validated, into an error (E54).
+const LOADING_STACK: usize = 32 * 1024 * 1024;
+/// Nodes inside nodes before the rest is left out: unvalidated files can loop (E54).
+const DEEPEST_NODE: usize = 2_000;
 /// Rows of pixels each thread draws at a time.
 const BAND: usize = 8;
 const FIELD_OF_VIEW: f32 = 50.0;
@@ -33,15 +38,41 @@ pub struct Model {
 
 impl Model {
     pub fn load(path: &Path) -> Result<Self> {
-        let (document, buffers, images) =
-            gltf::import(path).with_context(|| format!("Could not open {}", path.display()))?;
+        thread::scope(|scope| {
+            thread::Builder::new()
+                .stack_size(LOADING_STACK)
+                .spawn_scoped(scope, || Self::read(path))?
+                .join()
+                .unwrap_or_else(|_| bail!("{} is not a model that opens", path.display()))
+        })
+    }
+
+    fn read(path: &Path) -> Result<Self> {
+        let opening = || format!("Could not open {}", path.display());
+        let file = std::fs::read(path).with_context(opening)?;
+        // Extensions a model asks for do not stop it: what they add is not drawn (E54).
+        let gltf::Gltf { document, blob } =
+            gltf::Gltf::from_slice_without_validation(&file).with_context(opening)?;
+        let base = path.parent().unwrap_or_else(|| Path::new("."));
+        let buffers = gltf::import_buffers(&document, Some(base), blob).with_context(opening)?;
+        // A texture that does not decode leaves its base colour.
+        let images = document
+            .images()
+            .map(|image| gltf::image::Data::from_source(image.source(), Some(base), &buffers).ok())
+            .collect::<Vec<_>>();
         let mut triangles = Vec::new();
         let scene = document
             .default_scene()
             .or_else(|| document.scenes().next())
             .context("The model has no scene")?;
+        // Each node once, however many parents a file gives it.
+        let mut visits = document.nodes().len();
         for node in scene.nodes() {
-            collect(&node, Mat4::IDENTITY, &buffers, &images, &mut triangles);
+            let walk = Walk {
+                buffers: &buffers,
+                images: &images,
+            };
+            walk.collect(&node, Mat4::IDENTITY, 0, &mut visits, &mut triangles);
         }
         if triangles.is_empty() {
             bail!("{} has no triangles to draw", path.display());
@@ -180,64 +211,79 @@ fn fill(
     }
 }
 
-/// The triangles of `node` and its children, in the coordinates of the scene.
-fn collect(
-    node: &gltf::Node,
-    parent: Mat4,
-    buffers: &[gltf::buffer::Data],
-    images: &[gltf::image::Data],
-    triangles: &mut Vec<Triangle>,
-) {
-    let transform = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
-    if let Some(mesh) = node.mesh() {
-        for primitive in mesh.primitives() {
-            if primitive.mode() != gltf::mesh::Mode::Triangles {
-                continue;
-            }
-            let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| &**data));
-            let Some(positions) = reader.read_positions() else {
-                continue;
-            };
-            let positions = positions
-                .map(|point| transform.transform_point3(Vec3::from(point)))
-                .collect::<Vec<_>>();
-            let coordinates = reader
-                .read_tex_coords(0)
-                .map(|coordinates| coordinates.into_f32().map(Vec2::from).collect::<Vec<_>>());
-            let indices = reader.read_indices().map_or_else(
-                || (0..positions.len() as u32).collect::<Vec<_>>(),
-                |indices| indices.into_u32().collect(),
-            );
-            let material = primitive.material().pbr_metallic_roughness();
-            let [red, green, blue, _] = material.base_color_factor();
-            let factor = Vec3::new(red, green, blue);
-            let texture = material
-                .base_color_texture()
-                .and_then(|info| images.get(info.texture().source().index()));
-            for corners in indices.as_chunks::<3>().0 {
-                let corners = [0, 1, 2].map(|corner| corners[corner] as usize);
-                if corners.iter().any(|corner| *corner >= positions.len()) {
+/// What the nodes of a model read from.
+struct Walk<'a> {
+    buffers: &'a [gltf::buffer::Data],
+    images: &'a [Option<gltf::image::Data>],
+}
+
+impl Walk<'_> {
+    /// The triangles of `node` and its children, in the coordinates of the scene.
+    fn collect(
+        &self,
+        node: &gltf::Node,
+        parent: Mat4,
+        depth: usize,
+        visits: &mut usize,
+        triangles: &mut Vec<Triangle>,
+    ) {
+        if depth > DEEPEST_NODE || *visits == 0 {
+            return;
+        }
+        *visits -= 1;
+        let (buffers, images) = (self.buffers, self.images);
+        let transform = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
+        if let Some(mesh) = node.mesh() {
+            for primitive in mesh.primitives() {
+                if primitive.mode() != gltf::mesh::Mode::Triangles {
                     continue;
                 }
-                let texel = texture
-                    .zip(coordinates.as_ref())
-                    .and_then(|(image, coordinates)| {
-                        let at = corners.map(|corner| coordinates.get(corner).copied());
-                        let [Some(a), Some(b), Some(c)] = at else {
-                            return None;
-                        };
-                        sample(image, (a + b + c) / 3.0)
-                    })
-                    .unwrap_or(Vec3::ONE);
-                triangles.push(Triangle {
-                    points: corners.map(|corner| positions[corner]),
-                    colour: factor * texel,
-                });
+                let reader =
+                    primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| &**data));
+                let Some(positions) = reader.read_positions() else {
+                    continue;
+                };
+                let positions = positions
+                    .map(|point| transform.transform_point3(Vec3::from(point)))
+                    .collect::<Vec<_>>();
+                let coordinates = reader
+                    .read_tex_coords(0)
+                    .map(|coordinates| coordinates.into_f32().map(Vec2::from).collect::<Vec<_>>());
+                let indices = reader.read_indices().map_or_else(
+                    || (0..positions.len() as u32).collect::<Vec<_>>(),
+                    |indices| indices.into_u32().collect(),
+                );
+                let material = primitive.material().pbr_metallic_roughness();
+                let [red, green, blue, _] = material.base_color_factor();
+                let factor = Vec3::new(red, green, blue);
+                let texture = material
+                    .base_color_texture()
+                    .and_then(|info| images.get(info.texture().source().index())?.as_ref());
+                for corners in indices.as_chunks::<3>().0 {
+                    let corners = [0, 1, 2].map(|corner| corners[corner] as usize);
+                    if corners.iter().any(|corner| *corner >= positions.len()) {
+                        continue;
+                    }
+                    let texel = texture
+                        .zip(coordinates.as_ref())
+                        .and_then(|(image, coordinates)| {
+                            let at = corners.map(|corner| coordinates.get(corner).copied());
+                            let [Some(a), Some(b), Some(c)] = at else {
+                                return None;
+                            };
+                            sample(image, (a + b + c) / 3.0)
+                        })
+                        .unwrap_or(Vec3::ONE);
+                    triangles.push(Triangle {
+                        points: corners.map(|corner| positions[corner]),
+                        colour: factor * texel,
+                    });
+                }
             }
         }
-    }
-    for child in node.children() {
-        collect(&child, transform, buffers, images, triangles);
+        for child in node.children() {
+            self.collect(&child, transform, depth + 1, visits, triangles);
+        }
     }
 }
 
@@ -266,8 +312,22 @@ fn drawn(picture: &RgbaImage) -> usize {
 /// A `.glb` with one red triangle standing in the XY plane, for the tests.
 #[cfg(test)]
 pub fn sample_glb() -> Vec<u8> {
-    let json = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0},"material":0}]}],"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1,0,0,1]}}],"buffers":[{"byteLength":36}],"bufferViews":[{"buffer":0,"byteLength":36}],"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[-1,-1,0],"max":[1,1,0]}]}"#;
-    let mut json = json.as_bytes().to_vec();
+    glb_of(TRIANGLE.to_owned())
+}
+
+/// The same triangle with `extra` members in its JSON.
+#[cfg(test)]
+fn glb_with(extra: &str) -> Vec<u8> {
+    glb_of(format!("{}{extra}}}", &TRIANGLE[..TRIANGLE.len() - 1]))
+}
+
+#[cfg(test)]
+const TRIANGLE: &str = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0},"material":0}]}],"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1,0,0,1]}}],"buffers":[{"byteLength":36}],"bufferViews":[{"buffer":0,"byteLength":36}],"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[-1,-1,0],"max":[1,1,0]}]}"#;
+
+/// `json` and the triangle's three points in a `.glb`.
+#[cfg(test)]
+fn glb_of(json: String) -> Vec<u8> {
+    let mut json = json.into_bytes();
     json.resize(json.len().next_multiple_of(4), b' ');
     let points: [f32; 9] = [-1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 0.0, 1.0, 0.0];
     let binary = points
@@ -317,5 +377,54 @@ mod tests {
         }
         assert_eq!(model.distance, 1.2);
         assert!(Model::load(&directory.path().join("missing.glb")).is_err());
+    }
+
+    #[test]
+    fn a_model_opens_with_what_it_has_when_a_part_of_it_is_not_understood() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("exported.glb");
+        // An extension this renderer does not know, required, and a texture that decodes to
+        // nothing: the triangle is still there, in its base colour (E54).
+        let extra = r#","extensionsUsed":["MSFT_texture_dds"],"extensionsRequired":["MSFT_texture_dds"],"images":[{"mimeType":"image/vnd-ms.dds","uri":"data:image/vnd-ms.dds;base64,AAAA"}],"textures":[{"source":0}]"#;
+        std::fs::write(&path, glb_with(extra)).unwrap();
+        let model = Model::load(&path).unwrap();
+        let picture = model.render(60, 60);
+        assert!(drawn(&picture) > 0);
+        // Not a model at all: an error to show, never a crash.
+        std::fs::write(&path, b"glTF is not this").unwrap();
+        assert!(Model::load(&path).is_err());
+    }
+
+    #[test]
+    fn a_deep_model_does_not_need_the_stack_of_the_thread_that_opens_it() {
+        // Windows gives its main thread 1 MiB: nodes one inside the other in a stack of less.
+        let chain = |depth: usize| {
+            let nodes = (0..depth)
+                .map(|node| match node + 1 {
+                    next if next < depth => format!(r#"{{"children":[{next}]}}"#),
+                    _ => r#"{"mesh":0}"#.to_owned(),
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            glb_of(TRIANGLE.replace(r#"{"mesh":0}"#, &nodes))
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("deep.glb");
+        let opens = |glb: Vec<u8>| {
+            std::fs::write(&path, glb).unwrap();
+            let path = path.clone();
+            thread::Builder::new()
+                .stack_size(256 * 1024)
+                .spawn(move || Model::load(&path).is_ok())
+                .unwrap()
+                .join()
+                .unwrap()
+        };
+        assert!(opens(chain(1_000)));
+        // Deeper than any model, and a node inside itself: an error to show, never a crash.
+        assert!(!opens(chain(50_000)));
+        assert!(!opens(glb_of(
+            TRIANGLE.replace(r#"{"mesh":0}"#, r#"{"children":[0]}"#)
+        )));
     }
 }

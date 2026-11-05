@@ -65,6 +65,16 @@ impl AppMotion {
         self.now = now;
     }
 
+    /// The panels where they are going, for the tests that click them.
+    #[cfg(test)]
+    pub fn settle_panels(&mut self, explorer: bool, bottom_terminal: bool, right_terminal: bool) {
+        let settled = |shown: bool| Tween::new(self.now, f32::from(u8::from(shown)), PANEL);
+        self.explorer = settled(explorer);
+        self.bottom_terminal = settled(bottom_terminal);
+        self.right_terminal = settled(right_terminal);
+        self.overlay = Tween::new(self.now, self.overlay.target(), DIALOG);
+    }
+
     pub fn sync_panels(&mut self, explorer: bool, bottom_terminal: bool, right_terminal: bool) {
         let now = self.now;
         self.explorer

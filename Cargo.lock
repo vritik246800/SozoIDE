@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "SozoIDE"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -27,6 +27,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "syntect",
  "tempfile",
