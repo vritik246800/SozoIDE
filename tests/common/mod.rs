@@ -103,7 +103,6 @@ impl Home {
         command.arg(".");
         for (name, value) in [
             ("HOME", self.path().display().to_string()),
-            ("USERPROFILE", self.path().display().to_string()),
             (
                 "XDG_CONFIG_HOME",
                 self.path().join(".config").display().to_string(),
