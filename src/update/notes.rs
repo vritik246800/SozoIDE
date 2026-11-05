@@ -10,6 +10,17 @@ pub struct Notes {
 
 pub const NOTES: &[Notes] = &[
     Notes {
+        version: "0.8.3",
+        new: &[
+            "Take a panel by any corner of its border, or by its title: a solid box shows exactly where it will land, before you let go",
+            "Drag a side or bottom border of a panel, or a divider, to resize it wherever you placed it, wider or taller",
+        ],
+        fixed: &[
+            "A paste reaches the terminals as a paste, so a program can tell it from typing and a shell does not run each line",
+            "Workspace search lists its results in the same order on every system",
+        ],
+    },
+    Notes {
         version: "0.8.2",
         new: &[
             "A Best experience panel on the first start, and after an update that brings a new tool: choose what to install (Git, curl, FFmpeg, tmux) or skip it; Help > Dependencies installs it any time",

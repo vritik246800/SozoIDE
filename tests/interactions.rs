@@ -16,6 +16,10 @@ impl Drop for ChildGuard {
 }
 
 #[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "a release build opens the tutorial in its new home; tests/workspace.rs covers it"
+)]
 fn keyboard_mouse_tabs_and_panels_work_in_a_real_pty() {
     let project = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -38,6 +42,11 @@ fn keyboard_mouse_tabs_and_panels_work_in_a_real_pty() {
     let mut command = CommandBuilder::new(binary);
     command.cwd(project.path());
     command.arg(".");
+    // A release build writes its settings: never in the ones of whoever runs the tests.
+    if cfg!(unix) {
+        command.env("HOME", project.path());
+        command.env("XDG_CONFIG_HOME", project.path());
+    }
     let child = pair.slave.spawn_command(command).unwrap();
     drop(pair.slave);
     let mut child = ChildGuard(child);

@@ -100,7 +100,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         render_terminal(frame, app, &mut regions, area, Focus::RightTerminal);
     }
     regions.tiling = tiling;
-    render_panel_drop(frame, app, &regions);
+    render_panel_drop(frame, app);
     render_footer(frame, app, vertical[2]);
     app.regions = regions;
     app.resize_terminals();

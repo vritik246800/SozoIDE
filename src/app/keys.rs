@@ -493,7 +493,7 @@ impl Keymap {
 /// Where the changed keys are kept. Debug builds (tests, `cargo run`) neither read nor write
 /// them, like the sessions; the tests set their own file.
 pub(super) fn keys_path() -> Option<PathBuf> {
-    if cfg!(debug_assertions) {
+    if cfg!(debug_assertions) || cfg!(test) {
         return None;
     }
     directories::ProjectDirs::from("", "", "SozoIDE")

@@ -42,7 +42,7 @@ struct Tab {
 /// Where the sessions are kept. Debug builds (tests, `cargo run`) neither read nor write them,
 /// like the updater's settings; the tests set their own file.
 pub(super) fn sessions_path() -> Option<PathBuf> {
-    if cfg!(debug_assertions) {
+    if cfg!(debug_assertions) || cfg!(test) {
         return None;
     }
     directories::ProjectDirs::from("", "", "SozoIDE")

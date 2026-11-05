@@ -982,7 +982,11 @@ impl App {
                 if self.overlay != Overlay::None {
                     return;
                 }
-                if let Some(panel) = self.panel_title_at(point) {
+                if let Some(divider) = self.divider_beside(point) {
+                    self.drag = Some(divider);
+                    return;
+                }
+                if let Some(panel) = self.panel_handle_at(point) {
                     self.focus = match panel {
                         Panel::Explorer => Focus::Explorer,
                         Panel::Editor if self.show_git => Focus::Git,
@@ -1501,11 +1505,10 @@ impl App {
         }
     }
 
-    /// The panel whose title is under `point` (F39): the top border, or the tab bar of the
-    /// editor where no tab is. A panel is taken from there.
-    fn panel_title_at(&self, point: (u16, u16)) -> Option<Panel> {
+    /// Whether a tab, an arrow or a button of a tab bar is under `point`.
+    fn tab_bar_button_at(&self, point: (u16, u16)) -> bool {
         let regions = &self.regions;
-        let taken = regions
+        regions
             .tab_items
             .iter()
             .any(|(_, tab, close)| contains(*tab, point) || contains(*close, point))
@@ -1517,15 +1520,59 @@ impl App {
                 .terminal_tabs
                 .iter()
                 .any(|(_, _, tab, close)| contains(*tab, point) || contains(*close, point))
-            || contains(regions.terminal_add, point);
-        if taken {
+            || contains(regions.terminal_add, point)
+    }
+
+    /// The panel that can be taken at `point` (F39): by the title on its top border, by a
+    /// corner of its border, or, for the editor, by the free part of its tab bar.
+    fn panel_handle_at(&self, point: (u16, u16)) -> Option<Panel> {
+        if self.tab_bar_button_at(point) {
             return None;
         }
-        regions.tiling.panels.iter().find_map(|(panel, area)| {
+        self.regions.tiling.panels.iter().find_map(|(panel, area)| {
             let rows = if *panel == Panel::Editor { 2 } else { 1 };
             let title = Rect::new(area.x, area.y, area.width, area.height.min(rows));
-            contains(title, point).then_some(*panel)
+            let bottom_corner =
+                point.1 + 1 == area.bottom() && (point.0 == area.x || point.0 + 1 == area.right());
+            (contains(title, point) || (contains(*area, point) && bottom_corner)).then_some(*panel)
         })
+    }
+
+    /// The divider next to the side or bottom border of a panel under `point`: those borders
+    /// resize as the divider does (F39). The corners and the top border move the panel.
+    fn divider_beside(&self, point: (u16, u16)) -> Option<super::layout::Divider> {
+        if self.tab_bar_button_at(point) || self.panel_handle_at(point).is_some() {
+            return None;
+        }
+        let regions = &self.regions;
+        let (_, area) = regions
+            .tiling
+            .panels
+            .iter()
+            .find(|(_, area)| contains(*area, point))?;
+        let beside = |handle: Rect| {
+            let (x, y) = point;
+            let in_rows = y >= handle.y && y < handle.bottom();
+            let in_columns = x >= handle.x && x < handle.right();
+            (x == area.x && handle.right() == area.x && in_rows)
+                || (x + 1 == area.right() && handle.x == area.right() && in_rows)
+                || (y + 1 == area.bottom() && handle.y == area.bottom() && in_columns)
+        };
+        regions
+            .tiling
+            .dividers
+            .iter()
+            .find(|divider| beside(divider.handle))
+            .cloned()
+    }
+
+    /// Where the panel held would end up, in the layout it would make (F39).
+    pub fn panel_landing(&self) -> Option<Rect> {
+        let drag = self.panel_drag?;
+        let (target, zone) = drag.zone?;
+        let tiles = self.tiles.clone().moved(drag.panel, target, zone);
+        let length = |panel, direction| self.panel_length(panel, direction);
+        Some(tiles.place(self.regions.body, &length).area(drag.panel))
     }
 
     /// Where a panel held at `point` lands: an edge of the window takes that whole edge, a
@@ -1564,6 +1611,10 @@ impl App {
         };
         if point != drag.from {
             drag.zone = self.panel_drop(drag.panel, point);
+            self.status = format!(
+                "{}: drop on a side of a panel, its centre or the edge of the window",
+                drag.panel.name()
+            );
         }
         self.panel_drag = Some(drag);
     }
@@ -2026,6 +2077,149 @@ mod tests {
         let moved = app.regions.tiling.area(Panel::Editor);
         assert!(moved.x > app.regions.right_terminal.x, "swapped");
         assert_eq!(app.regions.right_terminal.x, editor.x);
+    }
+
+    #[test]
+    fn the_preview_shows_where_a_panel_really_ends_up() {
+        let (mut app, mut terminal) = drawn(120, 40);
+        show_all(&mut app, &mut terminal);
+        let right = app.regions.right_terminal;
+        let title = app.regions.explorer;
+        for (to, swap) in [
+            // A side of a panel, its centre and the edge of the window.
+            ((right.x + right.width / 2, right.y + 2), false),
+            (
+                (right.x + right.width / 2, right.y + right.height / 2),
+                true,
+            ),
+            ((60, app.regions.body.bottom() - 1), false),
+        ] {
+            let tiles = app.tiles.clone();
+            mouse(
+                &mut app,
+                MouseEventKind::Down(MouseButton::Left),
+                2,
+                title.y,
+            );
+            assert_eq!(app.panel_landing(), None, "held, not moved yet");
+            mouse(
+                &mut app,
+                MouseEventKind::Drag(MouseButton::Left),
+                to.0,
+                to.1,
+            );
+            let landing = app.panel_landing().unwrap();
+            draw(&mut app, &mut terminal);
+            let screen = terminal.backend().to_string();
+            let name = if swap {
+                "Swap with Right terminal"
+            } else {
+                "Explorer here"
+            };
+            assert!(screen.contains(name), "{name}: {screen}");
+            // Nothing moved yet, and letting go puts it exactly there.
+            assert_eq!(app.tiles, tiles);
+            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), to.0, to.1);
+            draw(&mut app, &mut terminal);
+            assert_eq!(app.regions.explorer, landing);
+            // Back to the start for the next one.
+            app.tiles = Tile::default();
+            draw(&mut app, &mut terminal);
+        }
+    }
+
+    #[test]
+    fn a_panel_moves_by_any_corner_of_its_border() {
+        let (mut app, mut terminal) = drawn(120, 40);
+        show_all(&mut app, &mut terminal);
+        let bottom = app.regions.bottom_terminal;
+        for corner in [
+            (bottom.x, bottom.y),
+            (bottom.right() - 1, bottom.bottom() - 1),
+            (bottom.x, bottom.bottom() - 1),
+        ] {
+            mouse(
+                &mut app,
+                MouseEventKind::Down(MouseButton::Left),
+                corner.0,
+                corner.1,
+            );
+            assert_eq!(
+                app.panel_drag.map(|drag| drag.panel),
+                Some(Panel::BottomTerminal),
+                "{corner:?}"
+            );
+            assert!(app.terminal_selection.is_none());
+            mouse(
+                &mut app,
+                MouseEventKind::Up(MouseButton::Left),
+                corner.0,
+                corner.1,
+            );
+        }
+        // Inside the border the mouse is the terminal's again.
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            bottom.x + 3,
+            bottom.y + 3,
+        );
+        assert!(app.panel_drag.is_none() && app.terminal_selection.is_some());
+        mouse(
+            &mut app,
+            MouseEventKind::Up(MouseButton::Left),
+            bottom.x + 3,
+            bottom.y + 3,
+        );
+    }
+
+    #[test]
+    fn borders_resize_a_panel_in_both_directions_wherever_it_is() {
+        let (mut app, mut terminal) = drawn(120, 40);
+        show_all(&mut app, &mut terminal);
+        // The right terminal under the Explorer, then the two as one column on the left.
+        app.tiles = app.tiles.clone().moved(
+            Panel::RightTerminal,
+            Some(Panel::Explorer),
+            DropZone::Bottom,
+        );
+        draw(&mut app, &mut terminal);
+        let explorer = app.regions.explorer;
+        let right = app.regions.right_terminal;
+        assert_eq!(explorer.x, right.x);
+        // Its right border makes the column wider, for the two.
+        let (x, y) = (right.right() - 1, right.y + 5);
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
+        mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), x + 8, y);
+        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), x + 8, y);
+        draw(&mut app, &mut terminal);
+        // The divider comes under the pointer, a column from the border.
+        assert_eq!(app.regions.right_terminal.width, right.width + 7);
+        assert_eq!(app.regions.explorer.width, right.width + 7);
+        // The bottom border of the Explorer makes it taller and the terminal shorter.
+        let explorer = app.regions.explorer;
+        let right = app.regions.right_terminal;
+        let (x, y) = (explorer.x + 4, explorer.bottom() - 1);
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
+        mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), x, y + 4);
+        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), x, y + 4);
+        draw(&mut app, &mut terminal);
+        assert_eq!(app.regions.explorer.height, explorer.height + 3);
+        assert_eq!(app.regions.right_terminal.y, right.y + 3);
+        assert!(app.panel_drag.is_none());
+    }
+
+    #[test]
+    fn a_border_with_nothing_beside_it_does_not_take_the_click() {
+        let (mut app, mut terminal) = drawn(120, 40);
+        show_all(&mut app, &mut terminal);
+        // The left border of the Explorer: the window ends there.
+        let explorer = app.regions.explorer;
+        assert!(app.divider_beside((explorer.x, explorer.y + 5)).is_none());
+        // The tabs of a terminal keep their clicks on its top border.
+        let (_, _, tab, _) = app.regions.terminal_tabs[0];
+        assert!(app.panel_handle_at((tab.x, tab.y)).is_none());
+        assert!(app.divider_beside((tab.x, tab.y)).is_none());
     }
 
     #[test]

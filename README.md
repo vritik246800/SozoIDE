@@ -125,7 +125,7 @@ On macOS and Linux, tmux is optional: with it installed, `T` in Help's Dependenc
 
 ### Layout
 
-Drag a panel by its title to place it, the editor too, from the free part of its tab bar: to a side of another panel to share its place, to its centre to swap them, or to the edge of the window to take that whole edge. The rest adjusts, as in a tiling window manager, the dividers resize what is around them, and each folder remembers its layout.
+Drag a panel by its title or by any corner of its border to place it, the editor too, from the free part of its tab bar. A solid box shows exactly where it will land before you let go: to a side of another panel to share its place, to its centre to swap them, or to the edge of the window to take that whole edge. The rest adjusts, as in a tiling window manager. Drag a side or bottom border, or a divider, to resize a panel wherever you placed it. Each folder remembers its layout.
 
 ### Your own shortcuts
 
@@ -216,8 +216,8 @@ These are the keys SozoIDE comes with; change them in Help.
 | `Ctrl+Enter` or `F5` | Run the SQL query |
 | `F1` | Help with every command; `Left` / `Right` switch to the Dependencies tab and back |
 | `Up`/`Down`, `Enter`, `R`, `T` (Dependencies) | Choose a tool; show its install or update command, then `Enter` runs it; check again; tmux on or off (macOS, Linux) |
-| Drag a panel's title | To a side of a panel to share its place, to its centre to swap them, or to the window's edge; the editor moves from the free part of its tab bar |
-| Drag a divider | Resize the panels on either side |
+| Drag a panel's title or a corner of its border | A box shows where it lands: to a side of a panel to share its place, to its centre to swap them, or to the window's edge; the editor moves from the free part of its tab bar |
+| Drag a divider, or a side or bottom border | Resize the panels on either side |
 | Click a `[[link]]` (Markdown) | Open the document in a new tab, or go to its tab |
 | Click a key, or `Tab` and `Enter` (Help) | Change that shortcut: press the new keys; `Esc` gives up, `R` then `Enter` resets them all |
 | `F2` | About, with the version |

@@ -233,7 +233,7 @@ impl App {
     pub fn with_picker(root: PathBuf, picker: Picker, splash: bool) -> Result<Self> {
         let updater = Updater::new(crate::update::enabled());
         // Debug builds (tests, `cargo run`) never read or write the settings, like the updater.
-        let settings = splash && !cfg!(debug_assertions);
+        let settings = splash && !cfg!(debug_assertions) && !cfg!(test);
         // Without the tmux it needs, the terminals are the plain ones (F38).
         let tmux = settings && updater.tmux() && deps::tmux_usable();
         let sessions = |panel| tmux.then(|| tmux_prefix(&root, panel));
