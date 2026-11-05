@@ -244,6 +244,11 @@ pub struct MarkdownDocument {
 }
 
 impl MarkdownDocument {
+    /// Whether row `row` is inside a code block, where nothing is Markdown.
+    pub fn is_code(&self, row: usize) -> bool {
+        self.code.get(row).copied().unwrap_or(true)
+    }
+
     pub fn parse(lines: &[String]) -> Self {
         let regions = scan_fences(lines);
         let mut tables = Vec::new();
@@ -637,6 +642,16 @@ fn inline_glyphs(line: &str, highlighted: &[Span<'static>], blocks: bool) -> Opt
     for (start, end) in pairs(&characters, &protected, &['`'], false) {
         protected[start..=end].fill(true);
     }
+    // `[[target|text]]` shows its text, or its target, and nothing else (F40).
+    for link in wiki_links(&characters, &protected) {
+        changed = true;
+        protected[link.start..link.end].fill(true);
+        hidden[link.start..link.text].fill(true);
+        hidden[link.close..link.end].fill(true);
+        for style in &mut styles[link.text..link.close] {
+            *style = style.fg(Color::Blue).add_modifier(Modifier::UNDERLINED);
+        }
+    }
     for (token, modifier) in [
         (&['*', '*'][..], Some(Modifier::BOLD)),
         (&['=', '='][..], None),
@@ -694,6 +709,75 @@ fn inline_glyphs(line: &str, highlighted: &[Span<'static>], blocks: bool) -> Opt
         });
     }
     Some(glyphs)
+}
+
+/// A `[[target|text]]` by character: where it starts, where its target and its text start,
+/// where `]]` starts and where it ends.
+struct WikiLink {
+    start: usize,
+    target: usize,
+    text: usize,
+    close: usize,
+    end: usize,
+}
+
+fn wiki_links(characters: &[char], protected: &[bool]) -> Vec<WikiLink> {
+    let mut links = Vec::new();
+    let mut index = 0;
+    while index + 1 < characters.len() {
+        let start = index;
+        index += 1;
+        if characters[start..start + 2] != ['[', '['] || protected[start] {
+            continue;
+        }
+        let target = start + 2;
+        let Some(length) = characters[target..]
+            .windows(2)
+            .position(|pair| pair == [']', ']'])
+        else {
+            continue;
+        };
+        let close = target + length;
+        let inner = &characters[target..close];
+        if inner.is_empty() || inner.contains(&'[') {
+            continue;
+        }
+        let text = inner
+            .iter()
+            .position(|character| *character == '|')
+            .map_or(target, |bar| target + bar + 1);
+        index = close + 2;
+        links.push(WikiLink {
+            start,
+            target,
+            text,
+            close,
+            end: close + 2,
+        });
+    }
+    links
+}
+
+/// The target of the `[[ ]]` at character `column` of `line`, without `|text` or `#heading`.
+pub fn wiki_link_at(line: &str, column: usize) -> Option<String> {
+    let characters = line.chars().collect::<Vec<_>>();
+    let link = wiki_links(&characters, &vec![false; characters.len()])
+        .into_iter()
+        .find(|link| (link.start..link.end).contains(&column))?;
+    let end = if link.text > link.target {
+        link.text - 1
+    } else {
+        link.close
+    };
+    let target = characters[link.target..end].iter().collect::<String>();
+    let target = target.split('#').next().unwrap_or_default().trim();
+    (!target.is_empty()).then(|| target.to_owned())
+}
+
+/// Whether `line` has a `[[ ]]`: the mouse over it keeps showing its text (F40).
+pub fn has_wiki_link(line: &str) -> bool {
+    let characters = line.chars().collect::<Vec<_>>();
+    !wiki_links(&characters, &vec![false; characters.len()]).is_empty()
 }
 
 /// Opening and closing positions of `token`: an opener is followed by text, a closer comes
@@ -1325,6 +1409,39 @@ mod tests {
         let document = MarkdownDocument::parse(&broken);
         assert_eq!(document.rows(3).len(), 3);
         assert!(text(&rendered(&document, &broken, 0, &[9]).unwrap()).contains("mermaid"));
+    }
+
+    #[test]
+    fn wiki_links_show_only_their_text_and_clicks_find_their_target() {
+        let line = "See [[Docs/guide#setup|the guide]] and [[notes]].";
+        let spans = render_inline(line, &[]).unwrap();
+        assert_eq!(text(&spans), "See the guide and notes.");
+        let link = spans
+            .iter()
+            .find(|span| span.content == "the guide")
+            .unwrap();
+        assert!(link.style.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(link.style.fg, Some(Color::Blue));
+
+        // Over the text drawn, and over the source of a row the cursor is on.
+        let column = inline_source_column(line, 6).unwrap();
+        assert_eq!(wiki_link_at(line, column).as_deref(), Some("Docs/guide"));
+        let column = inline_source_column(line, 19).unwrap();
+        assert_eq!(wiki_link_at(line, column).as_deref(), Some("notes"));
+        assert_eq!(wiki_link_at(line, 5).as_deref(), Some("Docs/guide"));
+        assert_eq!(wiki_link_at(line, 0), None);
+        assert_eq!(wiki_link_at(line, 36), None);
+
+        // A code span stays as written; broken and empty ones are text; a heading alone is
+        // no document.
+        assert_eq!(
+            text(&render_inline("`[[a]]` **b**", &[]).unwrap()),
+            "`[[a]]` b"
+        );
+        assert!(render_inline("[[open and [[a", &[]).is_none());
+        assert!(render_inline("[[]]", &[]).is_none());
+        assert_eq!(wiki_link_at("[[#top]]", 3), None);
+        assert!(has_wiki_link("a [[b]]") && !has_wiki_link("a [b](c)"));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::{
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use super::{App, Focus};
+use super::{App, Focus, Tile};
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub(super) struct Session {
@@ -24,6 +24,12 @@ pub(super) struct Session {
     right_terminal_width: u16,
     bottom_terminal_height: u16,
     tabs: Vec<Tab>,
+    /// The layout (F39) and the lengths of the panels moved to another side; a session from
+    /// before them has none.
+    #[serde(default)]
+    tiles: Option<Tile>,
+    #[serde(default)]
+    other_lengths: Option<[u16; 3]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -86,6 +92,12 @@ impl App {
                     column: file.cursor_column,
                 })
                 .collect(),
+            tiles: Some(self.tiles.clone()),
+            other_lengths: Some([
+                self.explorer_height,
+                self.right_terminal_height,
+                self.bottom_terminal_width,
+            ]),
         }
     }
 
@@ -155,6 +167,14 @@ impl App {
         self.explorer_width = session.explorer_width.max(10);
         self.right_terminal_width = session.right_terminal_width.max(10);
         self.bottom_terminal_height = session.bottom_terminal_height.max(3);
+        if let Some(tiles) = session.tiles.filter(Tile::is_complete) {
+            self.tiles = tiles;
+        }
+        if let Some([explorer, right, bottom]) = session.other_lengths {
+            self.explorer_height = explorer.max(3);
+            self.right_terminal_height = right.max(3);
+            self.bottom_terminal_width = bottom.max(10);
+        }
         self.status = "Ready".into();
         self.saved_session = Some(self.session());
         Ok(())

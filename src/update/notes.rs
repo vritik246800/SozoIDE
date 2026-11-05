@@ -10,6 +10,23 @@ pub struct Notes {
 
 pub const NOTES: &[Notes] = &[
     Notes {
+        version: "0.8.2",
+        new: &[
+            "A Best experience panel on the first start, and after an update that brings a new tool: choose what to install (Git, curl, FFmpeg, tmux) or skip it; Help > Dependencies installs it any time",
+            "Layout tiling: drag a panel by its title, the editor too, to a side of another panel to share its place, to its centre to swap them, or to an edge of the window; the rest adjusts and each folder remembers it",
+            "tmux, optional on macOS and Linux: T in Help > Dependencies, and shells keep running after SozoIDE closes",
+            "Terminals work as any terminal: Ctrl and a letter go to the program there, F6 leaves the terminal; Shift+drag selects text over a program that uses the mouse",
+            "[[Links]] in Markdown show only their text, and a click opens the document in a new tab, or goes to its tab",
+            "Colours for .astro files, with their --- script, and for .classpath, .project and .factorypath",
+        ],
+        fixed: &[
+            "The wheel and the mouse reach full-screen programs in a terminal, as Claude Code, vim and htop, and Page Up and Page Down too",
+            "Terminals send arrows, modified keys and pastes as programs expect, answer what they ask and put on the clipboard what they copy",
+            "Updates are checked against the SHA256SUMS.txt of the release: a package that does not match is not installed",
+            "A .glb or .gltf model with an extension or a texture format SozoIDE does not know opens with what it can draw",
+        ],
+    },
+    Notes {
         version: "0.8.1",
         new: &[
             "Markdown tables written with the dashes that smart punctuation types, as in |:—:|, are drawn and aligned too",

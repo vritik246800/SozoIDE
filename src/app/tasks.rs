@@ -8,6 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use super::{App, Focus};
 use crate::{
     run::{Project, Task, detect, shell_line, task_line},
+    terminal::tmux_prefix,
     update::deps::{self, Component, Found},
 };
 
@@ -34,6 +35,45 @@ pub struct ProjectChoice {
     pub projects: Vec<Project>,
     pub selected: usize,
     pub task: Task,
+}
+
+/// The Setup dialog (F36): the tools that make SozoIDE better, what was found of each, the
+/// ones chosen to install and the row with the cursor.
+pub struct Setup {
+    pub components: Vec<Component>,
+    pub found: Option<Vec<Found>>,
+    pub chosen: Vec<bool>,
+    pub selected: usize,
+    reader: Option<Receiver<Vec<Found>>>,
+}
+
+impl Setup {
+    /// Whether row `index` can be chosen: it is missing and this machine can install it.
+    pub fn can_install(&self, index: usize) -> bool {
+        self.found
+            .as_ref()
+            .is_some_and(|found| found[index] == Found::Missing)
+            && self.components[index].install.is_some()
+    }
+
+    fn found(&mut self, found: Vec<Found>) {
+        self.found = Some(found);
+        self.chosen = (0..self.components.len())
+            .map(|index| self.can_install(index))
+            .collect();
+    }
+
+    #[cfg(test)]
+    pub fn set_reader(&mut self, reader: Receiver<Vec<Found>>) {
+        self.reader = Some(reader);
+    }
+
+    /// Space or a click on a row that can be chosen.
+    fn toggle(&mut self, index: usize) {
+        if self.can_install(index) {
+            self.chosen[index] = !self.chosen[index];
+        }
+    }
 }
 
 /// Help's two tabs (F33).
@@ -273,18 +313,106 @@ impl App {
     }
 
     /// Help's Dependencies tab opens: the check starts unless it has a result.
+    /// Every component with the commands of this machine.
+    pub(super) fn all_components() -> Vec<Component> {
+        deps::components(
+            std::env::consts::OS,
+            deps::on_path,
+            if cfg!(target_os = "linux") {
+                deps::sudo()
+            } else {
+                &[]
+            },
+        )
+    }
+
+    /// Opens the Setup dialog on `components`, checked on a thread (F36).
+    pub(super) fn open_setup(&mut self, components: Vec<Component>) {
+        let reader = (self.setup_checker)(&components);
+        self.setup = Some(Setup {
+            chosen: vec![false; components.len()],
+            components,
+            found: None,
+            selected: 0,
+            reader: Some(reader),
+        });
+        self.open_overlay(super::Overlay::Setup);
+    }
+
+    /// The keys of the Setup dialog: it installs what is chosen, after the same dialog that
+    /// says the command as everything installed from here (Q65), or it goes for good.
+    pub(super) fn handle_setup_key(&mut self, key: KeyEvent) {
+        let Some(setup) = &mut self.setup else {
+            return;
+        };
+        match key.code {
+            KeyCode::Up => setup.selected = setup.selected.saturating_sub(1),
+            KeyCode::Down => {
+                setup.selected = (setup.selected + 1).min(setup.components.len().saturating_sub(1));
+            }
+            KeyCode::Char(' ') => setup.toggle(setup.selected),
+            KeyCode::Enter => self.install_chosen(),
+            KeyCode::Esc | KeyCode::Char('s' | 'S') => {
+                self.status = "Help, then Dependencies, installs them when you want".into();
+                self.close_overlay();
+            }
+            _ => {}
+        }
+    }
+
+    /// A click on a row: the cursor goes there and it is chosen or left out.
+    pub(super) fn click_setup_row(&mut self, index: usize) {
+        if let Some(setup) = &mut self.setup {
+            setup.selected = index;
+            setup.toggle(index);
+        }
+    }
+
+    fn install_chosen(&mut self) {
+        let Some(setup) = &self.setup else {
+            return;
+        };
+        if setup.found.is_none() {
+            self.status = "Still checking...".into();
+            return;
+        }
+        let os = std::env::consts::OS;
+        let chosen = setup
+            .components
+            .iter()
+            .zip(&setup.chosen)
+            .filter(|(_, chosen)| **chosen)
+            .filter_map(|(component, _)| Some((component.name, component.install.as_ref()?)))
+            .collect::<Vec<_>>();
+        if chosen.is_empty() {
+            self.close_overlay();
+            return;
+        }
+        let names = chosen
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let line = chosen
+            .iter()
+            .map(|(_, command)| shell_line(command, os))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        self.confirm = Some(Confirm {
+            title: "Install the tools".to_owned(),
+            rows: vec![("Tools", names.clone()), ("Command", line.clone())],
+            running: format!("Installing {names}"),
+            line,
+            task: false,
+            server: None,
+            component: None,
+        });
+    }
+
     pub(super) fn open_dependencies(&mut self) {
         self.help_tab = HelpTab::Dependencies;
         let dependencies = self.dependencies.get_or_insert_with(|| Dependencies {
-            components: deps::components(
-                std::env::consts::OS,
-                deps::on_path,
-                if cfg!(target_os = "linux") {
-                    deps::sudo()
-                } else {
-                    &[]
-                },
-            ),
+            components: Self::all_components(),
             found: None,
             selected: 0,
             reader: None,
@@ -309,6 +437,15 @@ impl App {
     /// In the tick: the check's result, and the row being installed or updated once it
     /// changes; a language server now there starts at once (F35).
     pub(super) fn tick_dependencies(&mut self) {
+        if let Some(setup) = &mut self.setup
+            && let Some(found) = setup
+                .reader
+                .as_ref()
+                .and_then(|reader| reader.try_recv().ok())
+        {
+            setup.reader = None;
+            setup.found(found);
+        }
         let Some(dependencies) = &mut self.dependencies else {
             return;
         };
@@ -383,9 +520,29 @@ impl App {
             KeyCode::Down => dependencies.selected = (dependencies.selected + 1).min(count - 1),
             KeyCode::Enter => self.ask_to_install(None),
             KeyCode::Char('r' | 'R') => self.check_dependencies(),
+            KeyCode::Char('t' | 'T') => self.toggle_tmux(),
             _ => return false,
         }
         true
+    }
+
+    /// T on the tab: the shells to come run in tmux, or stop, and it stays so (F38). The ones
+    /// on screen keep what they are.
+    pub(super) fn toggle_tmux(&mut self) {
+        let on = !self.updater.tmux();
+        if on && !(self.tmux_usable)() {
+            self.status = "tmux 2.1 or newer is needed: install it first".into();
+            return;
+        }
+        self.updater.set_tmux(on);
+        let sessions = |panel| on.then(|| tmux_prefix(&self.root, panel));
+        self.bottom_terminal.set_tmux(sessions("bottom"));
+        self.right_terminal.set_tmux(sessions("right"));
+        self.status = if on {
+            "tmux on: new shells, and every shell after restarting SozoIDE, keep running".into()
+        } else {
+            "tmux off: new shells are plain ones".into()
+        };
     }
 
     /// Enter (or a click) on a component: its installation if it is missing, its update if
@@ -446,6 +603,7 @@ impl App {
     }
 
     /// What is missing, said once at a new installation or version instead of installing it.
+    /// The Setup dialog says it when it comes.
     pub(super) fn missing_message() -> Option<String> {
         let missing = deps::missing();
         (!missing.is_empty()).then(|| {

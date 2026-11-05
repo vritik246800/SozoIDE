@@ -181,7 +181,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                         app.focus,
                         app::Focus::BottomTerminal | app::Focus::RightTerminal
                     ) {
-                        app.terminals(app.focus).current_mut().send_text(&text);
+                        app.terminals(app.focus).current_mut().paste(&text);
                     }
                 }
                 _ => {}

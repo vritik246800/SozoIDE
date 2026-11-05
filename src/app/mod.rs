@@ -13,8 +13,8 @@ use crate::{
     database::controller::DatabaseController,
     editor::{OpenFile, SearchState},
     git::{ChangeArea, ExplorerChanges, FileStatus, LineMark, controller::GitController},
-    terminal::Terminals,
-    update::{Notes, UpdateState, Updater, Welcome, notes_since},
+    terminal::{Terminals, tmux_prefix},
+    update::{Notes, UpdateState, Updater, Welcome, deps, notes_since},
 };
 
 mod debugging;
@@ -33,13 +33,13 @@ pub use explorer::{
 };
 pub use intellisense::{Completion, PreviewRow, SHOWN_ITEMS, goal_names};
 pub use keys::{Action, KeyEditor, Keymap};
-use layout::{DragTarget, TabDrag, inner_size};
+use layout::{Divider, TabDrag, inner_size};
 pub use layout::{
-    DropZone, Focus, NotesFilter, Overlay, Regions, Split, SplitDirection, TabBar,
-    TerminalSelection, video_areas,
+    DropZone, Focus, NotesFilter, Overlay, Panel, PanelDrag, Regions, Split, SplitDirection,
+    TabBar, TerminalSelection, Tile, video_areas,
 };
 pub(crate) use motion::AppMotion;
-pub use tasks::{Dependencies, HelpTab};
+pub use tasks::{Dependencies, HelpTab, Setup};
 
 /// How often the open files and the Explorer are compared with the disk.
 const WATCH_INTERVAL: Duration = Duration::from_secs(1);
@@ -85,8 +85,13 @@ pub struct App {
     pub database: DatabaseController,
     pub show_git: bool,
     pub git: GitController,
+    /// How the window is shared (F39) and the length of each panel in either direction.
+    pub tiles: Tile,
     pub explorer_width: u16,
+    pub explorer_height: u16,
     pub right_terminal_width: u16,
+    pub right_terminal_height: u16,
+    pub bottom_terminal_width: u16,
     pub bottom_terminal_height: u16,
     pub bottom_terminal: Terminals,
     pub right_terminal: Terminals,
@@ -152,6 +157,12 @@ pub struct App {
         Vec<String>,
         crate::update::deps::Found,
     ) -> std::sync::mpsc::Receiver<crate::update::deps::Found>,
+    /// Checks the tools of the Setup dialog, and whether this tmux can run the terminals; the
+    /// tests answer themselves.
+    setup_checker: fn(
+        &[crate::update::deps::Component],
+    ) -> std::sync::mpsc::Receiver<Vec<crate::update::deps::Found>>,
+    tmux_usable: fn() -> bool,
     lsp_synced: Instant,
     /// F32: a command waiting for Enter, the projects of a monorepo to choose from, the one
     /// chosen, the commands already confirmed and whether a task may still be running.
@@ -203,7 +214,14 @@ pub struct App {
     tab_drag: Option<TabDrag>,
     splash_until: Instant,
     picker: Picker,
-    drag: Option<DragTarget>,
+    drag: Option<Divider>,
+    /// A panel held by its title (F39).
+    pub panel_drag: Option<PanelDrag>,
+    /// A button held in a terminal whose program asked for the mouse (F37).
+    terminal_mouse: Option<(Focus, u8)>,
+    /// The Setup dialog is waiting for the splash to end, and what it shows (F36).
+    setup_due: bool,
+    pub setup: Option<Setup>,
 }
 
 impl App {
@@ -213,17 +231,28 @@ impl App {
     }
 
     pub fn with_picker(root: PathBuf, picker: Picker, splash: bool) -> Result<Self> {
-        let bottom_terminal = Terminals::new(&root, 1);
-        let right_terminal = Terminals::new(&root, RIGHT_TERMINALS);
+        let updater = Updater::new(crate::update::enabled());
+        // Debug builds (tests, `cargo run`) never read or write the settings, like the updater.
+        let settings = splash && !cfg!(debug_assertions);
+        // Without the tmux it needs, the terminals are the plain ones (F38).
+        let tmux = settings && updater.tmux() && deps::tmux_usable();
+        let sessions = |panel| tmux.then(|| tmux_prefix(&root, panel));
+        let bottom_terminal = Terminals::new(&root, 1, sessions("bottom"));
+        let right_terminal = Terminals::new(&root, RIGHT_TERMINALS, sessions("right"));
         let keys_path = keys::keys_path();
         let git = GitController::new(root.clone());
         let now = Instant::now();
-        let updater = Updater::new(crate::update::enabled());
-        // Debug builds (tests, `cargo run`) never read or write the settings, like the updater.
-        let welcome = if splash && !cfg!(debug_assertions) {
+        let welcome = if settings {
             updater.welcome()
         } else {
             Welcome::None
+        };
+        let setup_due = settings && {
+            let tools = deps::own_tools(Self::all_components())
+                .iter()
+                .map(|component| component.program)
+                .collect::<Vec<_>>();
+            updater.setup_due(&tools, deps::on_path)
         };
         // A new installation or a new version says what it is missing; nothing is installed
         // without Enter (Q65).
@@ -247,8 +276,12 @@ impl App {
             database: DatabaseController::new()?,
             show_git: false,
             git,
+            tiles: Tile::default(),
             explorer_width: 30,
+            explorer_height: 12,
             right_terminal_width: 42,
+            right_terminal_height: 12,
+            bottom_terminal_width: 42,
             bottom_terminal_height: 12,
             bottom_terminal,
             right_terminal,
@@ -294,6 +327,8 @@ impl App {
             installs: crate::update::deps::server_install,
             watcher: crate::update::deps::watch,
             component_watcher: crate::update::deps::watch_component,
+            setup_checker: crate::update::deps::check,
+            tmux_usable: crate::update::deps::tmux_usable,
             lsp_synced: now,
             breakpoints: Default::default(),
             debug_build: None,
@@ -323,6 +358,10 @@ impl App {
             splash_until: now + Duration::from_millis(1400),
             picker,
             drag: None,
+            panel_drag: None,
+            terminal_mouse: None,
+            setup_due,
+            setup: None,
         };
         app.refresh_entries()?;
         app.restore_session()?;
@@ -354,6 +393,7 @@ impl App {
         if self.splash_visible && now >= self.splash_until && !self.motion.splash_closing() {
             self.motion.close_splash(now);
         }
+        self.tick_terminal_clipboard();
         if self.splash_visible && self.motion.splash_closed() {
             self.splash_visible = false;
         }
@@ -585,6 +625,11 @@ impl App {
                 .sync_download((received as f64 / total.max(1) as f64) as f32);
         }
         let free = self.overlay == Overlay::None && !self.splash_visible && self.search.is_none();
+        // First what makes SozoIDE better, then the tutorial or what's new (F36).
+        if free && std::mem::take(&mut self.setup_due) {
+            self.open_setup(deps::own_tools(Self::all_components()));
+            return;
+        }
         if free && self.welcome != Welcome::None {
             let overlay = match std::mem::replace(&mut self.welcome, Welcome::None) {
                 Welcome::WhatsNew(seen) => {
@@ -678,6 +723,70 @@ impl App {
         self.bottom_terminal.close(index);
         self.focus = Focus::BottomTerminal;
         self.terminal_selection = None;
+    }
+
+    /// The length `panel` takes along `direction` as it shows now: 0 while it is hidden, less
+    /// while it comes or goes (F08).
+    pub fn panel_length(&self, panel: Panel, direction: SplitDirection) -> u16 {
+        let columns = direction == SplitDirection::Columns;
+        let (length, shown) = match panel {
+            Panel::Editor => return 1,
+            Panel::Explorer => (
+                if columns {
+                    self.explorer_width
+                } else {
+                    self.explorer_height
+                },
+                self.motion.explorer(),
+            ),
+            Panel::RightTerminal => (
+                if columns {
+                    self.right_terminal_width
+                } else {
+                    self.right_terminal_height
+                },
+                self.motion.right_terminal(),
+            ),
+            Panel::BottomTerminal => (
+                if columns {
+                    self.bottom_terminal_width
+                } else {
+                    self.bottom_terminal_height
+                },
+                self.motion.bottom_terminal(),
+            ),
+        };
+        crate::ui::scale_length(length, shown)
+    }
+
+    /// A divider moved: `value` cells for `panel` along `direction`.
+    pub(super) fn set_panel_length(&mut self, panel: Panel, direction: SplitDirection, value: u16) {
+        let columns = direction == SplitDirection::Columns;
+        let value = if columns {
+            value.clamp(18, 120)
+        } else {
+            value.clamp(4, 60)
+        };
+        match (panel, columns) {
+            (Panel::Editor, _) => {}
+            (Panel::Explorer, true) => self.explorer_width = value,
+            (Panel::Explorer, false) => self.explorer_height = value,
+            (Panel::RightTerminal, true) => self.right_terminal_width = value,
+            (Panel::RightTerminal, false) => self.right_terminal_height = value,
+            (Panel::BottomTerminal, true) => self.bottom_terminal_width = value,
+            (Panel::BottomTerminal, false) => self.bottom_terminal_height = value,
+        }
+    }
+
+    /// The text programs in the terminals put on the clipboard (OSC 52, F37).
+    fn tick_terminal_clipboard(&mut self) {
+        let copied = [&mut self.bottom_terminal, &mut self.right_terminal]
+            .into_iter()
+            .flat_map(Terminals::take_copied)
+            .collect::<Vec<_>>();
+        for text in copied {
+            self.copy(text);
+        }
     }
 
     /// The terminals of the panel `focus` names.

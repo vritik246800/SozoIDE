@@ -21,6 +21,7 @@ pub enum Action {
     Database,
     NextTerminal,
     PreviousTerminal,
+    LeaveTerminal,
     CloseTab,
     Run,
     Build,
@@ -45,7 +46,7 @@ pub enum Action {
     Quit,
 }
 
-pub const ACTIONS: [Action; 29] = [
+pub const ACTIONS: [Action; 30] = [
     Action::Explorer,
     Action::BottomTerminal,
     Action::RightTerminal,
@@ -53,6 +54,7 @@ pub const ACTIONS: [Action; 29] = [
     Action::Database,
     Action::NextTerminal,
     Action::PreviousTerminal,
+    Action::LeaveTerminal,
     Action::CloseTab,
     Action::Run,
     Action::Build,
@@ -88,6 +90,7 @@ impl Action {
             Self::Database => "database",
             Self::NextTerminal => "next_terminal",
             Self::PreviousTerminal => "previous_terminal",
+            Self::LeaveTerminal => "leave_terminal",
             Self::CloseTab => "close_tab",
             Self::Run => "run",
             Self::Build => "build",
@@ -123,6 +126,7 @@ impl Action {
             Self::Database => "Database",
             Self::NextTerminal => "Next terminal tab",
             Self::PreviousTerminal => "Previous terminal tab",
+            Self::LeaveTerminal => "Leave the terminal",
             Self::CloseTab => "Close the tab",
             Self::Run => "Run the file or its project",
             Self::Build => "Build the project",
@@ -167,6 +171,7 @@ impl Action {
             Self::Database => ctrl('d'),
             Self::NextTerminal => Binding::new(KeyCode::PageDown, KeyModifiers::CONTROL),
             Self::PreviousTerminal => Binding::new(KeyCode::PageUp, KeyModifiers::CONTROL),
+            Self::LeaveTerminal => Binding::new(KeyCode::F(6), KeyModifiers::NONE),
             Self::CloseTab => ctrl('w'),
             Self::Run => ctrl('r'),
             Self::Build => Binding::new(KeyCode::F(7), KeyModifiers::NONE),
