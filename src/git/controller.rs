@@ -16,10 +16,41 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitMode {
     None,
+    /// The message: its first line the title, the rest the body (`Alt+Enter` a new line).
     Commit(String),
+    /// A new message for the last commit; empty keeps its own (TODO 4.1.3).
+    Amend(String),
     Rebase(String),
     ConfirmRebase(String),
     ConfirmCheckout(String),
+    /// The changes of a file to throw away: it is copied to the cache first.
+    ConfirmDiscard(String),
+    /// The hunk (or its marked lines) of the diff to throw away.
+    ConfirmDiscardHunk,
+    Stash(String),
+    ConfirmStashDrop(usize, String),
+    NewBranch(String),
+    /// The branch and its new name.
+    RenameBranch(String, String),
+    /// The branch, and whether it goes even if not merged (`Shift+Delete`).
+    ConfirmDeleteBranch(String, bool),
+    NewTag(String),
+}
+
+impl GitMode {
+    /// The text the dialog takes, when it takes one.
+    fn input(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Commit(text)
+            | Self::Amend(text)
+            | Self::Rebase(text)
+            | Self::Stash(text)
+            | Self::NewBranch(text)
+            | Self::RenameBranch(_, text)
+            | Self::NewTag(text) => Some(text),
+            _ => None,
+        }
+    }
 }
 
 /// Where the timeline is (F06): the graph, the files of a commit in the panel that slides in
@@ -70,6 +101,10 @@ pub enum GitUiAction {
     TimelineBack,
     Submit,
     Cancel,
+    /// A dialog of TODO 4.1.1–4.1.4 opens.
+    Mode(GitMode),
+    /// An operation that needs no question runs.
+    Run(GitAction),
 }
 
 #[derive(Default)]
@@ -93,6 +128,8 @@ pub struct GitController {
     pub timeline_scroll: usize,
     /// The commit whose files were asked for while Git was busy; loaded once it is free.
     pub pending_commit: Option<usize>,
+    /// The entry of the stash chosen in Branches.
+    pub stash: usize,
     task: Option<JoinHandle<()>>,
     /// A refresh that follows changes made elsewhere (F35), read without holding the panel.
     following: Option<JoinHandle<()>>,
@@ -111,6 +148,7 @@ impl GitController {
             timeline_file: 0,
             timeline_scroll: 0,
             pending_commit: None,
+            stash: 0,
             task: None,
             following: None,
         }
@@ -196,19 +234,29 @@ impl GitController {
             if self.motion.dialog_closing() {
                 return true;
             }
+            let message = matches!(self.mode, GitMode::Commit(_) | GitMode::Amend(_));
             match key.code {
                 KeyCode::Esc => self.close_mode(),
+                // A message has a body: Alt+Enter (or Shift+Enter) starts a new line.
+                KeyCode::Enter
+                    if message
+                        && key
+                            .modifiers
+                            .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+                {
+                    if let Some(input) = self.mode.input() {
+                        input.push('\n');
+                    }
+                }
                 KeyCode::Enter => self.action(GitUiAction::Submit),
-                KeyCode::Backspace => match &mut self.mode {
-                    GitMode::Commit(input) | GitMode::Rebase(input) => {
+                KeyCode::Backspace => {
+                    if let Some(input) = self.mode.input() {
                         input.pop();
                     }
-                    _ => {}
-                },
+                }
                 KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    match &mut self.mode {
-                        GitMode::Commit(input) | GitMode::Rebase(input) => input.push(character),
-                        _ => {}
+                    if let Some(input) = self.mode.input() {
+                        input.push(character);
                     }
                 }
                 _ => {}
@@ -273,6 +321,91 @@ impl GitController {
                 KeyCode::Char('s') if changes => Some(GitUiAction::Stage),
                 KeyCode::Char('u') if changes => Some(GitUiAction::Unstage),
                 KeyCode::Char('c') if changes => Some(GitUiAction::OpenCommit),
+                KeyCode::Char('a') if changes => {
+                    Some(GitUiAction::Mode(GitMode::Amend(String::new())))
+                }
+                KeyCode::Char('z') if changes => {
+                    Some(GitUiAction::Mode(GitMode::Stash(String::new())))
+                }
+                KeyCode::Char('d') if changes => panel.selected_change().map(|change| {
+                    GitUiAction::Mode(GitMode::ConfirmDiscard(change.path.display().to_string()))
+                }),
+                // A file in conflict: its first block as mine, theirs or both (TODO 4.1.7).
+                KeyCode::Char(choice @ ('1' | '2' | '3')) if changes => panel
+                    .selected_change()
+                    .filter(|change| change.status == crate::git::FileStatus::Conflict)
+                    .map(|change| {
+                        let resolution = match choice {
+                            '1' => crate::git::Resolution::Current,
+                            '2' => crate::git::Resolution::Incoming,
+                            _ => crate::git::Resolution::Both,
+                        };
+                        GitUiAction::Run(GitAction::Resolve(change.path.clone(), 0, resolution))
+                    }),
+                KeyCode::Char('m') if tab == GitTab::CommitGraph => {
+                    Some(GitUiAction::Run(GitAction::MoreCommits))
+                }
+                KeyCode::Char('b') if tab == GitTab::Branches => {
+                    Some(GitUiAction::Mode(GitMode::NewBranch(String::new())))
+                }
+                KeyCode::Char('t') if tab == GitTab::Branches => {
+                    Some(GitUiAction::Mode(GitMode::NewTag(String::new())))
+                }
+                KeyCode::Char('r') if tab == GitTab::Branches => panel
+                    .selected_branch()
+                    .filter(|branch| !branch.is_remote)
+                    .map(|branch| {
+                        GitUiAction::Mode(GitMode::RenameBranch(
+                            branch.name.clone(),
+                            branch.name.clone(),
+                        ))
+                    }),
+                KeyCode::Delete if tab == GitTab::Branches => panel
+                    .selected_branch()
+                    .filter(|branch| !branch.is_remote && !branch.is_head)
+                    .map(|branch| {
+                        let force = key.modifiers.contains(KeyModifiers::SHIFT);
+                        GitUiAction::Mode(GitMode::ConfirmDeleteBranch(branch.name.clone(), force))
+                    }),
+                // The stash: `[`/`]` choose an entry, `a` applies it, `x` drops it (asked).
+                KeyCode::Char('[') if tab == GitTab::Branches => {
+                    self.stash = self.stash.saturating_sub(1);
+                    None
+                }
+                KeyCode::Char(']') if tab == GitTab::Branches => {
+                    self.stash = (self.stash + 1).min(panel.stashes.len().saturating_sub(1));
+                    None
+                }
+                KeyCode::Char('a') if tab == GitTab::Branches => panel
+                    .stashes
+                    .get(self.stash)
+                    .map(|(index, _)| GitUiAction::Run(GitAction::StashApply(*index))),
+                KeyCode::Char('x') if tab == GitTab::Branches => {
+                    panel.stashes.get(self.stash).map(|(index, message)| {
+                        GitUiAction::Mode(GitMode::ConfirmStashDrop(*index, message.clone()))
+                    })
+                }
+                KeyCode::Char('S') if tab == GitTab::Diff => Some(GitUiAction::Run(
+                    GitAction::Hunk(crate::git::HunkAction::Stage),
+                )),
+                KeyCode::Char('U') if tab == GitTab::Diff => Some(GitUiAction::Run(
+                    GitAction::Hunk(crate::git::HunkAction::Unstage),
+                )),
+                KeyCode::Char('D') if tab == GitTab::Diff => {
+                    Some(GitUiAction::Mode(GitMode::ConfirmDiscardHunk))
+                }
+                // Space marks a line of a hunk: the hunk keys then take only the marked ones.
+                KeyCode::Char(' ') if tab == GitTab::Diff => {
+                    if let Some(DiffRow::Line(file, hunk, line)) =
+                        panel.diff_rows().get(panel.selected).copied()
+                    {
+                        let mark = (file, hunk, line);
+                        if !panel.diff_marks.remove(&mark) {
+                            panel.diff_marks.insert(mark);
+                        }
+                    }
+                    None
+                }
                 KeyCode::Char(character) if tab == GitTab::Diff => match character {
                     'n' => Some(GitUiAction::NextHunk),
                     'p' => Some(GitUiAction::PreviousHunk),
@@ -349,9 +482,8 @@ impl GitController {
         if self.motion.dialog_closing() {
             return;
         }
-        match &mut self.mode {
-            GitMode::Commit(input) | GitMode::Rebase(input) => input.push_str(text),
-            _ => {}
+        if let Some(input) = self.mode.input() {
+            input.push_str(text);
         }
     }
 
@@ -500,9 +632,50 @@ impl GitController {
                     self.close_mode();
                     self.spawn(GitAction::Checkout(branch), Some(GitTab::Branches));
                 }
+                GitMode::Amend(message) => {
+                    self.close_mode();
+                    let message = Some(message).filter(|message| !message.trim().is_empty());
+                    self.spawn(GitAction::Amend(message), None);
+                }
+                GitMode::ConfirmDiscard(_) => {
+                    self.close_mode();
+                    self.spawn(GitAction::DiscardSelected, None);
+                }
+                GitMode::ConfirmDiscardHunk => {
+                    self.close_mode();
+                    self.spawn(GitAction::Hunk(crate::git::HunkAction::Discard), None);
+                }
+                GitMode::Stash(message) => {
+                    self.close_mode();
+                    self.spawn(GitAction::StashPush(message), None);
+                }
+                GitMode::ConfirmStashDrop(index, _) => {
+                    self.close_mode();
+                    self.spawn(GitAction::StashDrop(index), None);
+                }
+                GitMode::NewBranch(name) => {
+                    self.close_mode();
+                    self.spawn(GitAction::CreateBranch(name), None);
+                }
+                GitMode::RenameBranch(old, new) => {
+                    self.close_mode();
+                    if old != new {
+                        self.spawn(GitAction::RenameBranch(old, new), None);
+                    }
+                }
+                GitMode::ConfirmDeleteBranch(name, force) => {
+                    self.close_mode();
+                    self.spawn(GitAction::DeleteBranch(name, force), None);
+                }
+                GitMode::NewTag(name) => {
+                    self.close_mode();
+                    self.spawn(GitAction::CreateTag(name), None);
+                }
                 GitMode::None => {}
             },
             GitUiAction::Cancel => self.close_mode(),
+            GitUiAction::Mode(mode) => self.open_mode(mode),
+            GitUiAction::Run(action) => self.spawn(action, None),
         }
     }
 
@@ -729,5 +902,158 @@ mod tests {
         key(&mut controller, 's');
         finish(&mut controller);
         assert_eq!(controller.panel.lock().unwrap().status.staged.len(), 1);
+    }
+
+    #[test]
+    fn discards_hunks_amends_stashes_and_branches_ask_first_and_never_touch_more() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let root = root.as_path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.name", "Test User"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        let text: String = (1..=30).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(root.join("a.txt"), &text).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "Base"]);
+        let mut controller = GitController::new(root.to_path_buf());
+        let key = |controller: &mut GitController, code: KeyCode, modifiers: KeyModifiers| {
+            controller.handle_key(KeyEvent::new(code, modifiers));
+        };
+        let none = KeyModifiers::NONE;
+        // Two hunks far apart; S stages only the first.
+        std::fs::write(
+            root.join("a.txt"),
+            text.replace("line 2\n", "line two\n")
+                .replace("line 29\n", "line twenty-nine\n"),
+        )
+        .unwrap();
+        controller.action(GitUiAction::Refresh);
+        finish(&mut controller);
+        key(&mut controller, KeyCode::Enter, none);
+        finish(&mut controller);
+        key(&mut controller, KeyCode::Char('n'), none);
+        key(&mut controller, KeyCode::Char('S'), KeyModifiers::SHIFT);
+        finish(&mut controller);
+        let staged = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["diff", "--cached"])
+            .output()
+            .unwrap();
+        let staged = String::from_utf8(staged.stdout).unwrap();
+        assert!(
+            staged.contains("+line two") && !staged.contains("twenty-nine"),
+            "{staged}"
+        );
+        // D asks; Esc keeps the hunk.
+        key(&mut controller, KeyCode::Char('D'), KeyModifiers::SHIFT);
+        assert_eq!(controller.mode, GitMode::ConfirmDiscardHunk);
+        key(&mut controller, KeyCode::Esc, none);
+        finish(&mut controller);
+        assert!(
+            std::fs::read_to_string(root.join("a.txt"))
+                .unwrap()
+                .contains("twenty-nine")
+        );
+        // In Changes, d asks for the file; Enter throws the work tree's change away.
+        controller.action(GitUiAction::Tab(GitTab::Changes));
+        let unstaged = controller.panel.lock().unwrap().status.staged.len();
+        controller.action(GitUiAction::Select(unstaged));
+        key(&mut controller, KeyCode::Char('d'), none);
+        assert_eq!(controller.mode, GitMode::ConfirmDiscard("a.txt".into()));
+        key(&mut controller, KeyCode::Enter, none);
+        finish(&mut controller);
+        let now = std::fs::read_to_string(root.join("a.txt")).unwrap();
+        assert!(
+            now.contains("line two") && !now.contains("twenty-nine"),
+            "the staged hunk stays: {now}"
+        );
+        // Amend with a title and a body (Alt+Enter between them).
+        key(&mut controller, KeyCode::Char('a'), none);
+        for character in "Base, amended".chars() {
+            key(&mut controller, KeyCode::Char(character), none);
+        }
+        key(&mut controller, KeyCode::Enter, KeyModifiers::ALT);
+        for character in "with a body".chars() {
+            key(&mut controller, KeyCode::Char(character), none);
+        }
+        key(&mut controller, KeyCode::Enter, none);
+        finish(&mut controller);
+        let log = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["log", "--format=%B"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(log.stdout).unwrap().trim(),
+            "Base, amended\nwith a body"
+        );
+        // Stash, then drop it after the question.
+        std::fs::write(root.join("a.txt"), "stashed\n").unwrap();
+        key(&mut controller, KeyCode::Char('z'), none);
+        key(&mut controller, KeyCode::Enter, none);
+        finish(&mut controller);
+        assert_eq!(controller.panel.lock().unwrap().stashes.len(), 1);
+        controller.action(GitUiAction::Tab(GitTab::Branches));
+        key(&mut controller, KeyCode::Char('x'), none);
+        assert!(matches!(controller.mode, GitMode::ConfirmStashDrop(0, _)));
+        key(&mut controller, KeyCode::Enter, none);
+        finish(&mut controller);
+        assert!(controller.panel.lock().unwrap().stashes.is_empty());
+        // A branch made, renamed and deleted; a hostile name is refused and says why.
+        for (keys, name) in [("b", "feature/x"), ("b", "--upload-pack=touch")] {
+            key(
+                &mut controller,
+                KeyCode::Char(keys.chars().next().unwrap()),
+                none,
+            );
+            for character in name.chars() {
+                key(&mut controller, KeyCode::Char(character), none);
+            }
+            key(&mut controller, KeyCode::Enter, none);
+            finish(&mut controller);
+        }
+        let panel = controller.panel.lock().unwrap();
+        assert!(
+            panel
+                .branches
+                .iter()
+                .any(|branch| branch.name == "feature/x")
+        );
+        assert!(
+            !panel
+                .branches
+                .iter()
+                .any(|branch| branch.name.contains("upload"))
+        );
+        assert!(panel.last_error.is_some());
+        let feature = panel
+            .branches
+            .iter()
+            .position(|branch| branch.name == "feature/x")
+            .unwrap();
+        drop(panel);
+        controller.action(GitUiAction::Select(feature));
+        key(&mut controller, KeyCode::Delete, none);
+        assert_eq!(
+            controller.mode,
+            GitMode::ConfirmDeleteBranch("feature/x".into(), false)
+        );
+        key(&mut controller, KeyCode::Enter, none);
+        finish(&mut controller);
+        assert!(
+            !controller
+                .panel
+                .lock()
+                .unwrap()
+                .branches
+                .iter()
+                .any(|branch| branch.name == "feature/x")
+        );
+        // Push without an upstream publishes, and with no remote says so: never a force.
+        controller.action(GitUiAction::Push);
+        finish(&mut controller);
+        assert!(controller.panel.lock().unwrap().last_error.is_some());
     }
 }

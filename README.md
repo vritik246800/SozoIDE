@@ -5,16 +5,80 @@
 <h1 align="center">SozoIDE</h1>
 
 <p align="center">
-  An IDE in your terminal: editor with IntelliSense, two terminals, Git, a SQL client,<br>
-  run with one key, pictures, videos and 3D models. One Rust binary for Windows, macOS and Linux.
+  <b>A whole IDE inside your terminal, in one binary called <code>sozo</code>.</b><br>
+  Editor with IntelliSense and a debugger, two terminals, Git, a SQL client and build keys,<br>
+  drawn with the colours of your own terminal theme. Windows, macOS and Linux, x86_64 and ARM64.
 </p>
 
 <p align="center">
   <a href="https://github.com/vritik246800/SozoIDE/actions/workflows/ci.yml"><img src="https://github.com/vritik246800/SozoIDE/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status"></a>
-  <a href="#install">Download</a> ·
-  <a href="https://vritik246800.github.io/SozoIDE/">Website</a> ·
-  <a href="LICENSE">Apache-2.0</a>
+  <a href="https://github.com/vritik246800/SozoIDE/releases/latest"><img src="https://img.shields.io/github/v/release/vritik246800/SozoIDE?label=release" alt="Latest release"></a>
+  <a href="https://github.com/vritik246800/SozoIDE/releases"><img src="https://img.shields.io/github/downloads/vritik246800/SozoIDE/total?label=downloads" alt="Downloads"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/vritik246800/SozoIDE" alt="Apache-2.0 license"></a>
 </p>
+
+<p align="center">
+  <a href="#install"><b>Download</b></a> ·
+  <a href="https://vritik246800.github.io/SozoIDE/">Website with a live demo</a> ·
+  <a href="#try-it-in-a-minute">Try it in a minute</a> ·
+  <a href="#keys">Keys</a> ·
+  <a href="#troubleshooting">Troubleshooting</a>
+</p>
+
+<p align="center">
+  <img src="assets/screen-editor.png" alt="SozoIDE in a terminal: the Explorer with Git marks on the left, a Rust file with syntax colours, a list of suggestions from rust-analyzer under the cursor and the error of that line in the footer">
+</p>
+
+SozoIDE is for people who work in a terminal all day, over SSH, inside tmux or on a light laptop, and are tired of
+switching between an editor, three shells, a Git client and a SQL client. `sozo .` opens them side by side in the
+terminal you already have, with the mouse and the keys you already know from a desktop IDE.
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/screen-git.png" alt="Source Control: the commit graph with a merge, the files of the chosen commit, and a program running in the bottom terminal"></td>
+    <td width="50%"><img src="assets/screen-database.png" alt="Database: tables on the left, the query builder with a count and a sort, and the rows of the result"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Source Control</b> (<code>Ctrl+G</code>): every branch on a timeline, the files of a commit, its diff</td>
+    <td align="center"><b>Database</b> (<code>Ctrl+D</code>): tick columns, get the <code>SELECT</code> and its rows</td>
+  </tr>
+</table>
+
+<sub>Real screens of a Linux build, shown in the Dracula theme. SozoIDE has no theme: yours will look like your terminal.</sub>
+
+## Try it in a minute
+
+1. [Download the installer for your system](#install) and open it. No Rust, no Node.js, nothing to compile.
+2. Open a terminal in any project and run:
+
+   ```sh
+   sozo .
+   ```
+
+3. A short tutorial shows each panel once. After it, these are the keys to remember:
+
+   | Key | Opens |
+   | --- | --- |
+   | `Ctrl+B` | the Explorer |
+   | `Ctrl+J` | a shell at the bottom (up to three, in tabs) |
+   | `Ctrl+G` | Source Control |
+   | `Ctrl+D` | Database |
+   | `Ctrl+P` | search in the file (`Ctrl+Shift+P`: in the whole folder) |
+   | `Ctrl+R` | runs the open file, or its project, in the bottom shell |
+   | `F1` | every key, and the tools SozoIDE can install for you |
+   | `Ctrl+Q` | quit; the folder opens as you left it next time |
+
+Everything also answers to the mouse: click, right-click, drag a tab to split the editor, drag a panel to move it.
+
+## Contents
+
+- [Why SozoIDE](#why-sozoide)
+- [Features](#features): [Explorer](#explorer) · [Editor](#editor) · [IntelliSense](#intellisense) · [Run](#run) · [Debug](#debug) · [Pictures, videos, 3D models and PDF](#pictures-videos-3d-models-and-pdf) · [Terminals](#terminals) · [Layout](#layout) · [Your own shortcuts](#your-own-shortcuts) · [Source Control](#source-control) · [Database](#database)
+- [Install](#install) and [Requirements](#requirements)
+- [Usage](#usage) and [Keys](#keys)
+- [Updates](#updates), [Privacy](#privacy), [Settings and files](#settings-and-files)
+- [Troubleshooting](#troubleshooting) and [Not there yet](#not-there-yet)
+- [Build from source](#build-from-source), [Project layout](#project-layout), [Contributing](#contributing), [Releases](#releases), [Security](#security)
 
 ## Why SozoIDE
 
@@ -22,16 +86,20 @@
 - **Fast while you type.** Highlighting is redone only from the line you changed (at most a few tens of milliseconds a key on long files), a frame draws in under a millisecond, and language servers, Git, builds and videos run in their own processes or threads: the editor never waits for them.
 - **Your terminal's look.** SozoIDE has no colours of its own: it draws with the 16 ANSI colours of your terminal theme and shows every shortcut the way your system types it.
 - **Nothing to hunt for.** Help's Dependencies tab lists every tool it and your projects use (`git`, `ffmpeg`, Rust, Node.js, Python, Java, Go, Docker, CMake, the language servers and debuggers) with its version, and installs or updates one with your package manager when you press `Enter`; its row changes by itself once it is done, and a language server installed there starts at once. Nothing is installed without asking.
+- **Tested where it runs.** More than 300 tests run on Windows, macOS and Linux on every pull request, with end-to-end ones that drive the real binary through a real PTY; every installer is built natively on its own system and architecture, installed there the way a user would, and only then released.
 - **Live.** What you do elsewhere shows at once: the open Source Control follows commits and changes made in a terminal, the Database reads its tables again after `CREATE`, `ALTER` or `DROP`, and the Explorer, the open tabs and the Git marks follow the disk.
 
 ## Features
 
 ### Explorer
 
-- Every file and folder with an icon for its type, in your terminal's colours.
-- Right-click to create a file (its icon follows the extension you type) or a folder, to rename, to delete (it asks first), and to cut, copy and paste files and folders; `Ctrl+X`, `Ctrl+C` and `Ctrl+V` do the same on the selected entry. A copy in the same folder becomes `name copy`, `name copy 2`…; a move never overwrites anything.
+- Every file and folder with an icon for its type, in your terminal's colours, folders first and names in the order people read them (`file2` before `file10`); `▸`/`▾` folders with guides down their rows, and a folder that holds only a folder shown as one row (`src/main/java`).
+- The project's name on the title with buttons for a new file, a new folder, reading the tree again and closing every folder. The file of the active tab is revealed and marked.
+- A file explorer's keys: `Left` closes a folder or goes up, `Right` opens or goes in, `Home`, `End`, `PageUp`, `PageDown`, `F2` renames, `N` and `Shift+N` make a file and a folder, `Delete` sends to the Trash (`Shift+Delete` deletes for good, after its own question), and `Ctrl+Z` undoes the last move, rename or delete (on macOS the Finder's *Put Back* restores from the Trash).
+- `Ctrl`+click and `Shift`+click mark several entries; `/` finds a name anywhere in the project, also in closed folders; drag a row onto a folder to move it there after `Enter`; files your `.gitignore` names are dim (`I` turns it off). Huge folders show 10 000 entries and say how many more.
+- Right-click to create a file (its icon follows the extension you type) or a folder, to duplicate, rename or delete (it asks first), to copy the path or show it in your file manager, and to cut, copy and paste files and folders; `Ctrl+X`, `Ctrl+C` and `Ctrl+V` do the same on the selected entry. A copy in the same folder becomes `name copy`, `name copy 2`…; a move never overwrites anything.
 - **Properties** in the same menu: kind, location, size, what a folder contains, when it was created, modified and last opened, and its permissions. A big folder says *Calculating…* while it is counted in the background, then shows its size in KB, MB, GB or TB.
-- Git marks, as in VS Code: the Source Control letter (`M`, `A`, `U`, `D`, `R`…) at the right of every changed file, its name in the same colour, and `*` on a folder with changes inside.
+- Git marks, as in VS Code: the Source Control letter (`M`, `A`, `U`, `D`, `R`…) at the right of every changed file, its name in the same colour, and on a folder how many files changed inside.
 - The tree follows other programs: what they create, rename or delete shows up within a second.
 - Long names scroll sideways with `Shift` and the mouse wheel (or a sideways wheel), with a bar along the bottom.
 - Each folder opens as you left it, like VS Code: the folders you had open, your tabs with their cursors, the active tab and the panels.
@@ -133,11 +201,11 @@ Every command that works anywhere or in the editor can have the key you choose: 
 
 ### Source Control
 
-Stage and commit, and scroll back through a timeline of every branch, each in its own colour with dots and merge lines: click a commit to slide in its files, and a file to see what was added (green), removed (red) or modified (yellow). Every branch in a tree grouped by remote and folder; click one to switch to it. The Launchpad shows your branch, its upstream, how far ahead and behind it is, and the staged, unstaged and untracked files. The diff numbers its lines, folds its hunks, goes side by side and moves to the next changed file. Pull is fast-forward only; rebase and checkout ask before they run.
+Stage and commit, and scroll back through a timeline of every branch, each in its own colour with dots and merge lines: click a commit to slide in its files, and a file to see what was added (green), removed (red) or modified (yellow). Every branch in a tree grouped by remote and folder; click one to switch to it. The Launchpad shows your branch, its upstream, how far ahead and behind it is, and the staged, unstaged and untracked files. The diff numbers its lines, folds its hunks, goes side by side and moves to the next changed file; stage, unstage or discard one hunk, or only the lines you mark. Discard a file (a copy is kept first), amend the last commit, write a message with a title and a body, stash, create, rename and delete branches, make tags, and solve a merge conflict block by block. `Alt+G` shows who changed each line, `Alt+H` the commits that changed the file. Pull is fast-forward only, a branch that is not on the remote is published, nothing is ever force-pushed, and errors say what to do; rebase, checkout, discards and deletes ask before they run, and the dialog names the repository's hooks that may run.
 
 ### Database
 
-Connect to SQLite, PostgreSQL and MySQL and the tables and views appear on the left. Draw some as a diagram with their keys and relations, tick columns to build the query (group, count, sum, average, sort and filter) and get the `SELECT` with its joins in the SQL tab, ready to edit, copy or run with `Ctrl+Enter` or `F5`. The rows scroll both ways. Passwords stay in your system's keychain, never on disk.
+Connect to SQLite, PostgreSQL and MySQL and the tables and views appear on the left. Draw some as a diagram with their keys and relations, tick columns to build the query (group, count, sum, average, sort and filter) and get the `SELECT` with its joins in the SQL tab, ready to edit, copy or run with `Ctrl+Enter` or `F5`. The rows scroll both ways and come a thousand at a time (`L` loads more, `#` counts them all; `query_timeout_seconds` in `settings.toml` stops a slow query). On a table with a primary key, `Enter` edits a cell, `Delete` deletes a row and `+` copies one: each is shown as its statement with parameters and runs only after `Enter`. Copy the results as CSV, JSON or Markdown (`C`, `J`, `M`; with `Shift`, to a new file), see a long cell whole with `Space`, run `EXPLAIN` with `Alt+E`, open more SQL tabs with `Alt+T`, walk the history of a connection with `Alt+Up`/`Alt+Down` (a query with a password is never kept) and complete table and column names with `Ctrl+Space`. Each connection says whether it is encrypted; TLS can be preferred, required or verified, and a connection to another machine without it is warned about. A connection remembers its driver, host, user and database; its password goes to the system keyring — the Keychain on macOS, the Credential Manager on Windows, GNOME Keyring or KWallet on Linux — and never to a file. On Linux without a keyring running, the panel says the password was not saved.
 
 ### A guided start
 
@@ -161,7 +229,7 @@ The installers are not signed yet:
 - **macOS:** if the app does not open, go to System Settings, Privacy & Security, and choose Open Anyway.
 - **Windows:** if SmartScreen appears, choose More info, then Run anyway.
 
-Each release includes `SHA256SUMS.txt`, and updates from inside SozoIDE check the package against it before installing. Check a download with `shasum -a 256 -c SHA256SUMS.txt --ignore-missing` on macOS, `sha256sum -c SHA256SUMS.txt --ignore-missing` on Linux, or `Get-FileHash` on Windows.
+Each release includes `SHA256SUMS.txt`, and updates from inside SozoIDE check the package against it before installing. From version 0.9.0 every package also carries a build provenance attestation: `gh attestation verify <file> --repo vritik246800/SozoIDE` says which workflow run and commit built it. Check a download with `shasum -a 256 -c SHA256SUMS.txt --ignore-missing` on macOS, `sha256sum -c SHA256SUMS.txt --ignore-missing` on Linux, or `Get-FileHash` on Windows.
 
 ### Requirements
 
@@ -193,7 +261,12 @@ sozo --help
 sozo --version
 ```
 
-These are the keys SozoIDE comes with; change them in Help.
+### Keys
+
+`F1` inside SozoIDE always shows the keys of your own system, with the ones you changed. The ones to start with are in [Try it in a minute](#try-it-in-a-minute); this is the whole list SozoIDE comes with.
+
+<details>
+<summary><b>Every key and mouse gesture</b></summary>
 
 | Key | Action |
 | --- | --- |
@@ -210,9 +283,29 @@ These are the keys SozoIDE comes with; change them in Help.
 | `Ctrl+P` | Search the open file |
 | `Ctrl+Shift+P` | Search the whole folder |
 | `Up` / `Down`, `◂` / `▸` (search) | Previous / next result; `Enter` opens it selected |
-| Right-click in the Explorer | New file, new folder, cut, copy, paste, rename, delete (after a confirmation), properties |
+| Right-click in the Explorer | New file, new folder, cut, copy, paste, duplicate, rename, delete (after a confirmation), copy path, reveal in file manager, properties |
+| `Left` / `Right`, `Home` / `End`, `PageUp` / `PageDown` in the Explorer | Close a folder or go up / open or go in; first, last; a page |
+| `F2`, `N`, `Shift+N` in the Explorer | Rename, new file, new folder (elsewhere `F2` is About) |
+| `Delete`, `Shift+Delete`, `Ctrl+Z` in the Explorer | To the Trash, delete for good, undo the last move, rename or delete |
+| `Ctrl`+click, `Shift`+click, `/`, `I` in the Explorer | Mark several, a range; find a name in the whole project; dim ignored files or not |
+| Drag an Explorer row onto a folder | Move it there, after `Enter` |
 | `Ctrl+X` / `Ctrl+C` / `Ctrl+V` in the Explorer | Cut / copy / paste the selected file or folder (paste goes into the selected folder) |
 | `Ctrl+W` | Close the active tab |
+| `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
+| `Ctrl+/` | Comment or uncomment the lines |
+| `Ctrl+L` | Go to a line (`line:column`) |
+| `Alt+Z` | Wrap long lines on screen (Markdown wraps by itself) |
+| `Ctrl+H` | Replace in the search; `Alt+C`/`Alt+W`/`Alt+R` for case, whole word and regular expressions; `Ctrl+Enter` replaces all (in a folder, after a list and `Enter`) |
+| `Ctrl+O` / `Ctrl+Shift+O` | Open a file by a few of its letters / every command with its key |
+| `Tab` / `Shift+Tab`, `Alt+Up` / `Alt+Down`, `Shift+Alt+Down`, `Ctrl+Shift+K` | Indent or outdent, move, duplicate, delete the selected lines |
+| `Ctrl+Left` / `Ctrl+Right`, `Ctrl+Backspace` | A word back or forward, delete the word before |
+| Double / triple click | Select the word / the line |
+| `/` in Help | Find a shortcut |
+| `F2` in the editor | Rename the symbol in every file (edits in more than one file wait for `Enter`) |
+| `Shift+Alt+F`, `Ctrl+.` | Format the file or the selection; code actions and quick fixes |
+| `Ctrl+Shift+M`, `@` / `#` in `Ctrl+O` | Every problem of the project; symbols of the file / of the project |
+| `Shift+F11`, `Ctrl+F10`, `F8` | Step out, run to the cursor, pause |
+| `Shift+F9`, `Ctrl+Shift+W`, `Ctrl+Shift+E` | A breakpoint with a condition, a count or a message; watch an expression; evaluate one at the pause |
 | `Ctrl+Enter` or `F5` | Run the SQL query |
 | `F1` | Help with every command; `Left` / `Right` switch to the Dependencies tab and back |
 | `Up`/`Down`, `Enter`, `R`, `T` (Dependencies) | Choose a tool; show its install or update command, then `Enter` runs it; check again; tmux on or off (macOS, Linux) |
@@ -255,10 +348,29 @@ These are the keys SozoIDE comes with; change them in Help.
 | Click a commit or `Enter` (Commit Graph) | Its files; `Enter` on a file: its diff; `[` / `]` other file; `Esc` back |
 | `Enter` / `Space`, `F6`, `Delete`, `Shift` + wheel (Database) | Add a table, tick a column, change a builder cell; next part; remove the builder row; scroll the results sideways |
 | `n` / `p`, `[` / `]`, `v`, `s` / `u`, `o` (Diff) | Next / previous hunk, previous / next changed file, side by side, stage / unstage, open the file |
+| `S` / `U` / `D`, `Space` (Diff) | Stage / unstage / discard the hunk (discard asks); mark a line so the hunk keys take only the marked ones |
+| `d`, `a`, `z`, `1` / `2` / `3` (Changes) | Discard the file (asks), amend, stash; in a conflicted file keep mine / theirs / both for its first block |
+| `b`, `r`, `Delete` / `Shift+Delete`, `t`, `[` / `]`, `a`, `x` (Branches) | New, rename, delete a merged branch / any branch (asks), new tag; choose a stash entry, apply it, drop it (asks) |
+| `m` (Commit Graph), `Alt+Enter` (commit message) | More commits; a new line in the message |
+| `Alt+G` / `Alt+H` (editor) | Who changed each line / the commits that changed the file |
+| `F3` / `Shift+F3` / `Shift+F6` (terminal) | Find in the history (`Enter` older, `Shift+Enter` newer) / clear it / two shells side by side |
+| `Ctrl`+click, right click on a tab (terminal) | Open the web address or the `file:line` a program printed (web addresses and files of the project only) / name the tab |
+| `+` / `-` / wheel, arrows, `0` (picture) | Zoom, move, fit again |
+| `Ctrl+P`, `Ctrl+L`, `@` in `Ctrl+O` (PDF) | Find on every page, go to a page, the table of contents |
+| `C` / `A` (video), `W` / `0` / `P` (3D model) | Subtitles / sound track; wireframe / reset the view / play its animation |
+| Click a task box, a link or a note (Markdown) | Tick it; open the file at its heading; go to the note |
+| `Ctrl+M`, `Alt+0`, `Alt+L` | One panel over the whole window and back; the layout SozoIDE came with; three layouts kept with a name |
+| `Ctrl+Alt` + arrows / `Ctrl+Alt+Shift` + arrows | Focus the panel on that side / move the panel to that edge |
+| `Alt+F7` / `Alt+F8` / `Alt+F9` | A named task of `.sozo.toml` / the last one again / the test under the cursor, each after its dialog |
+| `Alt+S` / `Alt+D` / `Shift+F10` | The file also in the other pane, kept the same / compare it with another side by side / the menu of a right click |
+| `Enter`, `Delete`, `+`, `Space`, `C` / `J` / `M`, `L`, `#` (Database results) | Edit the cell, delete the row, copy the row (each after `Enter` on its statement); the cell whole; copy as CSV / JSON / Markdown (`Shift`: a file); load more; count |
+| `Alt+E`, `Alt+T`, `Alt+W`, `Alt+1`…`9`, `Alt+Up` / `Alt+Down`, `Ctrl+Space` (Database) | `EXPLAIN`; new / close / go to an SQL tab; history of the connection; complete a name |
 | `Up` / `Down` or the mouse wheel (Help, What's new) | Scroll a dialog taller than the terminal |
 | `G` (in About) | Open the repository to contribute |
 | `U` (in About) | Check for updates now, also a version you skipped |
 | `N` (in About) | The notes of every version; `Tab` shows only what is new or only what was fixed |
+
+</details>
 
 ### Motion
 
@@ -271,6 +383,73 @@ When a newer release is out, SozoIDE tells you at startup. Press `Enter` (or `U`
 ### Privacy
 
 On its first start SozoIDE counts the installation once: it downloads the small `SozoIDE-<system>-<arch>.installed.txt` file of its release, and GitHub's public download counter goes up by one. The first start after an update does the same with `SozoIDE-<system>-<arch>.updated.txt`. That counter only knows the system, the architecture and the version; nothing about you or your files is sent, and SozoIDE has no server of its own. Set `SOZO_NO_TELEMETRY=1` to turn both off. The startup check for updates also asks GitHub for the latest release (`SOZO_NO_UPDATE_CHECK=1` turns it off).
+
+### Settings and files
+
+SozoIDE has no settings screen to learn: it remembers what you do and reads three environment variables.
+
+| Variable | Effect |
+| --- | --- |
+| `SOZO_REDUCED_MOTION=1` | No transitions: panels, tabs and dialogs appear at once |
+| `SOZO_NO_UPDATE_CHECK=1` | Does not ask GitHub for the latest release at startup |
+| `SOZO_NO_TELEMETRY=1` | Does not count the installation or the update |
+
+What it remembers lives in its settings folder: `~/Library/Application Support/SozoIDE` on macOS, `~/.config/sozoide` on Linux and `%APPDATA%\SozoIDE\config` on Windows. Deleting `keys.toml` or `sessions.toml` brings back the keys and the layouts SozoIDE came with.
+
+| File | Holds |
+| --- | --- |
+| `settings.toml` | Written with the defaults the first time: `autosave_seconds` (0 turns it off), `tab_width`, `insert_spaces`, `wrap`, `wrap_markdown`, `reduced_motion`, `check_updates`, `telemetry`, `format_on_save`, `query_timeout_seconds` (a Database query stops after it; 0 lets it run), `terminal_scrollback`, `high_contrast` (attributes only, like `NO_COLOR=1`); the `SOZO_*` variables still win, and a broken file is kept aside as `settings.toml.broken` |
+| `keys.toml` | Only the shortcuts you changed |
+| `sessions.toml` | For each folder: open folders and tabs, cursors, panels and their layout |
+| `connections.toml` | Database connections, without their passwords |
+| `update.toml` | The version you skipped, the last version that ran, the tools already offered, tmux on or off |
+
+In a project, an optional `.sozo.toml` at its root holds [your own build and run commands](#run).
+
+## Troubleshooting
+
+| What you see | Why, and what to do |
+| --- | --- |
+| Boxes or question marks where the icons should be | Your terminal's font has no icons: choose a [Nerd Font](https://www.nerdfonts.com/) in its settings |
+| Colours that are hard to read | They are your terminal theme's 16 colours, not SozoIDE's: try another theme in your terminal |
+| `Ctrl+Shift+B` does not open the right terminal | On macOS and Linux most terminals send it as `Ctrl+B`. Use `Ctrl+Option+B` on macOS (with Option as Meta: Terminal, Settings, Profiles, Keyboard) and `Ctrl+Alt+B` on Linux, or choose another key in Help |
+| `Ctrl+Shift+P` searches the file, not the folder | The terminal (or tmux) does not tell SozoIDE about Shift: give "search the folder" another key in Help (`F1`) |
+| `Shift+Enter` runs the line in a terminal | Same reason: kitty, WezTerm, Ghostty, iTerm2 and Windows report Shift; others may not |
+| A key does nothing while a terminal has the focus | `Ctrl` and a letter go to the program in that terminal. Press `F6` to leave it first |
+| "could not start" or no suggestions in the editor | The language server of that file is missing: ask something (`F12`, `Ctrl+K`) and SozoIDE shows the command that installs it, or install it from Help's Dependencies tab |
+| A video plays without sound | `ffplay` is missing; it comes with most `ffmpeg` packages, which Help's Dependencies tab installs |
+| No terminals on Windows | They need Windows 10 version 1809 or newer |
+| macOS says the app cannot be opened, or SmartScreen appears on Windows | The installers are not signed yet: see [Install](#install) |
+| `sozo: command not found` after installing | Open a new terminal. On macOS, open the SozoIDE app once: it offers to install the command |
+| Pictures look blocky | Your terminal has no picture protocol (or tmux hides it): SozoIDE draws them in half blocks. kitty, WezTerm and iTerm2 show them sharp |
+| Everything is in one colour | `NO_COLOR` is set, or `high_contrast = true` in `settings.toml`: SozoIDE draws with bold, underline and reverse only |
+| Panels are missing in a small window | Under 80×24 they give way in order (right terminal, bottom terminal, Explorer); make the window larger and they come back |
+| An update did not start | SozoIDE keeps the version before it until the new one opens, and goes back to it when the new one does not start |
+| A Database query stops after a minute | That is `query_timeout_seconds` in `settings.toml` (0 lets it run) |
+
+Something else? [Open an issue](https://github.com/vritik246800/SozoIDE/issues) with the output of `sozo --diagnose` (version, system, terminal and tools found, without your paths).
+
+### Terminals
+
+| Terminal | Keys with Shift | Mouse | Pictures | Notes |
+| --- | --- | --- | --- | --- |
+| kitty | yes | yes | sharp (kitty graphics) | |
+| WezTerm | yes | yes | sharp (iTerm2 images) | |
+| iTerm2 | yes | yes | sharp | Option as Meta for the `Alt` keys |
+| Terminal.app | some (`Ctrl+Option+B` for the right terminal) | yes | half blocks | Option as Meta for the `Alt` keys |
+| Windows Terminal | yes | yes | half blocks | |
+| GNOME Terminal | some | yes | half blocks | `Ctrl+Alt+B` for the right terminal |
+| tmux (inside any of them) | depends on `extended-keys` | yes | half blocks | `set -g allow-passthrough on` lets pictures through |
+
+## Not there yet
+
+So you know before you install:
+
+- **Signed installers.** macOS and Windows warn on the first open; each release has `SHA256SUMS.txt` to check your download.
+- **Intel Macs.** The macOS build is for Apple silicon only.
+- **Package managers.** Each release carries the manifests of Scoop (`scoop install https://github.com/vritik246800/SozoIDE/releases/latest/download/sozoide.json`), winget, the AUR and a Homebrew cask, but they are not in those catalogues yet: installing is a download, updating is one key inside SozoIDE.
+- **tmux sessions on Windows.** tmux lives inside WSL there, so the terminals are the plain ones.
+- **Plugins and themes.** There are none: what SozoIDE does is in the binary, and its colours are your terminal's.
 
 ## Build from source
 
@@ -289,7 +468,11 @@ Before sending changes, run:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+cargo test --release --test first_start   # macOS and Linux: what only a release build does
+bash packaging/security-check.sh           # secrets, local files, workflows, cargo audit, npm audit
 ```
+
+`security-check.sh` uses `cargo-audit` when it is installed (`cargo install --root target/tools --locked cargo-audit`). The advisories that cannot be fixed yet are listed, each with its reason, in `.cargo/audit.toml`. CI runs the same commands on every pull request and every Monday.
 
 ### Native packages
 
@@ -325,10 +508,13 @@ src/          the application:
   update/     updates and Help's Dependencies tab
   ui/         drawing
   animation/  transitions
+  process.rs  questions to system tools: no input, and stopped after their time
+  storage.rs  settings files: written whole, readable only by you, kept aside when broken
 tests/        CLI, end-to-end and interaction tests in a real PTY
-packaging/    native installers for Linux, macOS and Windows
+packaging/    native installers for Linux, macOS and Windows, and security-check.sh, the security gate of the hook and CI
+.cargo/       audit.toml: the advisories cargo audit may skip, and why
 site/         landing page (Astro), published to GitHub Pages; site/scripts captures its SozoIDE screens
-assets/       logo
+assets/       logo and the screens of this README
 .github/      CI, release and Pages workflows, and repository rulesets
 .githooks/    local pre-commit and pre-push hooks
 ```
@@ -337,19 +523,24 @@ assets/       logo
 
 - Development happens on the `preview` branch. `main` only changes through pull requests with green CI.
 - Open pull requests against `preview`.
-- After cloning, turn on the local hooks: `git config core.hooksPath .githooks`
+- After cloning, turn on the local hooks: `git config core.hooksPath .githooks`. They refuse commits on `main`, and commits that add secrets, personal paths or local files.
 - Commit messages start with `create:`, `update:`, `fix:` or `docs:`, followed by a short summary in English.
+- Before a commit, run what the CI runs, in its order: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo test --release --test first_start`, `cargo test --features budgets --bin sozo budgets -- --test-threads=1`, `npm run build --prefix site`, `node site/scripts/check-site.mjs` and `bash packaging/security-check.sh`. The maintainer keeps these steps in a local script; they are all here.
 
 ## Releases
 
 1. Raise `version` in `Cargo.toml` on `preview` and merge it into `main` through a pull request.
 2. Tag `main` with the same version and push the tag: `git tag v0.1.0 && git push origin v0.1.0`
-3. The Release workflow builds every installer, installs it on its own system, and publishes the release with install notes and `SHA256SUMS.txt`. Package names carry no version, so `releases/latest/download/<name>` always points at the newest one.
+3. The Release workflow checks that the tag is the version in `Cargo.toml` and a commit of `main` (`packaging/check-release.sh`), runs the security gate again, builds every installer, installs it on its own system, attests it, and publishes the release with install notes and `SHA256SUMS.txt`. Package names carry no version, so `releases/latest/download/<name>` always points at the newest one.
 4. Check that every download link on the website now delivers the new version: `bash packaging/check-downloads.sh`
 
 ## Security
 
 Report vulnerabilities privately on GitHub, under Security, Report a vulnerability. Please do not open a public issue for them.
+
+SozoIDE asks before it runs code of a folder: the first time a language server, the debugger or a command of the project is needed, it shows «Trust the folder …?». Without trust you can still read, edit, search and use Git. Files over 5 MB open read only, updates are downloaded to a private folder over HTTPS only and checked against `SHA256SUMS.txt`, and a crash gives the terminal back and leaves `crash.log` in the cache folder (it never holds the text of your files).
+
+Every pull request passes a Security check: no secrets or personal paths in the repository, workflows with the least permissions, and no known vulnerability in the Rust crates (`cargo audit`) or in the packages of the website (`npm audit`).
 
 ## License
 

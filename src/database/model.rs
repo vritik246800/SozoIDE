@@ -85,6 +85,53 @@ pub struct ConnectionConfig {
     pub port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Tls::is_default")]
+    pub tls: Tls,
+}
+
+/// How a connection to a server is encrypted (TODO 4.1.10): the `sslmode` of PostgreSQL and the
+/// `ssl-mode` of MySQL. A mode written in the URL wins.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tls {
+    /// TLS when the server has it.
+    #[default]
+    Prefer,
+    /// TLS always, the certificate not checked.
+    Require,
+    /// TLS always, the certificate and the host name checked.
+    Verify,
+    Disable,
+}
+
+impl Tls {
+    pub const ALL: [Self; 4] = [Self::Prefer, Self::Require, Self::Verify, Self::Disable];
+
+    fn is_default(&self) -> bool {
+        *self == Self::Prefer
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Prefer => "Prefer",
+            Self::Require => "Require",
+            Self::Verify => "Verify certificate",
+            Self::Disable => "Off",
+        }
+    }
+
+    /// The URL parameter of `driver`; none for `Prefer`, what SozoIDE does without one.
+    pub fn parameter(self, driver: Driver) -> Option<&'static str> {
+        Some(match (driver, self) {
+            (Driver::SQLite, _) | (_, Self::Prefer) => return None,
+            (Driver::PostgreSQL, Self::Require) => "sslmode=require",
+            (Driver::PostgreSQL, Self::Verify) => "sslmode=verify-full",
+            (Driver::PostgreSQL, Self::Disable) => "sslmode=disable",
+            (_, Self::Require) => "ssl-mode=required",
+            (_, Self::Verify) => "ssl-mode=verify-identity",
+            (_, Self::Disable) => "ssl-mode=disabled",
+        })
+    }
 }
 
 impl fmt::Debug for ConnectionConfig {
@@ -114,10 +161,11 @@ pub enum ConnectionField {
     Port,
     Username,
     Password,
+    Tls,
 }
 
 impl ConnectionField {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Name,
         Self::Driver,
         Self::Url,
@@ -126,6 +174,7 @@ impl ConnectionField {
         Self::Port,
         Self::Username,
         Self::Password,
+        Self::Tls,
     ];
 
     pub fn label(self) -> &'static str {
@@ -138,6 +187,7 @@ impl ConnectionField {
             Self::Port => "Port",
             Self::Username => "Username",
             Self::Password => "Password",
+            Self::Tls => "TLS",
         }
     }
 
@@ -156,6 +206,7 @@ pub struct ConnectionForm {
     pub port: String,
     pub username: String,
     pub password: String,
+    pub tls: Tls,
     pub field: ConnectionField,
     pub cursor: usize,
     editing_id: Option<String>,
@@ -173,6 +224,7 @@ impl fmt::Debug for ConnectionForm {
             .field("port", &self.port)
             .field("username", &self.username)
             .field("password", &"<redacted>")
+            .field("tls", &self.tls)
             .field("field", &self.field)
             .field("cursor", &self.cursor)
             .field("editing_id", &self.editing_id)
@@ -197,6 +249,7 @@ impl ConnectionForm {
             port: String::new(),
             username: String::new(),
             password: String::new(),
+            tls: Tls::Prefer,
             field: ConnectionField::Name,
             cursor: 0,
             editing_id: None,
@@ -217,6 +270,7 @@ impl ConnectionForm {
                 .map_or_else(String::new, |port| port.to_string()),
             username: config.username.clone().unwrap_or_default(),
             password,
+            tls: config.tls,
             field: ConnectionField::Name,
             cursor: 0,
             editing_id: Some(config.id.clone()),
@@ -243,6 +297,54 @@ impl ConnectionForm {
                 .map_or_else(String::new, |port| port.to_string());
         }
         self.clamp_cursor();
+    }
+
+    pub fn cycle_tls(&mut self, forward: bool) {
+        let index = Tls::ALL
+            .iter()
+            .position(|tls| *tls == self.tls)
+            .unwrap_or(0);
+        let length = Tls::ALL.len();
+        self.tls = Tls::ALL[if forward {
+            (index + 1) % length
+        } else {
+            (index + length - 1) % length
+        }];
+    }
+
+    /// The warning of a connection that may cross the network in clear: TLS off, or only
+    /// preferred, to a server that is not this machine.
+    pub fn plain_text_warning(&self) -> Option<String> {
+        if self.driver == Driver::SQLite {
+            return None;
+        }
+        let url = self.url.to_ascii_lowercase();
+        let host = if url.trim().is_empty() {
+            self.host.clone()
+        } else {
+            let rest = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
+            let rest = rest.split(['/', '?']).next().unwrap_or("");
+            let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+            match rest.strip_prefix('[') {
+                Some(v6) => v6.split(']').next().unwrap_or("").to_owned(),
+                None => rest.split(':').next().unwrap_or("").to_owned(),
+            }
+        };
+        if crate::database::more::local(&host) {
+            return None;
+        }
+        let written = ["sslmode=", "ssl-mode="].iter().find_map(|key| {
+            url.split(['?', '&'])
+                .find_map(|pair| pair.strip_prefix(key))
+        });
+        let off = match written {
+            Some(mode) => matches!(
+                mode,
+                "disable" | "disabled" | "allow" | "prefer" | "preferred"
+            ),
+            None => matches!(self.tls, Tls::Disable | Tls::Prefer),
+        };
+        off.then(|| format!("{host} is not this machine: without TLS required, the password and the data can cross the network in clear"))
     }
 
     pub fn cycle_driver(&mut self, forward: bool) {
@@ -292,13 +394,14 @@ impl ConnectionForm {
             ConnectionField::Port => &self.port,
             ConnectionField::Username => &self.username,
             ConnectionField::Password => &self.password,
+            ConnectionField::Tls => self.tls.label(),
         }
     }
 
     fn selected_value_mut(&mut self) -> Option<&mut String> {
         match self.field {
             ConnectionField::Name => Some(&mut self.name),
-            ConnectionField::Driver => None,
+            ConnectionField::Driver | ConnectionField::Tls => None,
             ConnectionField::Url => Some(&mut self.url),
             ConnectionField::Database => Some(&mut self.database),
             ConnectionField::Host => Some(&mut self.host),
@@ -405,10 +508,35 @@ impl ConnectionForm {
             host: nonempty(&self.host),
             port,
             username: nonempty(&self.username),
+            tls: self.tls,
         })
     }
 
+    /// The URL the driver opens, with the TLS mode of the form unless the URL says its own.
     pub(crate) fn connection_url(&self) -> Result<String> {
+        let url = self.url_without_tls()?;
+        let Some(parameter) = self.tls.parameter(self.driver) else {
+            return Ok(url);
+        };
+        let query = url
+            .split_once('?')
+            .map_or("", |(_, query)| query)
+            .to_ascii_lowercase();
+        let written = query.split('&').any(|pair| {
+            ["sslmode=", "ssl-mode="]
+                .iter()
+                .any(|key| pair.starts_with(key))
+        });
+        if written {
+            return Ok(url);
+        }
+        Ok(format!(
+            "{url}{}{parameter}",
+            if url.contains('?') { '&' } else { '?' }
+        ))
+    }
+
+    fn url_without_tls(&self) -> Result<String> {
         let config = self.to_config()?;
         if let Some(url) = config.url.clone() {
             if self.password.is_empty() || config.driver == Driver::SQLite {
@@ -528,6 +656,8 @@ pub struct QueryResult {
     pub rows: Vec<Vec<DatabaseValue>>,
     pub affected_rows: u64,
     pub duration: Duration,
+    /// More rows than the page came back: «Load more» asks for them (TODO 4.1.2).
+    pub more: bool,
 }
 
 impl QueryResult {
@@ -647,5 +777,81 @@ mod tests {
         assert_eq!(form.port, "5432");
         form.previous_field();
         assert_eq!(form.field, ConnectionField::Name);
+    }
+
+    #[test]
+    fn tls_goes_into_the_url_and_plain_text_to_another_machine_is_said() {
+        let mut form = ConnectionForm::new(Driver::PostgreSQL);
+        form.name = "x".into();
+        form.host = "db.example.com".into();
+        form.database = "app".into();
+        assert_eq!(
+            form.connection_url().unwrap(),
+            "postgres://db.example.com:5432/app"
+        );
+        assert!(
+            form.plain_text_warning()
+                .unwrap()
+                .contains("db.example.com")
+        );
+        form.cycle_tls(true);
+        assert_eq!(form.tls, Tls::Require);
+        assert_eq!(
+            form.connection_url().unwrap(),
+            "postgres://db.example.com:5432/app?sslmode=require"
+        );
+        assert_eq!(form.plain_text_warning(), None);
+        form.tls = Tls::Verify;
+        form.driver = Driver::MySQL;
+        form.port = "3306".into();
+        assert_eq!(
+            form.connection_url().unwrap(),
+            "mysql://db.example.com:3306/app?ssl-mode=verify-identity"
+        );
+        // The URL's own mode wins, in the URL and in the warning.
+        form.url = "mysql://u@db.example.com/app?SSL-MODE=disabled".into();
+        assert_eq!(form.connection_url().unwrap(), form.url);
+        assert!(form.plain_text_warning().is_some());
+        form.url = "postgres://u@[2001:db8::1]:5432/app?x=1".into();
+        form.driver = Driver::PostgreSQL;
+        form.tls = Tls::Disable;
+        assert_eq!(
+            form.connection_url().unwrap(),
+            "postgres://u@[2001:db8::1]:5432/app?x=1&sslmode=disable"
+        );
+        assert!(
+            form.plain_text_warning()
+                .unwrap()
+                .starts_with("2001:db8::1")
+        );
+        // This machine, and SQLite, are never warned about.
+        for url in [
+            "postgres://u@localhost/app",
+            "postgres://u@127.0.0.1:5432/app",
+            "postgres://u@[::1]/app",
+        ] {
+            form.url = url.into();
+            assert_eq!(form.plain_text_warning(), None, "{url}");
+        }
+        form.driver = Driver::SQLite;
+        form.url.clear();
+        assert_eq!(form.plain_text_warning(), None);
+        // Saved and read back.
+        let mut form = ConnectionForm::new(Driver::MySQL);
+        form.name = "x".into();
+        form.database = "app".into();
+        form.tls = Tls::Verify;
+        let config = form.to_config().unwrap();
+        let text = toml::to_string(&config).unwrap();
+        assert!(text.contains("tls = \"verify\""), "{text}");
+        assert_eq!(
+            ConnectionForm::from_config(&config, String::new()).tls,
+            Tls::Verify
+        );
+        let prefer = ConnectionConfig {
+            tls: Tls::Prefer,
+            ..config
+        };
+        assert!(!toml::to_string(&prefer).unwrap().contains("tls"));
     }
 }

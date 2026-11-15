@@ -10,7 +10,8 @@ use ratatui::{
 use crate::{
     git::{
         BranchRow, ChangeArea, ChangeEntry, CommitInfo, DiffLine, DiffLineKind, DiffRow,
-        FileStatus, GitPanel, GitTab, LineChange, TimelineRow, branch_tree, line_changes, timeline,
+        FileStatus, GitAction, GitPanel, GitTab, HunkAction, LineChange, TimelineRow, branch_tree,
+        line_changes, timeline,
     },
     ui::{ACTIVE, BORDER, MUTED, TEXT, busy, centered, panel_block, render_dialog, scale_length},
 };
@@ -22,7 +23,24 @@ pub fn render(frame: &mut Frame, controller: &mut GitController, area: Rect, key
     controller.regions.area = area;
     controller.regions.content = Rect::default();
     controller.regions.actions.clear();
-    let block = panel_block(format!(" Source Control [{key}] "), true);
+    // The title says where: the branch and how many files changed (`UX.md` §1.22).
+    let context = controller.panel.try_lock().ok().and_then(|panel| {
+        let branch = panel
+            .branches
+            .iter()
+            .find(|branch| branch.is_head)?
+            .name
+            .clone();
+        let status = &panel.status;
+        let changed = status.staged.len() + status.unstaged.len() + status.untracked.len();
+        Some(match changed {
+            0 => format!(": {branch}"),
+            1 => format!(": {branch} · 1 change"),
+            changed => format!(": {branch} · {changed} changes"),
+        })
+    });
+    let title = format!(" Source Control{} [{key}] ", context.unwrap_or_default());
+    let block = panel_block(title, true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let [tabs, toolbar, content, status] = Layout::vertical([
@@ -40,6 +58,12 @@ pub fn render(frame: &mut Frame, controller: &mut GitController, area: Rect, key
     let tab_buttons =
         GitTab::ALL.map(|tab| (tab.label(), GitUiAction::Tab(tab), active == Some(tab)));
     buttons(frame, controller, tabs, &tab_buttons);
+    // The same margin of one column as the tabs and the buttons above.
+    let content = Rect {
+        x: content.x + 1,
+        width: content.width.saturating_sub(1),
+        ..content
+    };
     controller.regions.content = content;
     let panel_handle = std::sync::Arc::clone(&controller.panel);
     let Ok(panel) = panel_handle.try_lock() else {
@@ -84,6 +108,16 @@ pub fn render(frame: &mut Frame, controller: &mut GitController, area: Rect, key
 }
 
 fn render_toolbar(frame: &mut Frame, controller: &mut GitController, panel: &GitPanel, area: Rect) {
+    // A branch without upstream is published by Push (TODO 4.1.5).
+    let push = if panel
+        .branches
+        .iter()
+        .any(|branch| branch.is_head && !branch.is_remote && branch.upstream.is_none())
+    {
+        "Publish branch"
+    } else {
+        "Push"
+    };
     let split = if panel.diff_split {
         "Unified [v]"
     } else {
@@ -96,26 +130,40 @@ fn render_toolbar(frame: &mut Frame, controller: &mut GitController, panel: &Git
             ("Unstage [u]", GitUiAction::Unstage),
             ("Stage All", GitUiAction::StageAll),
             ("Commit [c]", GitUiAction::OpenCommit),
+            (
+                "Amend [a]",
+                GitUiAction::Mode(GitMode::Amend(String::new())),
+            ),
+            (
+                "Stash [z]",
+                GitUiAction::Mode(GitMode::Stash(String::new())),
+            ),
             ("Diff [Enter]", GitUiAction::ShowDiff),
             ("Pull", GitUiAction::Pull),
-            ("Push", GitUiAction::Push),
+            (push, GitUiAction::Push),
             ("Fetch", GitUiAction::Fetch),
             ("Rebase", GitUiAction::OpenRebase),
         ],
         GitTab::CommitGraph => &[
             ("Refresh", GitUiAction::Refresh),
             ("Inspect", GitUiAction::Inspect),
+            ("More commits [m]", GitUiAction::Run(GitAction::MoreCommits)),
             ("Pull", GitUiAction::Pull),
-            ("Push", GitUiAction::Push),
+            (push, GitUiAction::Push),
             ("Fetch", GitUiAction::Fetch),
             ("Rebase", GitUiAction::OpenRebase),
         ],
         GitTab::Branches => &[
             ("Refresh", GitUiAction::Refresh),
             ("Checkout [Enter]", GitUiAction::Checkout),
+            (
+                "New [b]",
+                GitUiAction::Mode(GitMode::NewBranch(String::new())),
+            ),
+            ("Tag [t]", GitUiAction::Mode(GitMode::NewTag(String::new()))),
             ("Fetch", GitUiAction::Fetch),
             ("Pull", GitUiAction::Pull),
-            ("Push", GitUiAction::Push),
+            (push, GitUiAction::Push),
             ("Rebase", GitUiAction::OpenRebase),
         ],
         GitTab::Diff => &[
@@ -125,13 +173,25 @@ fn render_toolbar(frame: &mut Frame, controller: &mut GitController, panel: &Git
             ("Unstage [u]", GitUiAction::UnstageDiff),
             ("Open [o]", GitUiAction::OpenFile),
             (split, GitUiAction::ToggleSplit),
+            (
+                "Stage hunk [S]",
+                GitUiAction::Run(GitAction::Hunk(HunkAction::Stage)),
+            ),
+            (
+                "Unstage hunk [U]",
+                GitUiAction::Run(GitAction::Hunk(HunkAction::Unstage)),
+            ),
+            (
+                "Discard hunk [D]",
+                GitUiAction::Mode(GitMode::ConfirmDiscardHunk),
+            ),
             ("Refresh", GitUiAction::Refresh),
         ],
         GitTab::Launchpad => &[
             ("Refresh", GitUiAction::Refresh),
             ("Fetch", GitUiAction::Fetch),
             ("Pull", GitUiAction::Pull),
-            ("Push", GitUiAction::Push),
+            (push, GitUiAction::Push),
             ("Rebase", GitUiAction::OpenRebase),
         ],
         GitTab::Inspect => &[("Refresh", GitUiAction::Refresh)],
@@ -239,6 +299,21 @@ fn render_changes(frame: &mut Frame, controller: &mut GitController, panel: &Git
         lines.push(Line::from("Working tree clean."));
         targets.push(None);
     }
+    let conflicts = panel
+        .changes()
+        .filter(|change| change.status == FileStatus::Conflict)
+        .count();
+    lines.push(Line::from(Span::styled(
+        if conflicts > 0 {
+            format!(
+                "{conflicts} file(s) in conflict: 1 keeps mine, 2 theirs, 3 both (the first block)"
+            )
+        } else {
+            "d discard  a amend  z stash".to_owned()
+        },
+        Style::default().fg(if conflicts > 0 { Color::Yellow } else { MUTED }),
+    )));
+    targets.push(None);
     let selected_row = targets
         .iter()
         .position(|target| *target == Some(panel.selected))
@@ -609,6 +684,40 @@ fn render_branches(
             branch_line(panel, &rows, index, row)
         })
         .collect::<Vec<_>>();
+    // The stash and the tags under the branches (TODO 4.1.4).
+    let mut lines = lines;
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        format!(
+            "Stash ({})  [/] choose  a apply  x drop",
+            panel.stashes.len()
+        ),
+        Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
+    )));
+    for (position, (index, message)) in panel.stashes.iter().enumerate() {
+        let chosen = position == controller.stash.min(panel.stashes.len().saturating_sub(1));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{} stash@{{{index}}}  {message}",
+                if chosen { "▸" } else { " " }
+            ),
+            Style::default().fg(if chosen { TEXT } else { MUTED }),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        format!(
+            "Tags ({})  t new  r rename  Delete deletes a branch",
+            panel.tags.len()
+        ),
+        Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
+    )));
+    lines.extend(
+        panel
+            .tags
+            .iter()
+            .take(20)
+            .map(|tag| Line::from(Span::styled(format!("  {tag}"), Style::default().fg(MUTED)))),
+    );
     frame.render_widget(Paragraph::new(lines), area);
 }
 
@@ -731,7 +840,7 @@ fn render_diff(frame: &mut Frame, controller: &mut GitController, panel: &GitPan
             Span::styled(format!(" −{removed}"), Style::default().fg(Color::Red)),
             Span::styled(
                 format!(
-                    "   {} file{}{position}   n/p hunks  Enter folds",
+                    "   {} file{}{position}   n/p hunks  Enter folds  Space marks a line",
                     diff.files.len(),
                     if diff.files.len() == 1 { "" } else { "s" }
                 ),
@@ -764,7 +873,14 @@ fn render_diff(frame: &mut Frame, controller: &mut GitController, panel: &GitPan
                 GitUiAction::DiffRow(index),
                 Rect::new(body.x, body.y + (index - offset) as u16, body.width, 1),
             ));
-            diff_line(panel, *row, digits, half).style(row_style(index == panel.selected))
+            let mut line = diff_line(panel, *row, digits, half);
+            if let DiffRow::Line(file, hunk, number) = row
+                && panel.diff_marks.contains(&(*file, *hunk, *number))
+            {
+                line.spans
+                    .insert(0, Span::styled("✓", Style::default().fg(Color::Green)));
+            }
+            line.style(row_style(index == panel.selected))
         })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), body);
@@ -1137,6 +1253,29 @@ fn row_of(area: Rect, row: u16) -> Rect {
 }
 
 fn render_inspect(frame: &mut Frame, panel: &GitPanel, area: Rect) {
+    // The history of a file asked from the editor (Alt+H) comes first (TODO 4.1.6).
+    if let Some((path, history)) = &panel.file_history {
+        let mut lines = vec![Line::from(Span::styled(
+            format!("History of {} ({} commits)", path.display(), history.len()),
+            Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
+        ))];
+        lines.extend(history.iter().map(|entry| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", entry.commit),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(format!("{} ", entry.date), Style::default().fg(MUTED)),
+                Span::styled(
+                    format!("{}  ", entry.author),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw(entry.summary.clone()),
+            ])
+        }));
+        frame.render_widget(Paragraph::new(lines), area);
+        return;
+    }
     let Some(details) = &panel.inspected_commit else {
         frame.render_widget(
             Paragraph::new("Select a commit in Commit Graph and choose Inspect."),
@@ -1175,10 +1314,64 @@ fn render_inspect(frame: &mut Frame, panel: &GitPanel, area: Rect) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
+/// A commit message with its title and body, and how long each is against 50 and 72.
+fn message_prompt(message: &str, amend: bool) -> String {
+    let mut lines = message.split('\n');
+    let title = lines.next().unwrap_or("");
+    let body = lines.map(|line| line.chars().count()).max().unwrap_or(0);
+    let count = |used: usize, most: usize| {
+        if used > most {
+            format!("{used}/{most} too long")
+        } else {
+            format!("{used}/{most}")
+        }
+    };
+    format!(
+        "{}Title {}  Body {}  (Alt+Enter: new line)\n\n{message}_",
+        if amend {
+            "Empty keeps the message of the commit. "
+        } else {
+            ""
+        },
+        count(title.chars().count(), 50),
+        count(body, 72),
+    )
+}
+
 /// The Commit, Rebase and confirmation dialogs, drawn by `ui::draw` over everything else.
 pub fn render_mode(frame: &mut Frame, controller: &mut GitController, area: Rect) {
     let (title, prompt, confirmation) = match &controller.mode {
-        GitMode::Commit(message) => ("Commit changes", format!("Message: {message}"), false),
+        GitMode::Commit(message) => ("Commit changes", message_prompt(message, false), false),
+        GitMode::Amend(message) => ("Amend the last commit", message_prompt(message, true), false),
+        GitMode::ConfirmDiscard(path) => (
+            "Discard changes",
+            format!("Throw away the changes of {path}? A copy goes to the cache folder first."),
+            true,
+        ),
+        GitMode::ConfirmDiscardHunk => (
+            "Discard the hunk",
+            "Throw away this hunk (or its marked lines) from the working tree? It cannot be undone."
+                .to_owned(),
+            true,
+        ),
+        GitMode::Stash(message) => ("Stash", format!("Message (optional): {message}"), false),
+        GitMode::ConfirmStashDrop(index, message) => (
+            "Drop the stash",
+            format!("Drop stash@{{{index}}} ({message})? It cannot be undone."),
+            true,
+        ),
+        GitMode::NewBranch(name) => ("New branch", format!("Name: {name}"), false),
+        GitMode::RenameBranch(old, new) => ("Rename branch", format!("{old} becomes: {new}"), false),
+        GitMode::ConfirmDeleteBranch(name, force) => (
+            "Delete branch",
+            if *force {
+                format!("Delete {name} even if it is not merged? Its commits may be lost.")
+            } else {
+                format!("Delete {name}? Only a merged branch is deleted (Shift+Delete forces it).")
+            },
+            true,
+        ),
+        GitMode::NewTag(name) => ("New tag", format!("Name: {name}"), false),
         GitMode::Rebase(target) => ("Rebase", format!("Target branch/commit: {target}"), false),
         GitMode::ConfirmRebase(target) => (
             "Confirm rebase",
@@ -1191,6 +1384,20 @@ pub fn render_mode(frame: &mut Frame, controller: &mut GitController, area: Rect
             true,
         ),
         GitMode::None => return,
+    };
+    // Hooks of the repository run with Git's own commands: never without the dialog saying so.
+    let hooks = controller
+        .panel
+        .try_lock()
+        .map(|panel| panel.hooks.clone())
+        .unwrap_or_default();
+    let prompt = if hooks.is_empty() || matches!(controller.mode, GitMode::NewTag(_)) {
+        prompt
+    } else {
+        format!(
+            "{prompt}\n\nThis repository's hooks may run: {}",
+            hooks.join(", ")
+        )
     };
     let progress = controller.motion.dialog();
     render_dialog(

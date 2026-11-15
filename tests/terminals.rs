@@ -30,8 +30,24 @@ fn with_terminal(home: &Home) -> Sozo {
     sozo.past_splash();
     sozo.send(b"\n");
     sozo.wait_for("Bottom terminal");
-    std::thread::sleep(std::time::Duration::from_millis(700));
+    wait_for_prompt(&sozo);
+    sozo.wait_still();
     sozo
+}
+
+/// The shell has written its prompt, whatever it looks like on this system: the row under the
+/// title of the panel is no longer empty.
+fn wait_for_prompt(sozo: &Sozo) {
+    sozo.wait_until("the prompt of the shell", |screen| {
+        let rows: Vec<&str> = screen.lines().collect();
+        rows.iter()
+            .position(|row| row.contains("Bottom terminal"))
+            .and_then(|title| rows.get(title + 1))
+            .is_some_and(|row| {
+                row.chars()
+                    .any(|character| character.is_alphanumeric() || "$%>#".contains(character))
+            })
+    });
 }
 
 fn run(sozo: &Sozo, line: &str) {
@@ -147,15 +163,19 @@ fn ctrl_d_ends_what_reads_the_terminal_and_ctrl_c_stops_what_runs() {
     let home = Home::new();
     let sozo = with_terminal(&home);
     let output = home.path().join("typed");
-    run(&sozo, &format!("cat > '{}'\r", output.display()));
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    // The mark is only whole once the command runs: `cat` is reading by then.
+    run(
+        &sozo,
+        &format!("printf 'RE%s\\n' ADING; cat > '{}'\r", output.display()),
+    );
+    sozo.wait_for("READING");
     sozo.send("from the keyboard\r");
     sozo.send(b"\x04");
     wait_for_file(&output, |bytes| contains(bytes, b"from the keyboard"));
     run(&sozo, "echo AFTER_EOF\r");
     sozo.wait_for("AFTER_EOF");
-    run(&sozo, "sleep 60\r");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    run(&sozo, "printf 'SLE%s\\n' EPING; sleep 60\r");
+    sozo.wait_for("SLEEPING");
     sozo.send(b"\x03");
     run(&sozo, "echo AFTER_INTERRUPT\r");
     sozo.wait_for("AFTER_INTERRUPT");
@@ -209,7 +229,8 @@ fn shells_are_told_what_this_terminal_speaks_whatever_is_around_it() {
     sozo.past_splash();
     sozo.send(b"\n");
     sozo.wait_for("Bottom terminal");
-    std::thread::sleep(std::time::Duration::from_millis(700));
+    wait_for_prompt(&sozo);
+    sozo.wait_still();
     run(&sozo, "echo \"T=$TERM C=$COLORTERM\"\r");
     sozo.wait_for("T=xterm-256color C=truecolor");
 }
@@ -277,7 +298,10 @@ fn with_tmux_on_a_shell_outlives_the_app_and_comes_back() {
     sozo.past_splash();
     sozo.send(b"\n");
     sozo.wait_for("Bottom terminal");
-    std::thread::sleep(std::time::Duration::from_secs(1));
+    sozo.wait_until("the three sessions", |_| {
+        sessions(home.path()).lines().count() == 3
+    });
+    sozo.wait_still();
     run(&sozo, "export KEEP_MARK=alive\r");
     let names = sessions(home.path());
     assert_eq!(names.lines().count(), 3, "{names}");
@@ -297,7 +321,7 @@ fn with_tmux_on_a_shell_outlives_the_app_and_comes_back() {
     sozo.wait_for("Bottom terminal");
     let (row, column) = sozo.find("Bottom terminal");
     sozo.click((row + 2, column + 2));
-    std::thread::sleep(std::time::Duration::from_millis(600));
+    sozo.wait_still();
     run(&sozo, "echo BACK_$KEEP_MARK\r");
     sozo.wait_for("BACK_alive");
     sozo.quit();

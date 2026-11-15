@@ -10,13 +10,11 @@ use ratatui::{
     },
 };
 use ratatui_image::{Resize, StatefulImage, protocol::StatefulProtocol};
-use tui_term::widget::{Cursor, PseudoTerminal};
 
 use crate::{
     app::{
-        Action, App, BOTTOM_TERMINALS, DropZone, EntryAction, Focus, FolderCount, Keymap, Kind,
-        PreviewRow, Regions, SHOWN_ITEMS, SplitDirection, goal_names, grouped, human_size,
-        video_areas,
+        Action, App, DropZone, EntryAction, Focus, FolderCount, Keymap, Kind, PreviewRow, Regions,
+        SHOWN_ITEMS, SplitDirection, goal_names, grouped, human_size, video_areas,
     },
     branding::ASCII_LOGO,
     editor::{MarkdownDocument, OpenFile, Row as MarkdownRow, file_icon, highlight_lines},
@@ -30,100 +28,9 @@ use super::{
     select_columns, skip_columns,
 };
 
-pub(super) fn render_explorer(frame: &mut Frame, app: &App, area: Rect) {
-    let title = format!(" {} Explorer ", app.icon("custom-folder"));
-    let height = area.height.saturating_sub(2) as usize;
-    // Long names scroll sideways (F01); the scroll never passes the widest one.
-    let room = usize::from(area.width.saturating_sub(2));
-    let widest = app.explorer_width_needed();
-    let scroll_x = app.explorer_scroll_x.min(widest.saturating_sub(room));
-    // Git's mark of each row (F01): a file's change with the letters of Source Control, `*` on
-    // a folder with a change below it, in the colour of its strongest change.
-    let marks = app
-        .entries
-        .iter()
-        .skip(app.explorer_scroll)
-        .take(height)
-        .map(|entry| {
-            let (status, change) = app.git_change(&entry.path)?;
-            let (letter, colour) = crate::git::view::status_mark(status, change);
-            Some((if entry.is_dir { "*" } else { letter }, colour))
-        })
-        .collect::<Vec<_>>();
-    let lines = app
-        .entries
-        .iter()
-        .enumerate()
-        .skip(app.explorer_scroll)
-        .take(height)
-        .zip(&marks)
-        .map(|((index, entry), mark)| {
-            let indentation = "  ".repeat(entry.depth);
-            let (icon, color) = if entry.is_dir {
-                let name = if entry.expanded {
-                    "custom-folder_open"
-                } else {
-                    "custom-folder"
-                };
-                (app.icon(name), ACTIVE)
-            } else {
-                entry.icon
-            };
-            let marker = if entry.is_dir {
-                if entry.expanded { "-" } else { "+" }
-            } else {
-                " "
-            };
-            let spans = if index == app.selected_entry {
-                let style = Style::default().fg(ACTIVE).add_modifier(Modifier::REVERSED);
-                vec![Span::styled(
-                    format!("{indentation}{marker} {icon} {}", entry.name),
-                    style,
-                )]
-            } else {
-                vec![
-                    Span::styled(format!("{indentation}{marker} "), Style::default().fg(TEXT)),
-                    Span::styled(icon.to_string(), Style::default().fg(color)),
-                    Span::styled(
-                        format!(" {}", entry.name),
-                        Style::default().fg(mark.map_or(TEXT, |(_, colour)| colour)),
-                    ),
-                ]
-            };
-            Line::from(skip_columns(spans, scroll_x))
-        })
-        .collect::<Vec<_>>();
-    let focused = app.focus == Focus::Explorer;
-    frame.render_widget(
-        Paragraph::new(lines).block(panel_block(title, focused)),
-        area,
-    );
-    // The marks stay at the right edge, over the end of a name too long for the panel.
-    if area.width >= 6 {
-        for (row, (letter, colour)) in marks
-            .into_iter()
-            .enumerate()
-            .filter_map(|(row, mark)| Some((row, mark?)))
-        {
-            let cell = Rect::new(area.right() - 3, area.y + 1 + row as u16, 2, 1);
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    format!(" {letter}"),
-                    Style::default().fg(colour),
-                )),
-                cell,
-            );
-        }
-    }
-    if widest > room && area.height > 2 {
-        let track = Rect::new(area.x + 1, area.bottom() - 1, room as u16, 1);
-        render_sideways_bar(frame, track, widest, scroll_x, focused);
-    }
-}
-
 /// The horizontal scroll bar on a bottom border: `━` over `─`, for `content` columns seen
 /// `track.width` at a time from `position`.
-fn render_sideways_bar(
+pub(super) fn render_sideways_bar(
     frame: &mut Frame,
     track: Rect,
     content: usize,
@@ -163,7 +70,9 @@ pub(super) fn render_entry_menu(frame: &mut Frame, app: &mut App, screen: Rect) 
         .max()
         .unwrap_or(0);
     let width = (longest as u16 + 6).max(16);
-    let height = menu.actions.len() as u16 + 2;
+    // It opens line by line from where it hangs (`MENU`).
+    let opened = super::scale_length(menu.actions.len() as u16, app.motion.menu()).max(1);
+    let height = opened + 2;
     let x = menu.position.0.min(screen.right().saturating_sub(width));
     let y = menu.position.1.min(screen.bottom().saturating_sub(height));
     let area = Rect::new(x, y, width, height).intersection(screen);
@@ -174,7 +83,7 @@ pub(super) fn render_entry_menu(frame: &mut Frame, app: &mut App, screen: Rect) 
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let mut entry = None;
-    for (index, action) in menu.actions.iter().enumerate() {
+    for (index, action) in menu.actions.iter().enumerate().take(usize::from(opened)) {
         let row = Rect::new(inner.x, inner.y + index as u16, inner.width, 1).intersection(inner);
         let selected = index == menu.selected;
         let style = if selected {
@@ -486,6 +395,55 @@ pub(super) fn render_properties(frame: &mut Frame, app: &mut App, screen: Rect) 
     });
 }
 
+/// «Trust this folder?» (F45): what trusting it lets run, what works without it, the two keys.
+fn render_trust(frame: &mut Frame, app: &App, screen: Rect) {
+    let name = app.root.file_name().map_or_else(
+        || app.root.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("{} ", app.icon("custom-folder")),
+                Style::default().fg(ACTIVE),
+            ),
+            Span::styled(
+                format!("Trust the folder {name}?"),
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Language servers, the debugger and the commands of a",
+            Style::default().fg(ratatui::style::Color::Yellow),
+        )),
+        Line::from(Span::styled(
+            "project run code that is in this folder.",
+            Style::default().fg(ratatui::style::Color::Yellow),
+        )),
+        Line::from(Span::styled(
+            "Without trust you can still read, edit, search and use Git.",
+            Style::default().fg(TEXT),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Enter: trust  Esc: not now",
+            Style::default().fg(MUTED),
+        )),
+    ];
+    let width = 64.min(screen.width);
+    let height = 9.min(screen.height);
+    let area = Rect::new(
+        screen.x + (screen.width - width) / 2,
+        screen.y + screen.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    super::render_dialog(frame, area, 1.0, " Trust ".into(), |frame, inner| {
+        frame.render_widget(Paragraph::new(lines), inner);
+    });
+}
+
 /// The name of a new file or folder, or of a rename: the icon follows the extension typed.
 pub(super) fn render_name_prompt(frame: &mut Frame, app: &App, screen: Rect) {
     let Some(prompt) = &app.name_prompt else {
@@ -501,7 +459,17 @@ pub(super) fn render_name_prompt(frame: &mut Frame, app: &App, screen: Rect) {
     } else {
         file_icon(std::path::Path::new(&prompt.name))
     };
-    let place = if matches!(prompt.action, EntryAction::Rename | EntryAction::Delete) {
+    let place = if prompt.action == EntryAction::Trust {
+        // The folder by its name: the question is about all of it.
+        return render_trust(frame, app, screen);
+    } else if matches!(
+        prompt.action,
+        EntryAction::Rename
+            | EntryAction::Delete
+            | EntryAction::DeleteForever
+            | EntryAction::OpenLarge
+            | EntryAction::MoveHere
+    ) {
         prompt.target.clone()
     } else if prompt.target.is_dir() {
         prompt.target.join("")
@@ -520,17 +488,76 @@ pub(super) fn render_name_prompt(frame: &mut Frame, app: &App, screen: Rect) {
         width,
         7.min(screen.height),
     );
-    if prompt.action == EntryAction::Delete {
-        // Nothing to type: what goes, that it does not come back, and the two keys (Q39).
+    if prompt.action.asks() {
+        // Nothing to type: what goes, that it does not come back, and the two keys (Q39); or
+        // how large the file is and how it opens (R11).
         let (icon, color) = if folder {
             (app.icon("custom-folder"), ACTIVE)
         } else {
             file_icon(&prompt.target)
         };
-        let what = if folder {
-            "The folder and everything in it are deleted for good."
+        let forever = prompt.action == EntryAction::DeleteForever;
+        let delete = forever || prompt.action == EntryAction::Delete;
+        let size = std::fs::metadata(&prompt.target).map_or(0, |file| file.len());
+        let moving = prompt.action == EntryAction::MoveHere;
+        let many = app.marked.len().max(1);
+        let what = if moving {
+            let folder = app.move_into.as_deref().unwrap_or(&app.root);
+            let folder = folder
+                .strip_prefix(&app.root)
+                .unwrap_or(folder)
+                .display()
+                .to_string();
+            let folder = if folder.is_empty() {
+                "the project folder".to_owned()
+            } else {
+                folder
+            };
+            match many {
+                1 => format!("Into {folder}."),
+                many => format!("With {} more, into {folder}.", many - 1),
+            }
+        } else if delete && many > 1 && !forever {
+            format!("With {} more marked: all go to the Trash.", many - 1)
+        } else if !delete {
+            // Without the count in bytes: the line has to fit the dialog.
+            let size = crate::app::human_size(size);
+            let size = size.split(" (").next().unwrap_or_default();
+            format!("{size}: it opens read only, without colours.")
+        } else if !forever {
+            format!(
+                "The {} goes to the Trash.",
+                if folder { "folder" } else { "file" }
+            )
+        } else if folder {
+            "The folder and everything in it are deleted for good.".to_string()
         } else {
-            "The file is deleted for good."
+            "The file is deleted for good.".to_string()
+        };
+        let (warning, keys, title) = if moving {
+            (
+                "Ctrl+Z in the Explorer moves it back.",
+                "Enter: move  Esc: cancel",
+                " Move ",
+            )
+        } else if forever {
+            (
+                "This cannot be undone.",
+                "Enter: delete  Esc: cancel",
+                " Delete for Good ",
+            )
+        } else if delete {
+            (
+                "Ctrl+Z in the Explorer brings it back.",
+                "Enter: delete  Esc: cancel",
+                " Delete ",
+            )
+        } else {
+            (
+                "The whole file is read into memory.",
+                "Enter: open  Esc: cancel",
+                " Open ",
+            )
         };
         let lines = vec![
             Line::from(vec![
@@ -545,19 +572,16 @@ pub(super) fn render_name_prompt(frame: &mut Frame, app: &App, screen: Rect) {
                 Style::default().fg(ratatui::style::Color::Yellow),
             )),
             Line::from(Span::styled(
-                "This cannot be undone.",
+                warning,
                 Style::default().fg(ratatui::style::Color::Yellow),
             )),
             Line::from(Span::styled(
                 prompt.error.clone().unwrap_or_default(),
                 Style::default().fg(ratatui::style::Color::Red),
             )),
-            Line::from(Span::styled(
-                "Enter: delete  Esc: cancel",
-                Style::default().fg(MUTED),
-            )),
+            Line::from(Span::styled(keys, Style::default().fg(MUTED))),
         ];
-        super::render_dialog(frame, area, 1.0, " Delete ".into(), |frame, inner| {
+        super::render_dialog(frame, area, 1.0, title.into(), |frame, inner| {
             frame.render_widget(Paragraph::new(lines), inner);
         });
         return;
@@ -744,9 +768,15 @@ pub(super) fn render_editor(frame: &mut Frame, app: &mut App, regions: &mut Regi
                 let problems = app.lsp.diagnostics.get(path).unwrap_or(&empty);
                 let none = Default::default();
                 let margin = Margin {
+                    now: app.motion.now(),
                     breakpoints: app.breakpoints.get(path).unwrap_or(&none),
                     paused: app.paused_row(path),
                     git: app.line_marks.get(path).map(|(_, marks)| marks),
+                    blame: app
+                        .blame
+                        .as_ref()
+                        .filter(|(blamed, _)| blamed == path)
+                        .map(|(_, lines)| lines.as_slice()),
                 };
                 render_file(
                     frame,
@@ -787,7 +817,8 @@ pub(super) fn render_editor(frame: &mut Frame, app: &mut App, regions: &mut Regi
     } else {
         regions.pane_bodies[0]
     };
-    render_debug(frame, app, regions.editor_body);
+    let body = regions.editor_body;
+    super::debug::render_debug(frame, app, regions, body);
     if let Some(zone) = app.tab_drop_zone() {
         render_drop_preview(frame, regions, zone);
     }
@@ -909,86 +940,46 @@ fn search_marks(app: &App, index: usize) -> Vec<(usize, usize, usize, bool)> {
 
 /// The debugger's panel on the right of the editor (F27): what it is doing, the call stack,
 /// the variables of the paused frame and the program's output.
-fn render_debug(frame: &mut Frame, app: &App, body: Rect) {
-    use crate::debug::State;
-    let session = app.debug.as_ref();
-    if session.is_none() && !app.debug_building() {
-        return;
-    }
-    let width = (body.width / 2).clamp(24, 48);
-    let area = Rect::new(
-        body.right().saturating_sub(width),
-        body.y,
-        width,
-        body.height,
-    );
-    let room = width.saturating_sub(4) as usize;
-    let cut = |text: String| text.chars().take(room).collect::<String>();
-    let heading = |text: &str| Line::styled(text.to_owned(), Style::default().fg(ACTIVE));
-    let (state, colour) = match session.map(|session| &session.state) {
-        None => ("Building...".to_owned(), MUTED),
-        Some(State::Starting) => ("Starting...".to_owned(), MUTED),
-        Some(State::Running) => ("Running".to_owned(), Color::Green),
-        Some(State::Paused(reason)) => (format!("Paused: {reason}"), Color::Yellow),
-        Some(State::Ended(how)) => (how.clone(), MUTED),
-    };
-    let mut lines = vec![Line::styled(cut(state), Style::default().fg(colour))];
-    if let Some(session) = session {
-        if !session.frames.is_empty() {
-            lines.push(heading("Call stack"));
-            lines.extend(session.frames.iter().take(6).map(|frame| {
-                let place = frame.path.as_ref().map_or_else(String::new, |path| {
-                    let name = path.file_name().unwrap_or_default().to_string_lossy();
-                    format!("  {name}:{}", frame.row + 1)
-                });
-                Line::from(vec![
-                    Span::styled(cut(frame.name.clone()), Style::default().fg(TEXT)),
-                    Span::styled(place, Style::default().fg(MUTED)),
-                ])
-            }));
-        }
-        if !session.variables.is_empty() {
-            lines.push(heading("Variables"));
-            let shown = usize::from(body.height / 2).max(3);
-            lines.extend(session.variables.iter().take(shown).map(|(name, value)| {
-                Line::from(vec![
-                    Span::styled(format!("{name} = "), Style::default().fg(TEXT)),
-                    Span::styled(cut(value.clone()), Style::default().fg(MUTED)),
-                ])
-            }));
-        }
-        if !session.output.is_empty() {
-            lines.push(heading("Output"));
-            let left = usize::from(body.height.saturating_sub(2)).saturating_sub(lines.len());
-            let skip = session.output.len().saturating_sub(left);
-            lines.extend(
-                session
-                    .output
-                    .iter()
-                    .skip(skip)
-                    .map(|line| Line::styled(cut(line.clone()), Style::default().fg(TEXT))),
-            );
-        }
-    }
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::bordered()
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(ACTIVE))
-                .title(" Debug ")
-                .title_bottom(Line::from(" F5 F10 F11  Shift+F5 stop ").right_aligned()),
-        ),
-        area,
-    );
-}
-
 /// What the margin marks for the debugger (F27).
 struct Margin<'a> {
+    /// The time of this frame, for the scroll that runs after a page.
+    now: std::time::Instant,
     breakpoints: &'a std::collections::BTreeSet<usize>,
     paused: Option<usize>,
     /// Each row's change since the last commit (F34).
     git: Option<&'a std::collections::HashMap<usize, LineMark>>,
+    /// Who changed each line, when asked (`Alt+G`, TODO 4.1.6).
+    blame: Option<&'a [crate::git::Blame]>,
+}
+
+/// Who changed each line, dimmed at the right of the text where the line leaves room.
+fn blame_margin(
+    frame: &mut Frame,
+    file: &crate::editor::OpenFile,
+    blame: &[crate::git::Blame],
+    text: Rect,
+    scroll: usize,
+    scroll_x: usize,
+) {
+    for (offset, row) in (scroll..).take(usize::from(text.height)).enumerate() {
+        let (Some(line), Some(entry)) = (file.lines.get(row), blame.get(row)) else {
+            continue;
+        };
+        let note = format!("{} {} {}", entry.commit, entry.date, entry.author);
+        let note: String = note.chars().take(40).collect();
+        let width = Line::from(note.as_str()).width();
+        let used = Line::from(line.as_str()).width().saturating_sub(scroll_x) + 3;
+        if used + width > usize::from(text.width) {
+            continue;
+        }
+        let area = Rect::new(
+            text.right() - width as u16,
+            text.y + offset as u16,
+            width as u16,
+            1,
+        );
+        frame.render_widget(Paragraph::new(note).style(Style::default().fg(MUTED)), area);
+    }
 }
 
 /// The cell between a line's number and its text: its Git mark (F34), or the bar in the
@@ -1028,7 +1019,9 @@ fn render_completion(frame: &mut Frame, app: &App, index: usize, body: Rect) {
         .unwrap_or(10)
         .clamp(16, 60) as u16
         + 2;
-    let height = shown.len() as u16 + 2;
+    let opened = super::scale_length(shown.len() as u16, app.motion.menu()).max(1);
+    let shown = &shown[..usize::from(opened)];
+    let height = opened + 2;
     let below = body.y + 1 + row as u16 + 1;
     let y = if below + height <= body.bottom() {
         below
@@ -1329,18 +1322,34 @@ fn render_file(
     let gutter = number_width + 3;
     let height = area.height.saturating_sub(2) as usize;
     let text_width = (area.width.saturating_sub(2) as usize).saturating_sub(gutter);
+    // Wrapped lines fit the text area; nothing scrolls sideways then (TODO 2.1.8).
+    file.set_wrap_width(text_width);
+    if file.wrap {
+        file.scroll_x = 0;
+    }
     file.scroll_to_cursor(height, text_width);
-    let (scroll, scroll_x) = (file.scroll as usize, file.scroll_x as usize);
+    // After a page the rows run to the new place; any other scroll is there at once.
+    let target = usize::from(file.scroll);
+    if file.shown_scroll.target() != target {
+        file.shown_scroll.set_target(target, margin.now, false);
+    }
+    let scroll = file.shown_scroll.value(margin.now);
+    let scroll_x = file.scroll_x as usize;
     let lines = (scroll..(scroll + height).min(file.display_rows()))
         .map(|display| {
             let (number, mut spans) = file.display_line(display, text_width + scroll_x);
-            let selected = number
-                .and_then(|_| file.source_row(display))
+            // A wrapped row shows the columns of its line from `offset` on.
+            let offset = file.display_offset(display);
+            let shift = |column: usize| column.saturating_sub(offset);
+            let selected = file
+                .display_source(display)
                 .and_then(|row| file.selected_columns(row));
-            if let Some((from, to)) = selected {
-                spans = select_columns(spans, from, to);
+            if let Some((from, to)) = selected
+                && to > offset
+            {
+                spans = select_columns(spans, shift(from), shift(to));
             }
-            let row = number.and_then(|_| file.source_row(display));
+            let row = file.display_source(display);
             for &(_, column, length, current) in marks.iter().filter(|mark| Some(mark.0) == row) {
                 let line = row
                     .and_then(|row| file.lines.get(row))
@@ -1349,7 +1358,9 @@ fn render_file(
                 let to = from
                     + Span::raw(line.chars().skip(column).take(length).collect::<String>()).width();
                 let style = if current { CURRENT_MATCH } else { MATCH };
-                spans = mark_columns(spans, from, to, style);
+                if to > offset {
+                    spans = mark_columns(spans, shift(from), shift(to), style);
+                }
             }
             // Problems from the language server: the number in red (error) or yellow, the text
             // underlined in that colour (F26).
@@ -1384,10 +1395,13 @@ fn render_file(
                 let width = |column: usize| {
                     Span::raw(line_text.chars().take(column).collect::<String>()).width()
                 };
+                if width(to).max(width(from) + 1) <= offset {
+                    continue;
+                }
                 spans = mark_columns(
                     spans,
-                    width(from),
-                    width(to).max(width(from) + 1),
+                    shift(width(from)),
+                    shift(width(to).max(width(from) + 1)),
                     Style::default()
                         .add_modifier(Modifier::UNDERLINED)
                         .underline_color(colour),
@@ -1397,6 +1411,8 @@ fn render_file(
                 || " ".repeat(number_width),
                 |number| format!("{number:>number_width$}"),
             );
+            // The margin belongs to the first row of a line.
+            let row = row.filter(|_| offset == 0);
             // Before the `|`: a breakpoint (●) or the line the debugger is paused at (▶).
             let mark = match row {
                 Some(row) if margin.paused == Some(row) => {
@@ -1424,6 +1440,17 @@ fn render_file(
         block = block.title_top(Line::from(format!(" Page {}/{pages} ", page + 1)).right_aligned());
     }
     frame.render_widget(Paragraph::new(lines).block(block), area);
+    let text = Rect::new(
+        area.x + 1 + gutter as u16,
+        area.y + 1,
+        text_width as u16,
+        height as u16,
+    )
+    .intersection(area);
+    super::guides::decorate(frame.buffer_mut(), file, text, scroll, scroll_x);
+    if let Some(blame) = margin.blame.filter(|_| !file.wrap) {
+        blame_margin(frame, file, blame, text, scroll, scroll_x);
+    }
     if file.max_width > text_width && area.height > 2 {
         let track = Rect::new(
             area.x + 1 + gutter as u16,
@@ -1434,8 +1461,9 @@ fn render_file(
         render_sideways_bar(frame, track, file.max_width, scroll_x, focused);
     }
     if focused {
-        let column = file.cursor_x().checked_sub(scroll_x);
-        let row = file.display_row(file.cursor_row).checked_sub(scroll);
+        let (cursor_row, cursor_column) = file.cursor_place();
+        let column = cursor_column.checked_sub(scroll_x);
+        let row = cursor_row.checked_sub(scroll);
         if let (Some(column), Some(row)) = (column, row) {
             let x = area
                 .x
@@ -1447,125 +1475,5 @@ fn render_file(
                 frame.set_cursor_position((x, y));
             }
         }
-    }
-}
-
-/// A terminal panel: the shell of the tab on screen, its tabs on the right of the top border
-/// (F04, Q59) and the text chosen with the mouse in reverse (Q57).
-pub(super) fn render_terminal(
-    frame: &mut Frame,
-    app: &App,
-    regions: &mut Regions,
-    area: Rect,
-    panel: Focus,
-) {
-    let bottom = panel == Focus::BottomTerminal;
-    let (terminals, name, action) = if bottom {
-        (
-            &app.bottom_terminal,
-            "Bottom terminal",
-            Action::BottomTerminal,
-        )
-    } else {
-        (&app.right_terminal, "Right terminal", Action::RightTerminal)
-    };
-    let focused = app.focus == panel;
-    let terminal = terminals.current();
-    // ` 1 x `, ` 2 x ` and ` + ` below three shells at the bottom; ` 1 ` and ` 2 ` on the right.
-    let count = terminals.tabs.len();
-    let closable = bottom && count > 1;
-    let labels = (1..=count)
-        .map(|number| {
-            if closable {
-                format!(" {number} x ")
-            } else {
-                format!(" {number} ")
-            }
-        })
-        .collect::<Vec<_>>();
-    let add = bottom && count < BOTTOM_TERMINALS;
-    let tabs_width = labels
-        .iter()
-        .map(|label| label.len() as u16 + 1)
-        .sum::<u16>()
-        + if add { 4 } else { 0 };
-    let scrollback = terminal.scrollback();
-    let icon = app.icon("dev-terminal");
-    let history = if scrollback > 0 {
-        format!(" [history: {scrollback}]")
-    } else {
-        String::new()
-    };
-    // The title gives way to the tabs: without its key, then only the icon.
-    let room = usize::from(area.width.saturating_sub(tabs_width + 3));
-    let title = [
-        format!(" {icon} {name} [{}]{history} ", app.keys.label(action)),
-        format!(" {icon} {name}{history} "),
-        format!(" {icon} "),
-    ]
-    .into_iter()
-    .find(|title| Line::from(title.as_str()).width() <= room)
-    .unwrap_or_default();
-    if let Ok(parser) = terminal.parser.read() {
-        let cursor = Cursor::default().visibility(focused && scrollback == 0);
-        frame.render_widget(
-            PseudoTerminal::new(parser.screen())
-                .block(panel_block(title, focused))
-                .cursor(cursor),
-            area,
-        );
-    }
-    if let Some(selection) = app
-        .terminal_selection
-        .filter(|chosen| chosen.panel == panel)
-    {
-        let inner = Rect::new(
-            area.x + 1,
-            area.y + 1,
-            area.width.saturating_sub(2),
-            area.height.saturating_sub(2),
-        );
-        let (start, end) = selection.bounds();
-        let buffer = frame.buffer_mut();
-        for row in start.0..=end.0.min(inner.height.saturating_sub(1)) {
-            let from = if row == start.0 { start.1 } else { 0 };
-            let to = if row == end.0 { end.1 } else { inner.width };
-            for column in from..=to.min(inner.width.saturating_sub(1)) {
-                buffer[(inner.x + column, inner.y + row)]
-                    .modifier
-                    .toggle(Modifier::REVERSED);
-            }
-        }
-    }
-    if area.height == 0 || area.width < tabs_width + 4 {
-        return;
-    }
-    let mut x = area.right() - 1 - tabs_width;
-    let button = Style::default().fg(TEXT).add_modifier(Modifier::REVERSED);
-    let shown = Style::default()
-        .fg(ACTIVE)
-        .add_modifier(Modifier::BOLD | Modifier::REVERSED);
-    for (index, label) in labels.iter().enumerate() {
-        let width = label.len() as u16;
-        let style = if index == terminals.active {
-            shown
-        } else {
-            button
-        };
-        frame.buffer_mut().set_string(x, area.y, label, style);
-        let (tab, close) = if closable {
-            (
-                Rect::new(x, area.y, width - 2, 1),
-                Rect::new(x + width - 2, area.y, 2, 1),
-            )
-        } else {
-            (Rect::new(x, area.y, width, 1), Rect::default())
-        };
-        regions.terminal_tabs.push((panel, index, tab, close));
-        x += width + 1;
-    }
-    if add {
-        frame.buffer_mut().set_string(x, area.y, " + ", button);
-        regions.terminal_add = Rect::new(x, area.y, 3, 1);
     }
 }

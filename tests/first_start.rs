@@ -93,7 +93,7 @@ fn the_panel_comes_first_installs_what_is_chosen_and_does_not_come_back() {
     again.wait_for("Starting...");
     again.send(" ");
     again.wait_for("Explorer");
-    std::thread::sleep(std::time::Duration::from_secs(1));
+    again.wait_still();
     assert!(
         !again.screen().contains("Best experience"),
         "{}",
@@ -154,6 +154,10 @@ fn release(home: &Home, sums: &str) {
         &format!(
             r#"home='{}'
 case "$*" in
+"--proto =https --proto-redir =https --tlsv1.2 "*) ;;
+*) echo 'curl: not HTTPS only' >&2; exit 1 ;;
+esac
+case "$*" in
 *-sSIL*) printf 'content-length: 3\r\n' ;;
 *-sSI*) printf 'location: https://github.com/x/y/releases/tag/v9.9.9\r\n' ;;
 *SHA256SUMS*) [ -s "$home/sums" ] && exec /bin/cat "$home/sums"; exit 22 ;;
@@ -177,12 +181,23 @@ fn update_is_refused(sums: &str, message: &str) {
     sozo.wait_for("9.9.9");
     sozo.send(b"\r");
     sozo.wait_for(message);
-    // Nothing is left to install, and the app goes on.
-    let left = std::fs::read_dir(home.path())
-        .unwrap()
-        .flatten()
-        .any(|entry| entry.file_name().to_string_lossy().starts_with("SozoIDE-"));
-    assert!(!left, "the package was left behind");
+    // Nothing is left to install, in the cache folder of this user or anywhere else, and the
+    // app goes on.
+    fn package_in(folder: &std::path::Path) -> bool {
+        std::fs::read_dir(folder)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| {
+                entry.file_name().to_string_lossy().starts_with("SozoIDE-")
+                    || (entry.file_type().is_ok_and(|kind| kind.is_dir())
+                        && package_in(&entry.path()))
+            })
+    }
+    assert!(!package_in(home.path()), "the package was left behind");
+    let updates = home.cache().join("updates");
+    assert!(updates.is_dir(), "the update was not staged in {updates:?}");
+    assert_eq!(std::fs::read_dir(&updates).unwrap().count(), 0);
     sozo.send(b"\x1b");
     sozo.wait_until("the dialog gone", |screen| !screen.contains(message));
     sozo.quit();
@@ -218,7 +233,7 @@ fn each_folder_opens_with_the_layout_it_was_left_with() {
     sozo.past_splash();
     sozo.send(b"\n");
     sozo.wait_for("Bottom terminal");
-    let bottom = sozo.find("Bottom terminal");
+    let bottom = sozo.find_still("Bottom terminal");
     sozo.drag(bottom, (1, 70));
     sozo.wait_until("the terminal on top", |_| {
         sozo.locate("Bottom terminal")
@@ -230,8 +245,7 @@ fn each_folder_opens_with_the_layout_it_was_left_with() {
     let sozo = home.start();
     sozo.past_splash();
     sozo.wait_for("Bottom terminal");
-    std::thread::sleep(std::time::Duration::from_millis(600));
-    assert_eq!(sozo.find("Bottom terminal"), place);
+    assert_eq!(sozo.find_still("Bottom terminal"), place);
     sozo.quit();
 
     // A file from another version with a broken layout opens with the first one.
@@ -243,7 +257,10 @@ fn each_folder_opens_with_the_layout_it_was_left_with() {
     let sozo = home.start();
     sozo.past_splash();
     sozo.wait_for("Bottom terminal");
-    std::thread::sleep(std::time::Duration::from_millis(600));
-    assert!(sozo.find("Bottom terminal").0 > 10, "{}", sozo.screen());
+    assert!(
+        sozo.find_still("Bottom terminal").0 > 10,
+        "{}",
+        sozo.screen()
+    );
     sozo.quit();
 }

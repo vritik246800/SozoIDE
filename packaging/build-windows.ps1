@@ -27,5 +27,8 @@ Set-Location $Root
 # No version in the name: the site and the updater download releases/latest/download/<name>.
 $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x86_64" }
 $Msi = Join-Path $Root "target/wix/SozoIDE-windows-$Arch.msi"
-cargo wix --nocapture --output $Msi
+# The Cargo.lock as it is, never newer crates (TODO 6.4.11).
+cargo build --release --locked
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+cargo wix --no-build --nocapture --output $Msi
 Write-Host "Installer created: $Msi"

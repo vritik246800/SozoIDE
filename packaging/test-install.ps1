@@ -25,4 +25,15 @@ if ($Output -ne "sozo $Version") { throw "sozo --version printed '$Output'" }
 $Text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Get-Command sozo).Source))
 $Found = [regex]::Match($Text, '\.cargo[\\/]registry[\\/]src[\\/][^\x00 ]*\.(yaml|yml|toml|json|txt|dat|bin)')
 if ($Found.Success) { throw "sozo reads data files from the build machine: $($Found.Value)" }
+# Only DLLs every Windows has: no VCRUNTIME140.dll or other redistributable (CLAUDE.md §0.1).
+$VsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+$DumpBin = & $VsWhere -latest -products * -find "VC\Tools\MSVC\**\dumpbin.exe" | Select-Object -First 1
+if (-not $DumpBin) { throw "dumpbin.exe not found" }
+$Dlls = & $DumpBin /nologo /dependents (Get-Command sozo).Source |
+    Where-Object { $_ -match '^\s+(\S+\.dll)\s*$' } | ForEach-Object { $Matches[1] }
+$Missing = $Dlls | Where-Object {
+    $_ -notmatch '^(api|ext)-ms-win-' -and -not (Test-Path (Join-Path $env:SystemRoot "System32\$_"))
+}
+$Redistributable = $Dlls | Where-Object { $_ -match '^(vcruntime|msvcp)\d+' }
+if ($Missing -or $Redistributable) { throw "sozo links DLLs a user may not have: $($Missing + $Redistributable)" }
 Write-Host "OK: $Output ($((Get-Command sozo).Source))"

@@ -10,13 +10,31 @@ WORK=$(mktemp -d)
 # A data file read from the build machine's cargo registry exists only on the runner: the binary
 # would start here and crash everywhere else (ERRORS.md E10).
 check() {
-    local output
+    local output binary
     output=$("$1" --version)
     [[ $output == "sozo $VERSION" ]] || { echo "$1 --version printed '$output'" >&2; exit 1; }
-    if strings "$1" | grep -E '\.cargo/registry/src/[^ ]*\.(yaml|yml|toml|json|txt|dat|bin)'; then
+    # `sozo` from the PATH is read where it is: strings and ldd do not look in the PATH (E85).
+    binary=$(command -v "$1")
+    if strings "$binary" | grep -E '\.cargo/registry/src/[^ ]*\.(yaml|yml|toml|json|txt|dat|bin)'; then
         echo "$1 reads data files from the build machine" >&2
         exit 1
     fi
+    # Only libraries every system has: nothing from Homebrew or a -dev package (CLAUDE.md §0.1).
+    local extra
+    case $(uname -s) in
+    Darwin) extra=$(otool -L "$binary" | tail -n +2 | awk '{ print $1 }' | grep -vE '^(/usr/lib/|/System/Library/)' || true) ;;
+    Linux)
+        # The static build of the .tar.gz (musl) links nothing, and ldd says just that.
+        local libraries
+        libraries=$(ldd "$binary" 2>&1 || true)
+        if grep -qE 'statically linked|not a dynamic executable' <<<"$libraries"; then
+            extra=""
+        else
+            extra=$(awk '{ print $1 }' <<<"$libraries" | grep -vE '^(linux-vdso\.so|/lib(64)?/ld-linux|lib(c|m|dl|pthread|rt|gcc_s|util)\.so)' || true)
+        fi
+        ;;
+    esac
+    [[ -z $extra ]] || { echo "$1 links libraries a user may not have:" >&2; echo "$extra" >&2; exit 1; }
     echo "OK: $output ($1)"
 }
 

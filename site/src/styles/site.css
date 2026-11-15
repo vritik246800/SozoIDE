@@ -1,0 +1,895 @@
+:root {
+  color-scheme: dark;
+  --accent: var(--c6);
+  --muted: var(--c7);
+  --line: var(--c8);
+  --display: 'Martian Mono Variable', ui-monospace, monospace;
+  --mono: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+  --ease: cubic-bezier(0.33, 1, 0.68, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+body {
+  margin: 0;
+  font: 1.0625rem / 1.6 system-ui, sans-serif;
+}
+
+/* With View Transitions the theme change is a wave (script below); without, the colors fade. */
+@supports not (view-transition-name: none) {
+  @media (prefers-reduced-motion: no-preference) {
+    html,
+    html * {
+      transition:
+        color 160ms var(--ease),
+        background-color 160ms var(--ease),
+        border-color 160ms var(--ease);
+    }
+  }
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+a {
+  color: var(--accent);
+  text-underline-offset: 0.2em;
+}
+
+a:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+code,
+pre,
+kbd,
+var {
+  font-family: var(--mono);
+  font-style: normal;
+}
+
+code {
+  font-size: 0.92em;
+}
+
+pre {
+  margin: 0;
+  overflow-x: auto;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--display);
+  font-stretch: 112.5%;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.top,
+main > section,
+.bottom {
+  width: min(100% - 32px, 76rem);
+  margin-inline: auto;
+}
+
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 24px;
+  padding-block: 20px;
+}
+
+.brand {
+  color: var(--accent);
+  font-family: var(--display);
+  font-stretch: 112.5%;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.top nav {
+  display: flex;
+  gap: 20px;
+}
+
+.top nav a {
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.top nav a:hover {
+  color: var(--accent);
+}
+
+.hero {
+  padding-block: clamp(32px, 6vw, 72px) 24px;
+}
+
+.hero h1 {
+  font-size: clamp(2.25rem, 1.2rem + 3.2vw, 3.4rem);
+  line-height: 1.04;
+  text-wrap: pretty;
+}
+
+.hero h1 .accent {
+  color: var(--accent);
+}
+
+.lede {
+  max-width: 44rem;
+  margin: 24px 0 0;
+  font-size: 1.2rem;
+  color: var(--muted);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 28px;
+  margin-top: 32px;
+}
+
+.button {
+  display: inline-block;
+  padding: 12px 20px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.button:hover {
+  background: var(--c14);
+  text-decoration: underline;
+}
+
+.for {
+  display: none;
+}
+
+[data-os='macos'] [data-for='macos'],
+[data-os='windows'] [data-for='windows'],
+[data-os='linux'] [data-for='linux'] {
+  display: inline;
+}
+
+.note {
+  margin: 16px 0 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.window {
+  position: relative;
+  container-type: inline-size;
+  margin: 48px 0 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.screen {
+  --cell: var(--fg);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  overflow: hidden;
+  background: var(--bg);
+  font-size: calc((100cqi - 1px) / 80);
+  line-height: 1.18;
+  white-space: pre;
+}
+
+.screen .d {
+  opacity: 0.5;
+}
+
+.window:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* Every screen of the demo sits in the same cell; the one arriving is drawn over the one
+   leaving (src/scripts/demo.ts), the splash over both. */
+.stage {
+  position: relative;
+  display: grid;
+}
+
+.stage > .screen {
+  grid-area: 1 / 1;
+}
+
+.stage > .arriving {
+  z-index: 1;
+}
+
+.stage > .splash {
+  z-index: 2;
+}
+
+/* The terminal dims everything behind a dialog (Modifier::DIM). */
+.stage.dimmed > .screen {
+  opacity: 0.5;
+}
+
+.dialog {
+  position: absolute;
+  z-index: 3;
+  top: calc(var(--top) * 1.18em);
+  left: calc(var(--left) * 1ch);
+  width: calc(var(--width) * 1ch);
+  height: calc(var(--height) * 1.18em);
+  font-family: var(--mono);
+  font-size: calc((100cqi - 1px) / 80);
+  line-height: 1.18;
+}
+
+.dialog > .screen {
+  position: absolute;
+  left: 0;
+  width: 100%;
+}
+
+.dialog > .edge-top {
+  top: 0;
+}
+
+.dialog > .body {
+  top: 1.18em;
+}
+
+.dialog > .edge-bottom {
+  top: calc((var(--height) - 1) * 1.18em);
+}
+
+.try {
+  display: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 0 0;
+}
+
+[data-os] .try {
+  display: flex;
+}
+
+.try-label {
+  margin-right: 6px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.9rem;
+}
+
+.try button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.try button span {
+  margin-left: 4px;
+}
+
+.try button:hover {
+  border-color: var(--accent);
+}
+
+.try button[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.try button[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The front of the theme wave, drawn with characters (src/scripts/ascii.ts). */
+.wave {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.screen .b {
+  font-weight: 700;
+}
+
+.screen .r {
+  background: var(--cell);
+  color: var(--bg);
+}
+
+/* The shell prompt before the first frame of the screen; shown only while motion is allowed. */
+.boot {
+  display: none;
+  z-index: 4;
+  position: absolute;
+  inset: 12px auto auto 12px;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: calc((100cqi - 1px) / 80);
+  line-height: 1.18;
+  white-space: pre;
+}
+
+.boot .typed {
+  display: inline-block;
+  width: 6ch;
+  overflow: hidden;
+  vertical-align: top;
+}
+
+.themes {
+  display: none;
+  margin: 20px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+/* data-os is set by the head script, so the picker only shows when it can work. */
+[data-os] .themes {
+  display: block;
+}
+
+.themes legend {
+  padding: 0;
+  margin-bottom: 12px;
+  color: var(--muted);
+}
+
+.theme-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+  gap: 10px;
+}
+
+.theme-list button {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.theme-list button:hover {
+  border-color: var(--accent);
+}
+
+.theme-list button[aria-pressed='true'] {
+  border: 2px solid var(--accent);
+  padding: 9px 11px;
+}
+
+.theme-list button[aria-pressed='true'] .theme-name {
+  color: var(--accent);
+}
+
+.swatch {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  height: 16px;
+  margin-bottom: 4px;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.theme-name {
+  font-weight: 700;
+}
+
+.theme-from {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+main > section + section {
+  padding-block: clamp(48px, 8vw, 96px) 0;
+}
+
+h2 {
+  font-size: clamp(1.5rem, 1.2rem + 1.4vw, 2.1rem);
+}
+
+.section-lede {
+  max-width: 44rem;
+  margin: 16px 0 0;
+  color: var(--muted);
+}
+
+.tagline {
+  margin: 20px 0 0;
+  font-size: 1.15rem;
+}
+
+.tagline strong {
+  color: var(--accent);
+}
+
+/* The tour (Docs/development/UX.md §2): a strip of captures that scrolls sideways, each one
+   opening whole in a popout. */
+.tour {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  margin: 28px 0 0;
+}
+
+.gallery {
+  display: flex;
+  gap: 16px;
+  margin: 0;
+  padding: 4px 2px 14px;
+  list-style: none;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  overscroll-behavior-x: contain;
+}
+
+.gallery li {
+  flex: 0 0 min(78vw, 420px);
+  scroll-snap-align: start;
+}
+
+.shot {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: zoom-in;
+}
+
+.shot:hover,
+.shot:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.thumb {
+  display: block;
+  container-type: inline-size;
+  overflow: hidden;
+  border-radius: 4px;
+}
+
+.shot-title {
+  font-weight: 700;
+}
+
+.shot-text {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.tour-arrow {
+  width: 2.2rem;
+  height: 2.2rem;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 1.3rem;
+  cursor: pointer;
+}
+
+.tour-arrow:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.popout {
+  width: min(96vw, 1180px);
+  max-height: 92vh;
+  padding: 16px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.popout::backdrop {
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+}
+
+.popout-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.popout-head h3 {
+  margin: 0;
+}
+
+.popout-close {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+/* The whole screen at a readable size: narrower windows scroll it sideways. */
+.popout-body {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.popout-body .screen {
+  width: max-content;
+  overflow: visible;
+  font-size: clamp(10px, 1.05vw, 13px);
+}
+
+.popout-text {
+  margin: 12px 0 0;
+  color: var(--muted);
+}
+
+.screen .u {
+  text-decoration: underline;
+  text-decoration-color: var(--c1);
+}
+
+@media (max-width: 640px) {
+  .tour {
+    grid-template-columns: 1fr;
+  }
+
+  .tour-arrow {
+    display: none;
+  }
+}
+
+.keymap {
+  margin: 32px 0 0;
+}
+
+.key-row {
+  display: grid;
+  grid-template-columns: minmax(12rem, 16rem) 1fr;
+  gap: 8px 32px;
+  padding-block: 22px;
+  border-top: 1px solid var(--line);
+}
+
+.key-row dt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.combo {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.or {
+  margin-right: 4px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+kbd {
+  display: inline-block;
+  min-width: 1.9em;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  box-shadow: 0 2px 0 var(--line);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.key-row dd {
+  margin: 0;
+}
+
+.key-row h3 {
+  font-size: 1.05rem;
+}
+
+.key-row p {
+  max-width: 46rem;
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
+.platforms {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-top: 32px;
+}
+
+.platform {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.platform p {
+  margin: 0;
+}
+
+.platform .button {
+  align-self: flex-start;
+  margin-top: auto;
+}
+
+.platform h3 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 1.3rem;
+}
+
+.yours {
+  display: none;
+  font-family: system-ui, sans-serif;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--accent);
+}
+
+[data-os='macos'] [data-platform='macos'],
+[data-os='windows'] [data-platform='windows'],
+[data-os='linux'] [data-platform='linux'] {
+  border: 2px solid var(--accent);
+  padding: 19px;
+}
+
+[data-os='macos'] [data-platform='macos'] .yours,
+[data-os='windows'] [data-platform='windows'] .yours,
+[data-os='linux'] [data-platform='linux'] .yours {
+  display: inline;
+}
+
+.file {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
+.links a {
+  margin-right: 0.6em;
+}
+
+.caveat {
+  font-size: 0.92rem;
+  color: var(--muted);
+}
+
+.checksums {
+  margin: 20px 0 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+#source pre {
+  margin-top: 24px;
+}
+
+.bottom {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  justify-items: center;
+  gap: 16px;
+  padding-block: clamp(64px, 10vw, 120px) 40px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.bottom .logo {
+  padding: 0;
+  border: 0;
+  overflow: visible;
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.bottom p {
+  margin: 0;
+}
+
+/* Stars made of characters behind the logo, fading out above the credits. */
+.stars {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  mask-image: linear-gradient(#000 55%, transparent 80%);
+}
+
+/* Motion (Docs/development/DESIGN.md §2.5): GSAP boots the hero and reveals the page, anime.js
+   moves the demo and the theme wave, canvas draws characters. CSS only keeps what waits for
+   those scripts (data-motion="wait", set in the head) and the small responses. With reduced
+   motion nothing moves or hides. */
+[data-motion='wait'] :is(.hero .word, .tagline, .lede, .actions, .note, .window, .try, .theme-list button, .reveal, .draw) {
+  visibility: hidden;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  .hero .word {
+    display: inline-block;
+  }
+
+  .cursor {
+    animation: blink 1.06s steps(1) infinite;
+  }
+
+  .theme-list button,
+  .try button {
+    transition:
+      color 160ms var(--ease),
+      border-color 160ms var(--ease);
+  }
+
+  .button {
+    transition:
+      color 160ms var(--ease),
+      background-color 160ms var(--ease),
+      transform 160ms var(--ease);
+  }
+
+  .button:active {
+    transform: translateY(1px);
+  }
+
+  kbd {
+    transition:
+      transform 160ms var(--ease),
+      box-shadow 160ms var(--ease),
+      border-color 160ms var(--ease),
+      color 160ms var(--ease);
+  }
+
+  /* A key of a tool pressed as its row arrives (motion.ts). */
+  .combo.down kbd {
+    transform: translateY(2px);
+    box-shadow: 0 0 0 var(--line);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (max-width: 52rem) {
+  .platforms {
+    grid-template-columns: 1fr;
+  }
+
+  .key-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* The pages beside the landing page (TODO 6.4.4). */
+.page {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 2rem 1rem 4rem;
+}
+.page h2 {
+  color: var(--accent);
+  margin-top: 2rem;
+}
+.page table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.page td,
+.page th {
+  border-bottom: 1px solid var(--c8);
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.page code,
+.page kbd {
+  overflow-wrap: anywhere;
+}
+
+/* Fingers need targets of 44 px (WCAG 2.5.5, TODO 6.4.3). */
+@media (pointer: coarse) {
+  button,
+  .top nav a {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+  }
+}

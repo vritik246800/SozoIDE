@@ -1,0 +1,36 @@
+name: Captures
+
+# The screens of the landing page taken again from a real SozoIDE in a neutral container
+# (site/scripts/capture.sh), instead of by hand (TODO 6.4.8). Only by hand: Actions → Captures →
+# Run workflow. The new screens.json comes out as an artifact: only the release job writes to
+# the repository (CLAUDE.md §7.2), so a person reviews and commits it to preview.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    name: Capture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: preview
+      - name: Capture the screens in a container
+        run: |
+          out=$(mktemp -d)
+          docker run --rm -v "$PWD:/src:ro" -v "$out:/out" rust:1.97-slim bash /src/site/scripts/capture.sh
+          python3 site/scripts/screens.py "$out"
+      - name: Say whether they changed
+        run: |
+          if git diff --quiet -- site/src/data/screens.json; then
+            echo "The screens did not change." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "New screens: download the screens artifact, put it in site/src/data/ and commit it to preview." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: screens
+          path: site/src/data/screens.json

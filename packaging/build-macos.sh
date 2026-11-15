@@ -22,7 +22,7 @@ STAGING="$OUT/dmg-root"
 rm -rf "$OUT"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$STAGING"
 
-cargo build --release
+cargo build --release --locked
 cp target/release/sozo "$APP/Contents/MacOS/sozo"
 cp packaging/macos/launcher.sh "$APP/Contents/MacOS/SozoIDE"
 chmod +x "$APP/Contents/MacOS/SozoIDE" "$APP/Contents/MacOS/sozo"

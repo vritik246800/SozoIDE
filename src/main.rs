@@ -1,13 +1,21 @@
 mod animation;
 mod app;
 mod branding;
+#[cfg(test)]
+mod budgets;
+mod cli;
 mod database;
 mod debug;
 mod editor;
 mod git;
 mod lsp;
 mod media;
+mod process;
+#[cfg(test)]
+mod properties;
 mod run;
+mod settings;
+mod storage;
 mod terminal;
 mod ui;
 mod update;
@@ -16,11 +24,11 @@ use std::{
     env,
     io::{self, Write},
     path::PathBuf,
-    process::{Command, Stdio},
+    process::Command,
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use app::App;
 use crossterm::{
     event::{
@@ -35,41 +43,43 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use ratatui_image::picker::Picker;
 
 fn main() -> Result<()> {
-    let Some(root) = command_line_root()? else {
-        return Ok(());
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    let (root, file) = match cli::parse(&arguments, &env::current_dir()?)? {
+        cli::Request::Print(text) => {
+            println!("{text}");
+            return Ok(());
+        }
+        cli::Request::Open { root, file } => (root, file),
     };
     let mut app = App::with_picker(root, image_picker(), true)?;
+    // The interface came up: the version before an update is no longer kept (TODO 6.1.2).
+    update::confirm_started();
+    // `sozo src/main.rs:12:5`: the file at its place (TODO 6.1.1).
+    if let Some((path, line, column)) = file {
+        app.open_file_at(path, line, column);
+    }
 
+    stop_cleanly_on_panic();
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    // Without it a paste arrives as typing: each new line would run in a terminal (E58).
-    let _ = execute!(stdout, EnableBracketedPaste);
-    let _ = execute!(
-        stdout,
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-        )
-    );
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
-
-    let result = run(&mut terminal, &mut app);
+    // Whatever fails from here on, the terminal goes back as it was.
+    let result = (|| -> Result<()> {
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        // Without it a paste arrives as typing: each new line would run in a terminal (E58).
+        let _ = execute!(stdout, EnableBracketedPaste);
+        let _ = execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
+        );
+        let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+        terminal.clear()?;
+        run(&mut terminal, &mut app)
+    })();
     app.database.shutdown();
-    disable_raw_mode()?;
-    let _ = execute!(
-        terminal.backend_mut(),
-        PopKeyboardEnhancementFlags,
-        DisableBracketedPaste
-    );
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    restore_terminal();
     result?;
     if let Some(file) = app.updater.ready_file().map(PathBuf::from) {
         let root = app.root.clone();
@@ -78,6 +88,61 @@ fn main() -> Result<()> {
         update::install_and_restart(&file, &root)?;
     }
     Ok(())
+}
+
+/// Puts the terminal back as SozoIDE found it: safe to call twice and from any thread.
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let mut stdout = io::stdout();
+    let _ = execute!(stdout, PopKeyboardEnhancementFlags, DisableBracketedPaste);
+    let _ = execute!(
+        stdout,
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        crossterm::cursor::Show
+    );
+}
+
+/// A panic in any thread gives the terminal back and says where it happened (R12), then
+/// SozoIDE stops: what is in memory can no longer be trusted, and the autosave has already
+/// written all but the last two seconds. `crash.log` keeps the version, the system, the place
+/// in the code and the message; never the text of a file.
+fn stop_cleanly_on_panic() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        default(info);
+        let place = info.location().map_or_else(
+            || "an unknown place".to_string(),
+            |location| format!("{}:{}", location.file(), location.line()),
+        );
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(ToString::to_string)
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        let report = format!(
+            "SozoIDE {} stopped unexpectedly on {} {}\nat {place}\n{}\n",
+            env!("CARGO_PKG_VERSION"),
+            env::consts::OS,
+            env::consts::ARCH,
+            message.chars().take(300).collect::<String>(),
+        );
+        let mut stderr = io::stderr();
+        let _ = write!(
+            stderr,
+            "\n{report}Please report it: {}/issues\n",
+            branding::REPOSITORY
+        );
+        if let Some(log) = directories::ProjectDirs::from("", "", "SozoIDE")
+            .map(|directories| directories.cache_dir().join("crash.log"))
+            && storage::write(&log, &report).is_ok()
+        {
+            let _ = writeln!(stderr, "Kept in {}", log.display());
+        }
+        std::process::exit(101);
+    }));
 }
 
 /// Asks the terminal which image protocol it speaks. Inside tmux the question travels through
@@ -103,14 +168,13 @@ fn tmux_terminal() -> bool {
 }
 
 fn tmux_passthrough_reaches_a_client() -> bool {
-    let Ok(output) = Command::new("tmux")
-        .args(["set", "-p", "allow-passthrough", "on", ";"])
-        .args(["show", "-pv", "allow-passthrough", ";"])
-        .args(["display", "-p", "#{session_attached}"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    else {
+    let Some(output) = process::output(
+        Command::new("tmux")
+            .args(["set", "-p", "allow-passthrough", "on", ";"])
+            .args(["show", "-pv", "allow-passthrough", ";"])
+            .args(["display", "-p", "#{session_attached}"]),
+        process::QUICK,
+    ) else {
         return false;
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -123,39 +187,25 @@ fn tmux_passthrough_reaches_a_client() -> bool {
             .is_some_and(|clients| clients > 0)
 }
 
-fn command_line_root() -> Result<Option<PathBuf>> {
-    let arguments = env::args().skip(1).collect::<Vec<_>>();
-    match arguments.as_slice() {
-        [] => Ok(Some(env::current_dir()?)),
-        [argument] if argument == "--help" || argument == "-h" => {
-            println!(
-                "SozoIDE {}\n\nUsage: sozo [DIRECTORY]\n\nOpen DIRECTORY in SozoIDE. Defaults to the current directory.",
-                env!("CARGO_PKG_VERSION")
-            );
-            Ok(None)
-        }
-        [argument] if argument == "--version" || argument == "-V" => {
-            println!("sozo {}", env!("CARGO_PKG_VERSION"));
-            Ok(None)
-        }
-        [argument] => {
-            let root = argument
-                .parse::<PathBuf>()?
-                .canonicalize()
-                .with_context(|| format!("Could not open directory {argument}"))?;
-            if !root.is_dir() {
-                bail!("{} is not a directory", root.display());
-            }
-            Ok(Some(root))
-        }
-        _ => bail!("Usage: sozo [DIRECTORY]"),
-    }
-}
-
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     while !app.should_quit {
         app.tick();
-        terminal.draw(|frame| ui::draw(frame, app))?;
+        terminal.draw(|frame| {
+            ui::draw(frame, app);
+            // `NO_COLOR` or `high_contrast`: attributes only (TODO 5.2.7).
+            if ui::colourless() {
+                ui::without_colour(frame.buffer_mut());
+            }
+        })?;
+        // Debug builds only: the test of the panic hook asks for a panic here or in a thread.
+        #[cfg(debug_assertions)]
+        match env::var("SOZO_TEST_PANIC").as_deref() {
+            Ok("main") => panic!("asked for by SOZO_TEST_PANIC"),
+            Ok("thread") => {
+                let _ = std::thread::spawn(|| panic!("asked for by SOZO_TEST_PANIC")).join();
+            }
+            _ => {}
+        }
         // Copied text also goes to the terminal's clipboard, which works over SSH.
         if let Some(text) = app.clipboard.take() {
             let backend = terminal.backend_mut();

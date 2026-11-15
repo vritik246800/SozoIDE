@@ -177,13 +177,15 @@ text 'cargo test -q --lib'
 keys Enter
 wait_for 'test result'
 capture editor
-# Ctrl+R from the editor runs the Cargo project in the bottom terminal (F25): Ctrl+J gives the
-# focus back to the editor first.
-keys C-j
+# Ctrl+R from the editor runs the Cargo project in the bottom terminal (F25): F6 gives the
+# focus back to the editor first (in a terminal, Ctrl and a letter go to its program, F37).
+keys F6
 keys C-r
 wait_for 'crew Sozo'
 capture run
 
+# The run left the focus in the terminal: F6 out of it before the panel keys.
+keys F6
 keys C-g
 wait_for 'Staged'
 capture git-changes

@@ -48,6 +48,10 @@ pub struct PdfDocument {
     receiver: Receiver<(usize, Option<PageView>)>,
     /// The page on screen, from 0.
     pub page: usize,
+    /// How far a page drawn as a picture is zoomed (1 fits it) and its middle, 0 to 1
+    /// (TODO 5.1.6).
+    pub zoom: f32,
+    pub centre: (f32, f32),
 }
 
 struct Pages {
@@ -78,7 +82,113 @@ impl PdfDocument {
             sender,
             receiver,
             page: 0,
+            zoom: 1.0,
+            centre: (0.5, 0.5),
         })
+    }
+
+    /// Every line of text of every page: page, line on the page and text (for the search).
+    pub fn lines(&self) -> Vec<(usize, usize, String)> {
+        self.pages
+            .texts
+            .iter()
+            .enumerate()
+            .flat_map(|(page, text)| {
+                text_lines(text)
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(line, text)| (page, line, text))
+            })
+            .collect()
+    }
+
+    /// `+`, `-`, `0` and the Shift+arrows on a page drawn as a picture; false for other keys.
+    pub fn zoom_key(&mut self, character: Option<char>, arrow: Option<(f32, f32)>) -> bool {
+        match (character, arrow) {
+            (Some('+' | '='), _) => self.zoom = (self.zoom * 1.25).min(8.0),
+            (Some('-' | '_'), _) => self.zoom = (self.zoom / 1.25).max(1.0),
+            (Some('0'), _) => self.zoom = 1.0,
+            (_, Some((x, y))) if self.zoom > 1.0 => {
+                let half = 0.5 / self.zoom;
+                self.centre.0 = (self.centre.0 + x * 0.1 / self.zoom).clamp(half, 1.0 - half);
+                self.centre.1 = (self.centre.1 + y * 0.1 / self.zoom).clamp(half, 1.0 - half);
+            }
+            _ => return false,
+        }
+        if self.zoom <= 1.0 {
+            self.centre = (0.5, 0.5);
+        }
+        true
+    }
+
+    /// The part of a page's picture that shows at this zoom.
+    pub fn zoomed(&self, picture: DynamicImage) -> DynamicImage {
+        if self.zoom <= 1.0 {
+            return picture;
+        }
+        let (width, height) = (picture.width(), picture.height());
+        let (part_width, part_height) = (
+            ((width as f32) / self.zoom).max(1.0) as u32,
+            ((height as f32) / self.zoom).max(1.0) as u32,
+        );
+        let x = ((self.centre.0 * width as f32) as u32)
+            .saturating_sub(part_width / 2)
+            .min(width - part_width);
+        let y = ((self.centre.1 * height as f32) as u32)
+            .saturating_sub(part_height / 2)
+            .min(height - part_height);
+        picture.crop_imm(x, y, part_width, part_height)
+    }
+
+    /// The table of contents (`/Outlines`): depth, title and page of each entry, at most 2000
+    /// entries and 16 levels, each entry once (a loop in a hostile file stops there).
+    pub fn outline(&self) -> Vec<(usize, String, usize)> {
+        use hayro::hayro_interpret::hayro_syntax::object::{Array, Dict, String as Text};
+        let pdf = &self.pages.pdf;
+        let ids: Vec<Option<(i32, i32)>> = pdf
+            .pages()
+            .iter()
+            .map(|page| page.raw().obj_id().map(|id| (id.obj_number, id.gen_number)))
+            .collect();
+        let Some(catalog) = pdf.xref().get::<Dict>(pdf.xref().root_id()) else {
+            return Vec::new();
+        };
+        let Some(outlines) = catalog.get::<Dict>(b"Outlines") else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        let mut seen = HashSet::new();
+        let mut stack = vec![(outlines.get::<Dict>(b"First"), 0usize)];
+        while let Some((entry, depth)) = stack.pop() {
+            let Some(entry) = entry else { continue };
+            if found.len() >= 2000 || depth > 16 {
+                break;
+            }
+            if let Some(id) = entry.obj_id()
+                && !seen.insert((id.obj_number, id.gen_number))
+            {
+                continue;
+            }
+            let title = entry
+                .get::<Text>(b"Title")
+                .map(|text| pdf_text(text.as_bytes()))
+                .unwrap_or_default();
+            let destination = entry.get::<Array>(b"Dest").or_else(|| {
+                entry
+                    .get::<Dict>(b"A")
+                    .and_then(|action| action.get::<Array>(b"D"))
+            });
+            let page = destination
+                .and_then(|array| first_reference(array.data()))
+                .and_then(|reference| ids.iter().position(|id| *id == Some(reference)));
+            if let Some(page) = page.filter(|_| !title.trim().is_empty()) {
+                found.push((depth, title, page));
+            }
+            // The next entry after this one's children: pushed first, taken after them.
+            stack.push((entry.get::<Dict>(b"Next"), depth));
+            stack.push((entry.get::<Dict>(b"First"), depth + 1));
+        }
+        found
     }
 
     pub fn pages(&self) -> usize {
@@ -220,6 +330,38 @@ impl Pages {
 
 /// The lines of a page's text without the blank ones around it, and one blank line at most
 /// between paragraphs.
+/// The first `N G R` of an array's bytes: the page a destination points at.
+fn first_reference(data: &[u8]) -> Option<(i32, i32)> {
+    let text = String::from_utf8_lossy(data);
+    let words: Vec<&str> = text
+        .trim_start_matches('[')
+        .split_whitespace()
+        .take(3)
+        .collect();
+    match words[..] {
+        [number, generation, "R"] => Some((number.parse().ok()?, generation.parse().ok()?)),
+        _ => None,
+    }
+}
+
+/// A PDF text string: UTF-16 after its byte order mark, otherwise one byte a character; control
+/// characters left out, at most 200.
+fn pdf_text(bytes: &[u8]) -> String {
+    let text = match bytes {
+        [0xfe, 0xff, rest @ ..] => {
+            let units: Vec<u16> = rest
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_be_bytes(*pair))
+                .collect();
+            String::from_utf16_lossy(&units)
+        }
+        _ => bytes.iter().map(|byte| char::from(*byte)).collect(),
+    };
+    text.chars().filter(|c| !c.is_control()).take(200).collect()
+}
+
 fn text_lines(text: &str) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for line in text.lines().map(str::trim_end) {
@@ -290,9 +432,22 @@ pub fn sample(pages: usize) -> Vec<u8> {
 /// A PDF whose pages draw `contents`, with Helvetica as `/F1`, for the tests.
 #[cfg(test)]
 pub fn sample_pages(contents: &[&str]) -> Vec<u8> {
+    sample_with_outline(contents, &[])
+}
+
+/// The same with a table of contents: a title and the page (from 0) of each entry, all on one
+/// level, the last pointing back at the first as a hostile file might.
+#[cfg(test)]
+pub fn sample_with_outline(contents: &[&str], entries: &[(&str, usize)]) -> Vec<u8> {
     let pages = contents.len();
+    let first = 3 + pages * 2;
+    let catalog = if entries.is_empty() {
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned()
+    } else {
+        format!("<< /Type /Catalog /Pages 2 0 R /Outlines {first} 0 R >>")
+    };
     let mut objects = vec![
-        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        catalog,
         format!(
             "<< /Type /Pages /Kids [{}] /Count {pages} >>",
             (0..pages)
@@ -311,6 +466,20 @@ pub fn sample_pages(contents: &[&str]) -> Vec<u8> {
             "<< /Length {} >>\nstream\n{content}\nendstream",
             content.len()
         ));
+    }
+    if !entries.is_empty() {
+        objects.push(format!(
+            "<< /Type /Outlines /First {} 0 R /Count {} >>",
+            first + 1,
+            entries.len()
+        ));
+        for (index, (title, page)) in entries.iter().enumerate() {
+            let next = first + 1 + (index + 1) % entries.len();
+            objects.push(format!(
+                "<< /Title ({title}) /Parent {first} 0 R /Next {next} 0 R /Dest [{} 0 R /Fit] >>",
+                3 + page * 2
+            ));
+        }
     }
     let mut pdf = String::from("%PDF-1.4\n");
     let mut offsets = Vec::new();
@@ -391,5 +560,27 @@ mod tests {
         assert_eq!(document.made(), 3, "pages 12, 14 and 15");
         assert_eq!(window(0, 1), 0..=0);
         assert_eq!(window(5, 100), 4..=15);
+    }
+
+    #[test]
+    fn the_table_of_contents_is_read_once_each_and_points_at_pages() {
+        let document = PdfDocument::open(sample_with_outline(
+            &[SQUARE, SQUARE, SQUARE],
+            &[("Intro", 0), ("Middle", 1), ("End", 2)],
+        ))
+        .unwrap();
+        assert_eq!(
+            document.outline(),
+            [
+                (0, "Intro".to_owned(), 0),
+                (0, "Middle".to_owned(), 1),
+                (0, "End".to_owned(), 2)
+            ],
+            "the loop back to the first entry stops"
+        );
+        assert!(PdfDocument::open(sample(2)).unwrap().outline().is_empty());
+        assert_eq!(pdf_text(b"\xfe\xff\x00H\x00i\x00\x07"), "Hi");
+        assert_eq!(first_reference(b"[12 0 R /XYZ 0 0 0]"), Some((12, 0)));
+        assert_eq!(first_reference(b"[/Name]"), None);
     }
 }

@@ -4,7 +4,7 @@
 
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
@@ -45,6 +45,27 @@ pub enum Pending {
         path: PathBuf,
         version: u64,
         goal: super::Goal,
+    },
+    PrepareRename {
+        path: PathBuf,
+        version: u64,
+    },
+    Edit {
+        path: PathBuf,
+        version: u64,
+        goal: super::EditGoal,
+    },
+    Actions {
+        path: PathBuf,
+        version: u64,
+    },
+    Command,
+    Signature {
+        path: PathBuf,
+        version: u64,
+    },
+    Symbols {
+        path: Option<PathBuf>,
     },
 }
 
@@ -123,15 +144,33 @@ impl Client {
                         "implementation": {"linkSupport": true},
                         "hover": {"contentFormat": ["markdown", "plaintext"]},
                         "publishDiagnostics": {},
+                        "rename": {"prepareSupport": true},
+                        "formatting": {},
+                        "rangeFormatting": {},
+                        "codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["", "quickfix", "refactor", "source"]}}},
+                        "signatureHelp": {"signatureInformation": {"parameterInformation": {"labelOffsetSupport": true}}},
+                        "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
                     },
                     "experimental": {"serverStatusNotification": true},
-                    "workspace": {"workspaceFolders": true, "configuration": true},
+                    "workspace": {
+                        "workspaceFolders": true,
+                        "configuration": true,
+                        "applyEdit": true,
+                        "workspaceEdit": {"documentChanges": true},
+                        "symbol": {},
+                        "executeCommand": {},
+                    },
                     "general": {"positionEncodings": ["utf-16"]},
                 },
             }),
         )?;
         client.pending.insert(id, Pending::Initialize);
         Ok(client)
+    }
+
+    /// The id of the server's process, to say what it takes (TODO 3.2.3).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     /// The messages the server sent since the last call.
@@ -281,7 +320,8 @@ fn read_errors(mut reader: impl BufRead, last: &Mutex<String>) {
     let mut line = Vec::new();
     loop {
         line.clear();
-        match reader.read_until(b'\n', &mut line) {
+        // The rest of a line longer than this is read as the next one.
+        match Read::take(&mut reader, MOST_HEADER).read_until(b'\n', &mut line) {
             Ok(0) | Err(_) => return,
             Ok(_) => {}
         }
@@ -295,13 +335,19 @@ fn read_errors(mut reader: impl BufRead, last: &Mutex<String>) {
     }
 }
 
+/// The largest message read from a server (the answers of a real one stay far below it) and
+/// the longest header line.
+const MOST_MESSAGE: usize = 64 * 1024 * 1024;
+const MOST_HEADER: u64 = 8 * 1024;
+
 /// Reads `Content-Length` frames until the server closes its output.
 pub(crate) fn read_messages(mut reader: impl BufRead, sender: &Sender<Value>) {
     loop {
         let mut length = None;
         loop {
+            // A header is a few bytes: a line that never ends is not read into memory.
             let mut header = String::new();
-            match reader.read_line(&mut header) {
+            match Read::take(&mut reader, MOST_HEADER).read_line(&mut header) {
                 Ok(0) | Err(_) => return,
                 Ok(_) => {}
             }
@@ -319,6 +365,18 @@ pub(crate) fn read_messages(mut reader: impl BufRead, sender: &Sender<Value>) {
         let Some(length) = length else {
             continue;
         };
+        // What a server says it will send is not memory to set aside: a message larger than
+        // any real answer is read and dropped, and the ones after it still arrive.
+        if length > MOST_MESSAGE {
+            let skipped = std::io::copy(
+                &mut Read::take(&mut reader, length as u64),
+                &mut std::io::sink(),
+            );
+            if skipped.is_ok_and(|bytes| bytes == length as u64) {
+                continue;
+            }
+            return;
+        }
         let mut body = vec![0; length];
         if reader.read_exact(&mut body).is_err() {
             return;
@@ -350,6 +408,36 @@ mod tests {
         let messages = receiver.iter().collect::<Vec<_>>();
         assert_eq!(messages.len(), 2, "the cut-off third is dropped");
         assert_eq!(messages[1]["params"]["message"], "é");
+    }
+
+    #[test]
+    fn a_server_cannot_make_the_reader_set_aside_all_the_memory() {
+        let after = r#"{"id":2,"result":null}"#;
+        let frame = |length: usize| format!("Content-Length: {length}\r\n\r\n");
+        // Says it sends more than the limit, and does: dropped, and the next one arrives.
+        let mut stream = frame(MOST_MESSAGE + 1).into_bytes();
+        stream.resize(stream.len() + MOST_MESSAGE + 1, b' ');
+        stream.extend_from_slice(format!("{}{after}", frame(after.len())).as_bytes());
+        let (sender, receiver) = channel();
+        read_messages(stream.as_slice(), &sender);
+        drop(sender);
+        let messages = receiver.iter().collect::<Vec<_>>();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["id"], 2);
+
+        // Says it sends all the memory there is and sends nothing: nothing is set aside
+        // (this would stop the test with an allocation of 16 EiB) and the reading ends.
+        let (sender, receiver) = channel();
+        read_messages(frame(usize::MAX).as_bytes(), &sender);
+        drop(sender);
+        assert_eq!(receiver.iter().count(), 0);
+
+        // A header that never ends is not kept.
+        let endless = vec![b'x'; MOST_HEADER as usize * 4];
+        let (sender, receiver) = channel();
+        read_messages(endless.as_slice(), &sender);
+        drop(sender);
+        assert_eq!(receiver.iter().count(), 0);
     }
 
     #[test]

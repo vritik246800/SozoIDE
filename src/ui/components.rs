@@ -143,6 +143,79 @@ pub(crate) fn panel_block(title: String, focused: bool) -> Block<'static> {
         .style(Style::default().fg(TEXT))
 }
 
+/// The cells of the border of `area`, clockwise from its top left corner.
+fn perimeter(area: Rect) -> Vec<(u16, u16)> {
+    let (left, top) = (area.x, area.y);
+    let (right, bottom) = (area.right() - 1, area.bottom() - 1);
+    let mut cells: Vec<(u16, u16)> = (left..=right).map(|x| (x, top)).collect();
+    cells.extend((top + 1..=bottom).map(|y| (right, y)));
+    cells.extend((left..right).rev().map(|x| (x, bottom)));
+    cells.extend((top + 1..bottom).rev().map(|y| (left, y)));
+    cells
+}
+
+/// The focused border of `area` traced from its top left corner (`FOCUS`): the cells past
+/// `progress` of the way round keep the colour of a border without focus. Only cells in
+/// `ACTIVE` change, so a title or a mark on the border keeps its own colour.
+pub(crate) fn trace_border(buffer: &mut Buffer, area: Rect, progress: f32) {
+    if progress >= 1.0 || area.width < 2 || area.height < 2 {
+        return;
+    }
+    let cells = perimeter(area.intersection(buffer.area));
+    let lit = (cells.len() as f32 * progress.max(0.0)).round() as usize;
+    for &(x, y) in cells.iter().skip(lit) {
+        if let Some(cell) = buffer.cell_mut((x, y))
+            && cell.fg == ACTIVE
+        {
+            cell.set_fg(BORDER);
+        }
+    }
+}
+
+/// The outline of a panel on its way to its new place (`GLIDE`).
+pub(crate) fn render_outline(buffer: &mut Buffer, area: Rect) {
+    let area = area.intersection(buffer.area);
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let (right, bottom) = (area.right() - 1, area.bottom() - 1);
+    for (x, y) in perimeter(area) {
+        let symbol = match (x, y) {
+            _ if (x, y) == (area.x, area.y) => "╭",
+            _ if (x, y) == (right, area.y) => "╮",
+            _ if (x, y) == (area.x, bottom) => "╰",
+            _ if (x, y) == (right, bottom) => "╯",
+            _ if y == area.y || y == bottom => "─",
+            _ => "│",
+        };
+        if let Some(cell) = buffer.cell_mut((x, y)) {
+            cell.set_symbol(symbol).set_fg(ACTIVE);
+        }
+    }
+}
+
+/// `text` in `width` columns: whole when it fits, else with `…` in the middle so that its end
+/// (the name of a folder or a file) stays whole (`UX.md` §1.22).
+pub(crate) fn middle_ellipsis(text: &str, width: usize) -> String {
+    let characters: Vec<char> = text.chars().collect();
+    if characters.len() <= width {
+        return text.to_owned();
+    }
+    if width <= 1 {
+        return "…".repeat(width);
+    }
+    // The end keeps the last part after a separator when it fits in two thirds.
+    let name = text
+        .rfind(['/', '\\'])
+        .map_or(characters.len(), |at| text[at..].chars().count());
+    let tail = name.min(width * 2 / 3).max((width - 1) / 2);
+    let head = width - 1 - tail;
+    let mut shortened: String = characters[..head].iter().collect();
+    shortened.push('…');
+    shortened.extend(&characters[characters.len() - tail..]);
+    shortened
+}
+
 pub(crate) fn render_handle(frame: &mut Frame, area: Rect, vertical: bool) {
     // Rows of one cell, or one row across.
     let lines = if vertical {
@@ -282,6 +355,23 @@ pub(crate) fn busy(spinner: &'static str, text: &str) -> Line<'static> {
         Span::styled(spinner, Style::default().fg(ACTIVE)),
         Span::raw(format!(" {text}")),
     ])
+}
+
+#[cfg(test)]
+mod middle_tests {
+    use super::middle_ellipsis;
+
+    #[test]
+    fn a_long_path_keeps_its_name_whole_with_dots_in_the_middle() {
+        assert_eq!(middle_ellipsis("/a/demo", 20), "/a/demo");
+        let path = "/private/tmp/claude-501/some-very-long-folder/demo";
+        let short = middle_ellipsis(path, 24);
+        assert_eq!(short.chars().count(), 24);
+        assert!(short.ends_with("/demo") && short.contains('…'), "{short}");
+        assert_eq!(middle_ellipsis("abcdef", 1), "…");
+        assert_eq!(middle_ellipsis("abcdef", 0), "");
+        assert_eq!(middle_ellipsis("ééééééééé", 5).chars().count(), 5);
+    }
 }
 
 #[cfg(test)]

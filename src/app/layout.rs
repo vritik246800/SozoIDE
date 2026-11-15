@@ -148,6 +148,12 @@ impl Default for Tile {
 }
 
 impl Tile {
+    /// The tree without `panel`, for a small window (TODO 5.3.2); unchanged when it would be
+    /// empty.
+    pub fn leaving_out(self, panel: Panel) -> Self {
+        self.clone().without(panel).unwrap_or(self)
+    }
+
     fn split(direction: SplitDirection, first: Self, second: Self) -> Self {
         Self::Split {
             direction,
@@ -543,6 +549,17 @@ pub struct Regions {
     pub right_terminal: Rect,
     pub header_help: Rect,
     pub header_about: Rect,
+    /// The branch segment and the message of the status bar (TODO 7.3.3).
+    pub footer_branch: Rect,
+    pub footer_message: Rect,
+    /// `Ln, Col`, the line end and the indentation (TODO 2.3.3).
+    pub footer_place: Rect,
+    pub footer_line_end: Rect,
+    pub footer_indent: Rect,
+    /// The problems of the project in the status bar (TODO 3.3.2).
+    pub footer_problems: Rect,
+    /// The rows of the debugger's panel that a click acts on (TODO 3.3.3).
+    pub debug_rows: Vec<(super::DebugTarget, Rect)>,
     pub update_install: Rect,
     pub update_skip: Rect,
     pub about_repository: Rect,
@@ -569,6 +586,8 @@ pub struct Regions {
     pub search_next: Rect,
     pub tab_items: Vec<(usize, Rect, Rect)>,
     pub entry_menu_items: Vec<(super::EntryAction, Rect)>,
+    /// The buttons on the Explorer's title (TODO 7.3.4).
+    pub explorer_actions: Vec<(super::ExplorerAction, Rect)>,
     /// The rows of the preview beside the editor's menu (Q73) that a click acts on.
     pub preview_rows: Vec<(super::PreviewRow, Rect)>,
     /// The Properties dialog: a click outside it closes it.
@@ -580,7 +599,9 @@ pub struct Regions {
     /// The tabs of the terminals: panel, tab, the tab and its `x` (empty when it has none).
     pub terminal_tabs: Vec<(Focus, usize, Rect, Rect)>,
     /// The `+` of the bottom terminal.
-    pub terminal_add: Rect,
+    /// The `+` of each terminal panel (F04, TODO 5.2.4), and its split button.
+    pub terminal_add: Vec<(Focus, Rect)>,
+    pub terminal_split: Vec<(Focus, Rect)>,
     /// The keys Help lets change (F29), and its Reset button.
     pub help_keys: Vec<(super::Action, Rect)>,
     pub help_reset: Rect,

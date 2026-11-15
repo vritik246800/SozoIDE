@@ -37,7 +37,19 @@ pub fn render(frame: &mut Frame, controller: &mut DatabaseController, area: Rect
     controller.regions.results = Rect::default();
     controller.regions.actions.clear();
     controller.regions.form_fields.clear();
-    let block = panel_block(format!(" Database [{key}] "), true);
+    // The title says which connection is active (`UX.md` §1.22).
+    let connection = controller.panel.try_lock().ok().and_then(|panel| {
+        let id = panel.active_connection.as_deref()?;
+        let connection = panel
+            .connections
+            .iter()
+            .find(|connection| connection.id == id)?;
+        Some(format!(": {}", connection.name))
+    });
+    let block = panel_block(
+        format!(" Database{} [{key}] ", connection.unwrap_or_default()),
+        true,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let [tabs, toolbar, body, status] = Layout::vertical([
@@ -81,6 +93,129 @@ pub fn render(frame: &mut Frame, controller: &mut DatabaseController, area: Rect
         render_workspace(frame, controller, &panel, toolbar, body);
     }
     render_status(frame, controller, status, Some(&panel));
+    render_boxes(frame, controller, &panel, area);
+}
+
+/// The boxes of the results over the panel: the value typed for a cell, the statement waiting
+/// for `Enter`, and a cell shown whole (TODO 4.1.11, 4.3.2).
+fn render_boxes(
+    frame: &mut Frame,
+    controller: &DatabaseController,
+    panel: &DatabasePanel,
+    area: Rect,
+) {
+    let (title, lines, colour): (&str, Vec<Line>, Color) =
+        if let Some(statement) = &controller.confirm {
+            let mut lines = vec![Line::from(Span::styled(
+                statement.sql.clone(),
+                Style::default().fg(TEXT),
+            ))];
+            for (index, value) in statement.parameters.iter().enumerate() {
+                lines.push(Line::from(Span::styled(
+                    format!("  {} = {}", index + 1, truncate(&format!("{value:?}"), 200)),
+                    Style::default().fg(MUTED),
+                )));
+            }
+            lines.push(Line::default());
+            lines.push(Line::from(format!(
+                "{} runs it, {} does not",
+                key("Enter"),
+                key("Esc")
+            )));
+            (" Run this statement? ", lines, Color::Yellow)
+        } else if let Some(text) = &controller.cell_edit {
+            (
+                " New value ",
+                vec![
+                    Line::from(format!("{text}_")),
+                    Line::default(),
+                    Line::from(Span::styled(
+                        format!(
+                            "NULL alone is NULL. {} shows the UPDATE, {} cancels",
+                            key("Enter"),
+                            key("Esc")
+                        ),
+                        Style::default().fg(MUTED),
+                    )),
+                ],
+                ACTIVE,
+            )
+        } else if controller.cell_popup {
+            let value = panel
+                .results
+                .as_ref()
+                .and_then(|result| result.rows.get(controller.cell.0)?.get(controller.cell.1));
+            let Some(value) = value else {
+                return;
+            };
+            (
+                " Cell ",
+                whole_value(value)
+                    .lines()
+                    .map(|line| Line::from(line.to_owned()))
+                    .collect(),
+                ACTIVE,
+            )
+        } else {
+            return;
+        };
+    let box_area = centered(area, 70, 60);
+    frame.render_widget(ratatui::widgets::Clear, box_area);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(colour))
+        .title(title);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(block),
+        box_area,
+    );
+}
+
+/// A value as a box shows it: JSON formatted, bytes in hexadecimal, text whole.
+fn whole_value(value: &DatabaseValue) -> String {
+    match value {
+        DatabaseValue::Bytes(bytes) => bytes
+            .chunks(16)
+            .map(|line| {
+                line.iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        DatabaseValue::Text(text) => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .filter(|json| json.is_object() || json.is_array())
+            .and_then(|json| serde_json::to_string_pretty(&json).ok())
+            .unwrap_or_else(|| text.clone()),
+        other => other.to_string(),
+    }
+}
+
+/// Whether a connection is encrypted, as the list shows it.
+fn tls_label(connection: &crate::database::ConnectionConfig) -> &'static str {
+    use crate::database::{Driver, Tls};
+    if connection.driver == Driver::SQLite {
+        return "";
+    }
+    let url = connection.url.as_deref().unwrap_or("").to_ascii_lowercase();
+    let written = url.split(['?', '&']).find_map(|pair| {
+        pair.strip_prefix("sslmode=")
+            .or_else(|| pair.strip_prefix("ssl-mode="))
+    });
+    match written {
+        Some("disable" | "disabled") => "  no TLS",
+        Some("allow" | "prefer" | "preferred") => "  TLS if offered",
+        Some(_) => "  TLS",
+        None => match connection.tls {
+            Tls::Disable => "  no TLS",
+            Tls::Prefer => "  TLS if offered",
+            Tls::Require | Tls::Verify => "  TLS",
+        },
+    }
 }
 
 fn render_connections(
@@ -111,7 +246,7 @@ fn render_connections(
     );
     if panel.connections.is_empty() {
         frame.render_widget(
-            Paragraph::new("No connections. Select Add Connection or press N to create one.")
+            Paragraph::new(" No connections yet. N: add one (SQLite, PostgreSQL or MySQL).")
                 .style(Style::default().fg(MUTED)),
             body,
         );
@@ -137,7 +272,7 @@ fn render_connections(
             };
             Line::from(Span::styled(
                 format!(
-                    "{} {}  {}  {}",
+                    "{} {}  {}  {}{}",
                     if active { "*" } else { " " },
                     connection.name,
                     connection.driver.label(),
@@ -145,7 +280,8 @@ fn render_connections(
                         .database
                         .as_deref()
                         .or(connection.host.as_deref())
-                        .unwrap_or("URL")
+                        .unwrap_or("URL"),
+                    tls_label(connection)
                 ),
                 style,
             ))
@@ -176,9 +312,24 @@ fn render_workspace(
         ("Cancel".to_owned(), DatabaseAction::CancelQuery),
         ("Copy SQL".to_owned(), DatabaseAction::Copy),
         ("Rebuild".to_owned(), DatabaseAction::Rebuild),
+        (
+            format!("Explain [{}]", key("Alt+E")),
+            DatabaseAction::Explain,
+        ),
         ("Clear results".to_owned(), DatabaseAction::ClearResults),
     ] {
         button(frame, controller, &mut x, toolbar.y, &label, action, false);
+    }
+    if panel.results.as_ref().is_some_and(|result| result.more) {
+        button(
+            frame,
+            controller,
+            &mut x,
+            toolbar.y,
+            &format!("Load more [{}]", key("L")),
+            DatabaseAction::LoadMore,
+            false,
+        );
     }
     let Some(catalog) = &panel.catalog else {
         controller.regions.content = body;
@@ -672,7 +823,37 @@ fn render_sql(
             Style::default().fg(MUTED),
         )),
     };
-    frame.render_widget(Paragraph::new(note), Rect { height: 1, ..area });
+    // The SQL tabs first (`Alt+T` a new one, `Alt+1`… one of them), then the note.
+    let mut x = area.x;
+    for index in 0..panel.sql_tabs.len() {
+        button(
+            frame,
+            controller,
+            &mut x,
+            area.y,
+            &(index + 1).to_string(),
+            DatabaseAction::SqlTab(index),
+            index == panel.sql_tab,
+        );
+    }
+    button(
+        frame,
+        controller,
+        &mut x,
+        area.y,
+        "+",
+        DatabaseAction::NewSqlTab,
+        false,
+    );
+    frame.render_widget(
+        Paragraph::new(note),
+        Rect {
+            x,
+            width: area.right().saturating_sub(x),
+            height: 1,
+            ..area
+        },
+    );
     // The last queries of the session under the text, newest first.
     let history = panel
         .history
@@ -738,6 +919,33 @@ fn render_sql(
         if x < text.right() && y < text.bottom() {
             frame.set_cursor_position((x, y));
         }
+        // The names for the word before the cursor, under its line (`Ctrl+Space`).
+        if !panel.completions.is_empty() && y + 1 < area.bottom() {
+            let spans: Vec<Span> = panel
+                .completions
+                .iter()
+                .enumerate()
+                .flat_map(|(index, name)| {
+                    let style = if index == panel.completion {
+                        Style::default().fg(ACTIVE).add_modifier(Modifier::REVERSED)
+                    } else {
+                        Style::default().fg(TEXT)
+                    };
+                    [Span::styled(format!(" {name} "), style), Span::raw(" ")]
+                })
+                .collect();
+            let line = Rect::new(
+                x.min(text.right().saturating_sub(1)),
+                y + 1,
+                text.right().saturating_sub(x).max(1),
+                1,
+            );
+            frame.render_widget(ratatui::widgets::Clear, line);
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)).style(Style::default().fg(TEXT)),
+                line,
+            );
+        }
     }
 }
 
@@ -765,13 +973,16 @@ fn render_results(
         return;
     };
     let title = format!(
-        " Results: {} row{} in {} ms ",
+        " Results: {} row{}{} in {} ms ",
         result.rows.len(),
         if result.rows.len() == 1 { "" } else { "s" },
+        if result.more { " and more" } else { "" },
         result.duration.as_millis()
     );
-    let block = focus_block(title, focused)
-        .title_bottom(Line::from(" Arrows, wheel, Shift+wheel: scroll ").right_aligned());
+    let block = focus_block(title, focused).title_bottom(
+        Line::from(" Enter edit  Del delete  + copy row  Space whole  C/J/M copy (Shift: file)  L more  # count ")
+            .right_aligned(),
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if result.columns.is_empty() {
@@ -802,10 +1013,34 @@ fn render_results(
         .result_horizontal_scroll
         .min(total.saturating_sub(room));
     let visible = usize::from(inner.height.saturating_sub(2));
+    // The cell under the cursor stays in sight, down and sideways.
+    controller.cell.0 = controller.cell.0.min(result.rows.len().saturating_sub(1));
+    controller.cell.1 = controller
+        .cell
+        .1
+        .min(result.columns.len().saturating_sub(1));
+    if std::mem::take(&mut controller.follow_cell) {
+        if controller.cell.0 < controller.result_scroll {
+            controller.result_scroll = controller.cell.0;
+        } else if visible > 0 && controller.cell.0 >= controller.result_scroll + visible {
+            controller.result_scroll = controller.cell.0 + 1 - visible;
+        }
+        let start = widths[..controller.cell.1]
+            .iter()
+            .map(|width| width + 3)
+            .sum::<usize>();
+        let end = start + widths.get(controller.cell.1).map_or(0, |width| width + 3);
+        if start < controller.result_horizontal_scroll {
+            controller.result_horizontal_scroll = start;
+        } else if end > controller.result_horizontal_scroll + room {
+            controller.result_horizontal_scroll = end.saturating_sub(room).min(start);
+        }
+    }
     controller.result_scroll = controller
         .result_scroll
         .min(result.rows.len().saturating_sub(visible));
     let scroll = controller.result_horizontal_scroll;
+    let chosen = controller.cell;
     let line = |number: Span<'static>, cells: Vec<Span<'static>>| {
         let mut spans = vec![number];
         spans.extend(skip_columns(cells, scroll));
@@ -853,9 +1088,10 @@ fn render_results(
         let cells = row
             .iter()
             .zip(&widths)
-            .flat_map(|(value, width)| {
+            .enumerate()
+            .flat_map(|(column, (value, width))| {
                 let shown = text(value);
-                let (cell, style) = match value {
+                let (cell, mut style) = match value {
                     DatabaseValue::Null => (
                         format!("{shown:<width$} "),
                         Style::default().fg(MUTED).add_modifier(Modifier::ITALIC),
@@ -865,6 +1101,13 @@ fn render_results(
                     }
                     _ => (format!("{shown:<width$} "), Style::default().fg(TEXT)),
                 };
+                if (index, column) == chosen {
+                    style = style.add_modifier(if focused {
+                        Modifier::REVERSED
+                    } else {
+                        Modifier::UNDERLINED
+                    });
+                }
                 [
                     Span::styled("│ ", Style::default().fg(BORDER)),
                     Span::styled(cell, style),
@@ -949,10 +1192,11 @@ fn render_form_fields(frame: &mut Frame, controller: &mut DatabaseController, in
             ConnectionField::Port => form.port.clone(),
             ConnectionField::Username => form.username.clone(),
             ConnectionField::Password => form.password.clone(),
+            ConnectionField::Tls => form.tls.label().to_owned(),
         };
         let shown = if field.is_secret() {
             "*".repeat(value.chars().count())
-        } else if field == ConnectionField::Driver {
+        } else if matches!(field, ConnectionField::Driver | ConnectionField::Tls) {
             format!("< {value} >")
         } else {
             value
@@ -967,6 +1211,14 @@ fn render_form_fields(frame: &mut Frame, controller: &mut DatabaseController, in
             rows[index],
         );
         controller.regions.form_fields.push((field, rows[index]));
+    }
+    if let Some(warning) = form.plain_text_warning() {
+        frame.render_widget(
+            Paragraph::new(warning)
+                .wrap(ratatui::widgets::Wrap { trim: true })
+                .style(Style::default().fg(Color::Yellow)),
+            rows[ConnectionField::ALL.len()],
+        );
     }
     let mut x = rows[ConnectionField::ALL.len() + 1].x;
     let y = rows[ConnectionField::ALL.len() + 1].y;
