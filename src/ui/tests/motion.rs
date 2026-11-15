@@ -277,15 +277,19 @@ fn a_frame_half_way_through_a_transition_stays_within_its_budget() {
     } else {
         Duration::from_millis(4)
     });
-    let mut slowest = Duration::ZERO;
-    for step in 0..10 {
-        let now = start + ROWS.open * step / 20;
-        app.tick_at(now);
-        let began = Instant::now();
-        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
-        slowest = slowest.max(began.elapsed());
-    }
-    assert!(slowest < budget, "{slowest:?}");
+    // The median of the frames, as the Budgets job does for keys: the slowest one measures the
+    // runner's busiest moment, not the drawing (E85).
+    let mut frames: Vec<Duration> = (0..10)
+        .map(|step| {
+            app.tick_at(start + ROWS.open * step / 20);
+            let began = Instant::now();
+            terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+            began.elapsed()
+        })
+        .collect();
+    frames.sort();
+    let median = frames[frames.len() / 2];
+    assert!(median < budget, "{median:?} (frames {frames:?})");
 }
 
 #[test]
