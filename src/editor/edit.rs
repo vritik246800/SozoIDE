@@ -950,12 +950,23 @@ mod tests {
         let mut file = OpenFile::load(path, &mut Picker::halfblocks()).unwrap();
         assert!(started.elapsed() < open, "{:?} to open", started.elapsed());
         assert!(file.colouring(), "the colours come from a thread");
-        // A key while the colours are on their way, and once they arrive.
-        let key = budget(16);
-        let started = Instant::now();
+        // A key while the colours are on their way, and once they arrive: the median of 9, as
+        // the Budgets job does, since one key alone measures the runner's busiest moment (E85).
+        let median_key = |file: &mut OpenFile, letter: char| {
+            let mut times: Vec<Duration> = (0..9)
+                .map(|_| {
+                    let started = Instant::now();
+                    file.insert(letter);
+                    started.elapsed()
+                })
+                .collect();
+            times.sort();
+            times[times.len() / 2]
+        };
         file.move_cursor_to(10_000, 0);
-        file.insert('x');
-        assert!(started.elapsed() < key, "{:?} for a key", started.elapsed());
+        let key = budget(16);
+        let took = median_key(&mut file, 'x');
+        assert!(took < key, "{took:?} for a key");
         let deadline = Instant::now() + Duration::from_secs(60);
         while file.colouring() {
             assert!(Instant::now() < deadline, "the colours never came");
@@ -967,8 +978,7 @@ mod tests {
             "coloured once they arrive"
         );
         let key = budget(16);
-        let started = Instant::now();
-        file.insert('y');
-        assert!(started.elapsed() < key, "{:?} for a key", started.elapsed());
+        let took = median_key(&mut file, 'y');
+        assert!(took < key, "{took:?} for a key");
     }
 }
