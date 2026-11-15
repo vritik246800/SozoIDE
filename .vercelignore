@@ -1,8 +1,10 @@
-# Upload only what the landing page build needs (the branding and the version of the app): never
-# target/, Docs/ or CLAUDE.md.
+# Upload only what the landing page build needs (the branding, the version, the release notes and
+# the README's shortcuts): never target/, Docs/ or CLAUDE.md. A file the site reads with
+# readFileSync goes here too (ERRORS.md E87).
 /*
 !/vercel.json
 !/Cargo.toml
+!/README.md
 !/site
 /site/node_modules
 /site/dist
@@ -10,3 +12,6 @@
 !/src
 /src/*
 !/src/branding.rs
+!/src/update
+/src/update/*
+!/src/update/notes.rs

@@ -7,7 +7,7 @@
 import { createServer } from 'node:http';
 import { readFileSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { join, extname, resolve } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 const dist = resolve(import.meta.dirname, '../dist');
 const base = '/SozoIDE';
@@ -46,6 +46,27 @@ for (const page of pages) {
   }
   for (const [tag] of html.matchAll(/<a\b[^>]*target="_blank"[^>]*>/g)) {
     if (!/rel="[^"]*noopener/.test(tag)) fail(`${name}: ${tag} has no rel="noopener"`);
+  }
+}
+
+// --- What the Vercel upload has ------------------------------------------------------------
+// The .vercelignore is an allowlist: a file outside site/ that a page reads must pass it, or the
+// Vercel build stops with ENOENT while CI and Pages, with the whole repository, see nothing (E87).
+const repository = resolve(import.meta.dirname, '../..');
+const sources = [];
+const walkSources = (folder) => {
+  for (const entry of readdirSync(folder)) {
+    const path = join(folder, entry);
+    if (statSync(path).isDirectory()) walkSources(path);
+    else if (/\.(astro|ts|mjs)$/.test(entry)) sources.push(path);
+  }
+};
+walkSources(resolve(import.meta.dirname, '../src'));
+for (const source of sources) {
+  for (const [, file] of readFileSync(source, 'utf8').matchAll(/process\.cwd\(\), '\.\.\/([^']+)'/g)) {
+    const ignored = spawnSync('git', ['-c', `core.excludesFile=${join(repository, '.vercelignore')}`, 'check-ignore', '--no-index', '-q', '--', file], { cwd: repository });
+    if (ignored.status === 0) fail(`${source.slice(repository.length + 1)} reads ${file}, which .vercelignore leaves out of the Vercel upload`);
+    else if (ignored.status !== 1) fail(`git check-ignore could not say whether Vercel gets ${file}`);
   }
 }
 

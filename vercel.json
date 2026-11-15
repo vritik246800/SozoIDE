@@ -5,7 +5,7 @@
   "buildCommand": "npm run build --prefix site",
   "outputDirectory": "site/dist",
   "git": {
-    "deploymentEnabled": { "preview": false }
+    "deploymentEnabled": { "**": false, "main": true }
   },
   "headers": [
     {
