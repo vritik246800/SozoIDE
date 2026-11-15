@@ -9,8 +9,8 @@ on:
   schedule:
     - cron: '17 5 * * 1'
 
-# Actions of others are pinned to a commit, with the version beside it (Dependabot moves
-# both); the ones GitHub publishes stay on their major version.
+# Actions of others are pinned to a commit, with the version beside it (moved by hand, after 7
+# days); the ones GitHub publishes stay on their major version.
 permissions:
   contents: read
 
