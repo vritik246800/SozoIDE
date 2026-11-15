@@ -395,6 +395,8 @@ fn terminal_tabs_sit_in_the_border_and_answer_to_the_mouse() {
     let mut app = App::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap();
     app.show_bottom_terminal = true;
     app.show_right_terminal = true;
+    // Room for the panel's title next to tabs with a title (`1 cmd` on Windows).
+    app.right_terminal_width = 80;
     settle(&mut app);
     // Wide enough for every tab with a shell's title ("1 Administrator:" on Windows, E85).
     let mut terminal = Terminal::new(TestBackend::new(260, 40)).unwrap();
