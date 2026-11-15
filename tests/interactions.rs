@@ -128,9 +128,9 @@ fn keyboard_mouse_tabs_and_panels_work_in_a_real_pty() {
     send(b"\x1bOP");
     wait_for_output(&output, "Help - all commands");
     send(b"\x1b");
-    // F2 renames in the text of the editor (Q94): About from the bottom terminal.
-    send(b"\x0a");
-    wait_for_output(&output, "Bottom terminal");
+    // F2 renames in the editor and the Explorer (Q94): About from Source Control. Not from the
+    // bottom terminal: Ctrl+J is a line feed, which Windows reads as Enter (E85).
+    send(b"\x07");
     send(b"\x1bOQ");
     wait_for_output(&output, "Valabdas");
     send(b"\x1b");
