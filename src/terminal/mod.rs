@@ -1,7 +1,7 @@
 use std::{
     io::{Read, Write},
     path::Path,
-    process::{Command, Stdio},
+    process::Command,
     sync::{Arc, Mutex, RwLock},
     thread,
 };
@@ -14,10 +14,23 @@ use vt100::{MouseProtocolEncoding, MouseProtocolMode, Parser, Screen};
 /// A PTY and the shell running in it.
 type Shell = (Box<dyn MasterPty + Send>, Box<dyn Child>);
 
-/// Rows of history a shell keeps (F37).
-const SCROLLBACK: usize = 10_000;
+mod find;
+#[cfg(test)]
+pub use find::link_in;
+pub use find::{Link, TerminalSearch, find_in, web_address};
+
+/// Rows of history a shell keeps (F37), unless `terminal_scrollback` in the settings says.
+fn scrollback_rows() -> usize {
+    crate::settings::get().terminal_scrollback
+}
+/// The links of a program's output (OSC 8) remembered for a click.
+const LINKS_KEPT: usize = 64;
 /// Rows a turn of the wheel moves where it scrolls.
 const WHEEL_ROWS: usize = 3;
+/// The most a program puts on the clipboard at once (OSC 52, in base64), and the copies kept
+/// until the app takes them.
+const COPY_LIMIT: usize = 1024 * 1024;
+const COPIES_WAITING: usize = 16;
 
 /// What the program in a terminal asked of it and the parser cannot answer alone (F37).
 #[derive(Default)]
@@ -26,6 +39,14 @@ pub struct Replies {
     pending: Vec<u8>,
     /// Text it put on the clipboard (OSC 52), in base64.
     copied: Vec<Vec<u8>>,
+    /// The title it set (OSC 0/2) and the folder it said it is in (OSC 7), cleaned.
+    title: Option<String>,
+    folder: Option<std::path::PathBuf>,
+    /// Links it gave (OSC 8): their text and address; and where the open one started.
+    links: Vec<(String, String)>,
+    link_start: Option<(u16, u16, String)>,
+    /// It sent `ESC [3J`: the history goes after this chunk.
+    clear: bool,
 }
 
 impl vt100::Callbacks for Replies {
@@ -55,13 +76,56 @@ impl vt100::Callbacks for Replies {
                 format!("\x1bP>|SozoIDE {}\x1b\\", env!("CARGO_PKG_VERSION"))
             }
             (None, 't', 18) => format!("\x1b[8;{rows};{columns}t"),
+            (None, 'J', 3) => {
+                self.clear = true;
+                return;
+            }
             _ => return,
         };
         self.pending.extend_from_slice(reply.as_bytes());
     }
 
+    fn set_window_title(&mut self, _: &mut Screen, title: &[u8]) {
+        let title = find::clean(title, 80);
+        self.title = (!title.trim().is_empty()).then_some(title);
+    }
+
+    fn unhandled_osc(&mut self, screen: &mut Screen, params: &[&[u8]]) {
+        match params {
+            [b"7", rest @ ..] => {
+                let uri = rest.join(&b';');
+                self.folder = find::osc7_folder(&String::from_utf8_lossy(&uri));
+            }
+            // OSC 8 ; params ; address — an empty address closes the link.
+            [b"8", _, rest @ ..] => {
+                let address = find::clean(&rest.join(&b';'), 2048);
+                let (row, column) = screen.cursor_position();
+                if address.is_empty() {
+                    if let Some((start_row, start_column, address)) = self.link_start.take() {
+                        let text = screen.contents_between(start_row, start_column, row, column);
+                        let text = find::clean(text.as_bytes(), 200);
+                        if !text.trim().is_empty() {
+                            if self.links.len() >= LINKS_KEPT {
+                                self.links.remove(0);
+                            }
+                            self.links.push((text.trim().to_owned(), address));
+                        }
+                    }
+                } else {
+                    self.link_start = Some((row, column, address));
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn copy_to_clipboard(&mut self, _: &mut Screen, _kind: &[u8], data: &[u8]) {
-        self.copied.push(data.to_vec());
+        // A program can copy, never more than a megabyte at a time nor a pile of copies
+        // nobody has taken; what it sends to read the clipboard (`?`) is not text and is
+        // never answered.
+        if data.len() <= COPY_LIMIT && self.copied.len() < COPIES_WAITING {
+            self.copied.push(data.to_vec());
+        }
     }
 }
 
@@ -86,6 +150,8 @@ pub struct Terminal {
     size: (u16, u16),
     /// The tmux session it attached to (F38), which outlives this terminal.
     session: Option<String>,
+    /// The name the user gave its tab (TODO 5.2.4); else the program's title, else a number.
+    pub name: Option<String>,
 }
 
 /// The shells of a terminal panel, one per tab (F04): `active` is the one on screen.
@@ -94,6 +160,12 @@ pub struct Terminals {
     pub active: usize,
     /// What the tmux sessions of this panel start with, when tmux is on (F38).
     tmux: Option<String>,
+    /// The search of the history of the shell on screen (`F3`, TODO 5.1.2).
+    pub search: Option<TerminalSearch>,
+    /// The name being typed for the tab on screen (right click on it, TODO 5.2.4).
+    pub renaming: Option<String>,
+    /// Two shells side by side: the one on screen and the next (TODO 5.2.4).
+    pub split: bool,
 }
 
 impl Terminals {
@@ -102,6 +174,9 @@ impl Terminals {
             tabs: Vec::new(),
             active: 0,
             tmux,
+            search: None,
+            renaming: None,
+            split: false,
         };
         for _ in 0..count.max(1) {
             panel.add(cwd);
@@ -136,7 +211,14 @@ impl Terminals {
                 })
                 .unwrap_or_default()
         });
-        self.tabs.push(Terminal::new(cwd, session));
+        // In the folder the shell on screen says it is in (OSC 7), when it is still there.
+        let here = self
+            .tabs
+            .get(self.active)
+            .and_then(Terminal::folder)
+            .filter(|folder| folder.is_dir());
+        self.tabs
+            .push(Terminal::new(here.as_deref().unwrap_or(cwd), session));
         self.active = self.tabs.len() - 1;
     }
 
@@ -153,11 +235,26 @@ impl Terminals {
         if index < self.active || self.active == self.tabs.len() {
             self.active -= 1;
         }
+        self.split &= self.tabs.len() > 1;
     }
 
     pub fn select(&mut self, index: usize) {
         if index < self.tabs.len() {
             self.active = index;
+        }
+    }
+
+    /// The label of tab `index`: the name given, the program's title, or its number.
+    pub fn label(&self, index: usize) -> String {
+        let tab = &self.tabs[index];
+        let name = tab.name.clone().or_else(|| tab.title());
+        match name {
+            Some(name) => format!(
+                "{} {}",
+                index + 1,
+                name.chars().take(14).collect::<String>()
+            ),
+            None => (index + 1).to_string(),
         }
     }
 
@@ -175,12 +272,26 @@ impl Terminals {
             .collect()
     }
 
-    /// Every shell of the panel takes the size of its area.
+    /// Every shell of the panel takes the size of its area; split, each takes half of it.
     pub fn resize(&mut self, size: (u16, u16)) {
+        let size = if self.split && self.tabs.len() > 1 {
+            ((size.0 / 2).saturating_sub(1).max(1), size.1)
+        } else {
+            size
+        };
         for terminal in &mut self.tabs {
             terminal.resize(size);
         }
     }
+}
+
+/// The shell of the tests: the plainest one of the system, with no startup files.
+#[cfg(test)]
+fn plain_shell() -> CommandBuilder {
+    let mut command = CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
+    command.env("PS1", "$ ");
+    command.env_remove("ENV");
+    command
 }
 
 impl Terminal {
@@ -211,7 +322,13 @@ impl Terminal {
                 command.env_remove("TMUX");
                 command
             }
+            #[cfg(not(test))]
             None => CommandBuilder::new_default_prog(),
+            // The tests never run the login shell of whoever runs them, nor its startup
+            // files: hundreds of them at once made the tests that wait for a shell fail
+            // now and then (E70).
+            #[cfg(test)]
+            None => plain_shell(),
         };
         command.cwd(cwd);
         // What this terminal speaks, whatever the terminal around SozoIDE is (F37).
@@ -225,7 +342,7 @@ impl Terminal {
         let parser = Arc::new(RwLock::new(Parser::new_with_callbacks(
             size.rows,
             size.cols,
-            SCROLLBACK,
+            scrollback_rows(),
             Replies::default(),
         )));
         let reader_parser = Arc::clone(&parser);
@@ -238,6 +355,9 @@ impl Terminal {
                     Ok(count) => {
                         let replies = reader_parser.write().map(|mut parser| {
                             parser.process(&buffer[..count]);
+                            if parser.callbacks().clear {
+                                find::clear(&mut parser);
+                            }
                             std::mem::take(&mut parser.callbacks_mut().pending)
                         });
                         if let (Ok(replies), Ok(mut writer)) = (replies, reader_writer.lock())
@@ -257,6 +377,7 @@ impl Terminal {
             shell: Ok((pair.master, child)),
             size: (size.cols, size.rows),
             session,
+            name: None,
         })
     }
 
@@ -271,6 +392,7 @@ impl Terminal {
             shell: Err(message),
             size,
             session: None,
+            name: None,
         }
     }
 
@@ -521,12 +643,10 @@ fn tmux_arguments(session: &str, cwd: &Path) -> Vec<String> {
 }
 
 fn kill_session(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let _ = crate::process::output(
+        Command::new("tmux").args(["kill-session", "-t", session]),
+        crate::process::QUICK,
+    );
 }
 
 /// The first part of the tmux sessions of a folder's panel (F38): the same folder finds its
@@ -833,8 +953,12 @@ mod tests {
         let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let mut bottom = Terminal::new(&cwd, None);
         let mut right = Terminal::new(&cwd, None);
+        assert!(bottom.shell.is_ok() && right.shell.is_ok(), "no shell");
         bottom.resize((81, 24));
         right.resize((81, 24));
+        // Each shell has written its prompt before anything is typed into it.
+        wait_for_prompt(&bottom);
+        wait_for_prompt(&right);
 
         for character in "echo SOZO_BOTTOM_741".chars() {
             bottom.send_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
@@ -894,7 +1018,7 @@ mod tests {
         terminal.writer = Arc::new(Mutex::new(Box::new(Sent(sent.clone()))));
         terminal.size = (80, 24);
         *terminal.parser.write().unwrap() =
-            Parser::new_with_callbacks(24, 80, SCROLLBACK, Replies::default());
+            Parser::new_with_callbacks(24, 80, scrollback_rows(), Replies::default());
         (terminal, sent)
     }
 
@@ -1086,6 +1210,34 @@ mod tests {
     }
 
     #[test]
+    fn a_program_never_reads_the_clipboard_and_copies_only_so_much() {
+        let (mut terminal, sent) = listening();
+        // The question xterm would answer with what the user copied: here, with nothing.
+        for question in [
+            &b"\x1b]52;c;?\x07"[..],
+            b"\x1b]52;p;?\x1b\\",
+            b"\x1b]52;;?\x07",
+        ] {
+            program_prints(&terminal, question);
+        }
+        assert_eq!(received(&sent), b"");
+        assert!(terminal.take_copied().is_empty());
+
+        // More than the limit is dropped whole; the copy after it still arrives.
+        let mut huge = b"\x1b]52;c;".to_vec();
+        huge.extend(std::iter::repeat_n(b'A', COPY_LIMIT + 4));
+        huge.push(7);
+        program_prints(&terminal, &huge);
+        program_prints(&terminal, b"\x1b]52;c;bw==\x07");
+        assert_eq!(terminal.take_copied(), ["o"]);
+        // And a program that copies without end fills no memory.
+        for _ in 0..COPIES_WAITING * 4 {
+            program_prints(&terminal, b"\x1b]52;c;bw==\x07");
+        }
+        assert_eq!(terminal.take_copied().len(), COPIES_WAITING);
+    }
+
+    #[test]
     fn tmux_sessions_belong_to_the_folder_panel_and_tab() {
         let arguments = tmux_arguments("sozo-1", Path::new("/work"));
         assert_eq!(
@@ -1112,6 +1264,14 @@ mod tests {
 
     fn screen_contents(terminal: &Terminal) -> String {
         terminal.parser.read().unwrap().screen().contents()
+    }
+
+    fn wait_for_prompt(terminal: &Terminal) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while screen_contents(terminal).trim().is_empty() {
+            assert!(Instant::now() < deadline, "the shell wrote no prompt");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn wait_for_output(terminal: &Terminal, expected: &str) {

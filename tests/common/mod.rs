@@ -83,6 +83,15 @@ impl Home {
         }
     }
 
+    /// Where this home keeps what can be made again: downloads of updates.
+    pub fn cache(&self) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            self.path().join("Library/Caches/SozoIDE")
+        } else {
+            self.path().join(".cache/sozoide")
+        }
+    }
+
     pub fn start(&self) -> Sozo {
         self.start_with(&[])
     }
@@ -106,6 +115,10 @@ impl Home {
             (
                 "XDG_CONFIG_HOME",
                 self.path().join(".config").display().to_string(),
+            ),
+            (
+                "XDG_CACHE_HOME",
+                self.path().join(".cache").display().to_string(),
             ),
             ("ZDOTDIR", self.path().display().to_string()),
             ("TMUX_TMPDIR", self.path().display().to_string()),
@@ -188,6 +201,14 @@ impl Sozo {
         self.wait_until(text, |screen| screen.contains(text));
     }
 
+    /// Until `done` holds and then until the screen rests: after moving a panel, the outline
+    /// that glides to its place never covers what the test reads next (E74).
+    #[allow(dead_code)]
+    pub fn wait_settled(&self, what: &str, done: impl Fn(&str) -> bool) {
+        self.wait_until(what, done);
+        self.wait_still();
+    }
+
     pub fn wait_until(&self, what: &str, done: impl Fn(&str) -> bool) {
         let deadline = Instant::now() + WAIT;
         while Instant::now() < deadline {
@@ -204,13 +225,45 @@ impl Sozo {
         self.wait_for("Starting...");
         self.send(" ");
         self.wait_for("Explorer");
-        thread::sleep(Duration::from_millis(400));
+        self.wait_still();
+    }
+
+    /// Waits for the screen to stop changing: a panel that opens, a shell that starts.
+    /// Never a fixed time, which a busy machine outlasts (`CLAUDE.md` §6.8).
+    pub fn wait_still(&self) {
+        let deadline = Instant::now() + WAIT;
+        let mut before = self.screen();
+        while Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(150));
+            let now = self.screen();
+            if now == before {
+                return;
+            }
+            before = now;
+        }
+        panic!("the screen never came to rest:\n{before}");
     }
 
     /// Row and column, from 0, of `text` on screen.
     pub fn find(&self, text: &str) -> (u16, u16) {
         self.locate(text)
             .unwrap_or_else(|| panic!("{text:?} is not on screen:\n{}", self.screen()))
+    }
+
+    /// Where `text` rests: a panel opens with an animation, and a press on a title that is
+    /// still moving lands somewhere else.
+    pub fn find_still(&self, text: &str) -> (u16, u16) {
+        let deadline = Instant::now() + WAIT;
+        let mut place = self.find(text);
+        while Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(150));
+            let now = self.find(text);
+            if now == place {
+                return now;
+            }
+            place = now;
+        }
+        panic!("{text:?} never came to rest:\n{}", self.screen());
     }
 
     pub fn locate(&self, text: &str) -> Option<(u16, u16)> {
@@ -265,6 +318,31 @@ impl Sozo {
     pub fn wheel(&self, up: bool, cell: (u16, u16)) {
         let code = if up { 64 } else { 65 };
         self.send(format!("\x1b[<{code};{};{}M", cell.1 + 1, cell.0 + 1));
+    }
+
+    /// The exit code of an app that stops on its own.
+    pub fn exit_code(&mut self) -> u32 {
+        let deadline = Instant::now() + WAIT;
+        while Instant::now() < deadline {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                // What it printed on the way out has to reach the screen first.
+                thread::sleep(Duration::from_millis(200));
+                return status.exit_code();
+            }
+            thread::sleep(Duration::from_millis(40));
+        }
+        panic!("the app did not stop:\n{}", self.screen());
+    }
+
+    /// Whether the terminal is as the app found it: the main screen, the cursor showing, and
+    /// no mouse reports nor marked pastes left on.
+    pub fn terminal_given_back(&self) -> bool {
+        let parser = self.screen.lock().unwrap();
+        let screen = parser.screen();
+        !screen.alternate_screen()
+            && !screen.hide_cursor()
+            && !screen.bracketed_paste()
+            && screen.mouse_protocol_mode() == vt100::MouseProtocolMode::None
     }
 
     /// Ctrl+Q and the exit code of the app, with the terminal it leaves behind.

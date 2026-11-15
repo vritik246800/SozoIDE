@@ -98,12 +98,21 @@ fn keyboard_mouse_tabs_and_panels_work_in_a_real_pty() {
 
     // Edit the active file and wait for the two-second idle autosave.
     send(b"EDITED_MARK ");
-    thread::sleep(Duration::from_millis(2300));
-    assert!(
+    let saved = || {
         std::fs::read_to_string(project.path().join("main.rs"))
             .unwrap()
             .starts_with("EDITED_MARK fn main()")
-    );
+    };
+    // Not before the two seconds without typing, and then within a few more.
+    assert!(!saved(), "saved before the idle delay");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !saved() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the autosave never came"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
 
     // Global panels and search.
     send(b"\x07");
@@ -119,6 +128,9 @@ fn keyboard_mouse_tabs_and_panels_work_in_a_real_pty() {
     send(b"\x1bOP");
     wait_for_output(&output, "Help - all commands");
     send(b"\x1b");
+    // F2 renames in the text of the editor (Q94): About from the bottom terminal.
+    send(b"\x0a");
+    wait_for_output(&output, "Bottom terminal");
     send(b"\x1bOQ");
     wait_for_output(&output, "Valabdas");
     send(b"\x1b");

@@ -307,8 +307,18 @@ enum Ask {
     StackTrace,
     Scopes,
     Variables,
+    Threads,
+    /// A watched expression (its index) or the console (none).
+    Evaluate(Option<usize>),
+    /// The fields of the variable with this reference.
+    Children(i64),
     Other,
 }
+
+mod more;
+#[cfg(all(test, feature = "servers", target_os = "linux"))]
+mod real;
+pub use more::{Breakpoint, Launch, Variable, launch_of};
 
 pub struct Session {
     child: Child,
@@ -324,6 +334,19 @@ pub struct Session {
     pub frames: Vec<Frame>,
     pub variables: Vec<(String, String)>,
     pub output: VecDeque<String>,
+    /// What each breakpoint waits for (TODO 3.1.8), and the one of run to cursor.
+    options: HashMap<(PathBuf, usize), Breakpoint>,
+    temporary: Option<(PathBuf, usize)>,
+    /// The frame and the thread chosen, and the threads there are (TODO 3.1.9).
+    pub frame: usize,
+    pub threads: Vec<(i64, String)>,
+    /// The variables with their references, the fields asked for and the ones open.
+    pub tree: Vec<Variable>,
+    pub children: HashMap<i64, Vec<Variable>>,
+    pub expanded: std::collections::BTreeSet<i64>,
+    /// Watched expressions with their values, and the console's questions and answers.
+    pub watches: Vec<(String, String)>,
+    pub console: Vec<(String, String)>,
 }
 
 impl Session {
@@ -381,6 +404,15 @@ impl Session {
             frames: Vec::new(),
             variables: Vec::new(),
             output: VecDeque::new(),
+            options: HashMap::new(),
+            temporary: None,
+            frame: 0,
+            threads: Vec::new(),
+            tree: Vec::new(),
+            children: HashMap::new(),
+            expanded: std::collections::BTreeSet::new(),
+            watches: Vec::new(),
+            console: Vec::new(),
         };
         session.request(
             "initialize",
@@ -427,10 +459,7 @@ impl Session {
     }
 
     fn send_breakpoints(&mut self, path: &Path, rows: &[usize]) {
-        let lines = rows
-            .iter()
-            .map(|row| json!({"line": row + 1}))
-            .collect::<Vec<_>>();
+        let lines = self.breakpoint_list(path, rows);
         self.request(
             "setBreakpoints",
             json!({"source": {"path": path}, "breakpoints": lines}),
@@ -448,6 +477,9 @@ impl Session {
             self.state = State::Running;
             self.frames.clear();
             self.variables.clear();
+            self.tree.clear();
+            self.children.clear();
+            self.expanded.clear();
         }
     }
 
@@ -479,8 +511,22 @@ impl Session {
                     .and_then(|seq| self.pending.remove(&seq))
                     .unwrap_or(Ask::Other);
                 if message["success"] == false {
-                    let text = message["message"].as_str().unwrap_or("The debugger failed");
-                    events.push(Event::Message(text.to_owned()));
+                    let text =
+                        more::clean(message["message"].as_str().unwrap_or("The debugger failed"));
+                    // A watch or the console that fails shows why in its place.
+                    match ask {
+                        Ask::Evaluate(Some(index)) => {
+                            if let Some(watch) = self.watches.get_mut(index) {
+                                watch.1 = text;
+                            }
+                        }
+                        Ask::Evaluate(None) => {
+                            if let Some(last) = self.console.last_mut() {
+                                last.1 = text;
+                            }
+                        }
+                        _ => events.push(Event::Message(text)),
+                    }
                     return;
                 }
                 match ask {
@@ -501,11 +547,13 @@ impl Session {
                                     .saturating_sub(1),
                             })
                             .collect();
-                        let first = self
+                        self.frame = self
                             .frames
                             .iter()
-                            .find(|frame| frame.path.is_some())
-                            .cloned();
+                            .position(|frame| frame.path.is_some())
+                            .unwrap_or(0);
+                        let first = self.frames.get(self.frame).cloned();
+                        self.evaluate_watches();
                         if let Some(frame) = first {
                             self.request("scopes", json!({"frameId": frame.id}), Ask::Scopes);
                             if let Some(path) = frame.path {
@@ -530,6 +578,7 @@ impl Session {
                         }
                     }
                     Ask::Variables => {
+                        self.tree = more::variables(body);
                         self.variables = body["variables"]
                             .as_array()
                             .into_iter()
@@ -542,6 +591,38 @@ impl Session {
                                 )
                             })
                             .collect();
+                    }
+                    Ask::Children(reference) => {
+                        self.children.insert(reference, more::variables(body));
+                    }
+                    Ask::Threads => {
+                        self.threads = body["threads"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .take(100)
+                            .map(|thread| {
+                                (
+                                    thread["id"].as_i64().unwrap_or(0),
+                                    more::clean(thread["name"].as_str().unwrap_or("?")),
+                                )
+                            })
+                            .collect();
+                    }
+                    Ask::Evaluate(watch) => {
+                        let value = more::clean(body["result"].as_str().unwrap_or_default());
+                        match watch {
+                            Some(index) => {
+                                if let Some(watch) = self.watches.get_mut(index) {
+                                    watch.1 = value;
+                                }
+                            }
+                            None => {
+                                if let Some(last) = self.console.last_mut() {
+                                    last.1 = value;
+                                }
+                            }
+                        }
                     }
                     Ask::Other => {}
                 }
@@ -558,6 +639,7 @@ impl Session {
                     let reason = body["reason"].as_str().unwrap_or("paused").to_owned();
                     self.thread = body["threadId"].as_i64().or(self.thread);
                     self.state = State::Paused(reason);
+                    self.paused_again();
                     if let Some(thread) = self.thread {
                         self.request(
                             "stackTrace",
@@ -617,9 +699,25 @@ pub fn fake(state: State, frames: Vec<Frame>, variables: Vec<(String, String)>) 
         breakpoints: Vec::new(),
         thread: Some(1),
         state,
+        tree: variables
+            .iter()
+            .map(|(name, value)| Variable {
+                name: name.clone(),
+                value: value.clone(),
+                reference: 0,
+            })
+            .collect(),
         frames,
         variables,
         output: VecDeque::from(["hello".to_owned()]),
+        options: HashMap::new(),
+        temporary: None,
+        frame: 0,
+        threads: Vec::new(),
+        children: HashMap::new(),
+        expanded: std::collections::BTreeSet::new(),
+        watches: Vec::new(),
+        console: Vec::new(),
     }
 }
 
@@ -636,24 +734,20 @@ pub fn locate(tool: &str) -> Option<String> {
     let found = deps::locate(tool).map(|path| path.display().to_string());
     match tool {
         "lldb-dap" if found.is_none() && cfg!(target_os = "macos") => {
-            let output = Command::new("xcrun")
-                .args(["--find", "lldb-dap"])
-                .stderr(Stdio::null())
-                .output()
-                .ok()?;
+            let output = crate::process::output(
+                Command::new("xcrun").args(["--find", "lldb-dap"]),
+                crate::process::QUICK,
+            )?;
             let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
             (output.status.success() && !path.is_empty()).then_some(path)
         }
         "debugpy" => ["python3", "python"].into_iter().find_map(|python| {
             let python = deps::locate(python)?;
-            Command::new(&python)
-                .args(["-c", "import debugpy"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .ok()?
-                .success()
-                .then(|| python.display().to_string())
+            crate::process::succeeds(
+                Command::new(&python).args(["-c", "import debugpy"]),
+                crate::process::QUICK,
+            )
+            .then(|| python.display().to_string())
         }),
         _ => found,
     }
@@ -781,6 +875,15 @@ mod tests {
             frames: Vec::new(),
             variables: Vec::new(),
             output: VecDeque::new(),
+            options: HashMap::new(),
+            temporary: None,
+            frame: 0,
+            threads: Vec::new(),
+            tree: Vec::new(),
+            children: HashMap::new(),
+            expanded: std::collections::BTreeSet::new(),
+            watches: Vec::new(),
+            console: Vec::new(),
         };
         let mut events = Vec::new();
         let mut answer = |session: &mut Session, message: Value| {
@@ -805,27 +908,90 @@ mod tests {
             &mut session,
             json!({"type": "event", "event": "stopped", "body": {"reason": "breakpoint", "threadId": 7}}),
         );
-        assert_eq!(sent.commands(), ["stackTrace"]);
+        // A pause asks the threads too (TODO 3.1.9).
+        assert_eq!(sent.commands(), ["threads", "stackTrace"]);
         assert_eq!(session.state, State::Paused("breakpoint".into()));
         answer(
             &mut session,
-            json!({"type": "response", "request_seq": 5, "success": true, "body": {"stackFrames": [
+            json!({"type": "response", "request_seq": 5, "success": true, "body": {"threads": [
+                {"id": 7, "name": "main"}, {"id": 8, "name": "worker\u{1b}"},
+            ]}}),
+        );
+        assert_eq!(
+            session.threads,
+            [(7, "main".to_owned()), (8, "worker".to_owned())]
+        );
+        answer(
+            &mut session,
+            json!({"type": "response", "request_seq": 6, "success": true, "body": {"stackFrames": [
                 {"id": 3, "name": "main", "source": {"path": "/p/main.c"}, "line": 5},
             ]}}),
         );
         assert_eq!(sent.commands(), ["scopes"]);
         answer(
             &mut session,
-            json!({"type": "response", "request_seq": 6, "success": true,
+            json!({"type": "response", "request_seq": 7, "success": true,
                    "body": {"scopes": [{"name": "Locals", "variablesReference": 9}]}}),
         );
         assert_eq!(sent.commands(), ["variables"]);
         answer(
             &mut session,
-            json!({"type": "response", "request_seq": 7, "success": true,
-                   "body": {"variables": [{"name": "counter", "value": "1"}]}}),
+            json!({"type": "response", "request_seq": 8, "success": true,
+                   "body": {"variables": [{"name": "counter", "value": "1"}, {"name": "point", "value": "{...}", "variablesReference": 12}]}}),
         );
-        assert_eq!(session.variables, [("counter".to_owned(), "1".to_owned())]);
+        // A variable with fields opens and its fields are asked once.
+        session.toggle_variable(12);
+        assert_eq!(sent.commands(), ["variables"]);
+        answer(
+            &mut session,
+            json!({"type": "response", "request_seq": 9, "success": true,
+                   "body": {"variables": [{"name": "x", "value": "2"}]}}),
+        );
+        assert_eq!(session.children[&12][0].name, "x");
+        session.toggle_variable(12);
+        session.toggle_variable(12);
+        assert!(sent.commands().is_empty(), "the fields are not asked again");
+        // A watch and the console are evaluated in the frame; a failure says why in place.
+        session.add_watch("counter * 2");
+        assert_eq!(sent.commands(), ["evaluate"]);
+        answer(
+            &mut session,
+            json!({"type": "response", "request_seq": 10, "success": true, "body": {"result": "2"}}),
+        );
+        assert_eq!(
+            session.watches,
+            [("counter * 2".to_owned(), "2".to_owned())]
+        );
+        session.evaluate("nope(");
+        answer(
+            &mut session,
+            json!({"type": "response", "request_seq": 11, "success": false, "message": "syntax error"}),
+        );
+        assert_eq!(
+            session.console,
+            [("nope(".to_owned(), "syntax error".to_owned())]
+        );
+        // A breakpoint with a condition, a count and a message goes as the protocol says.
+        session.set_breakpoint_options(
+            Path::new("/p/main.c"),
+            4,
+            Breakpoint {
+                condition: Some("i > 3".into()),
+                hits: Some("2".into()),
+                log: Some("i={i}".into()),
+            },
+        );
+        let sent_text = sent.0.lock().unwrap().clone();
+        let text = String::from_utf8_lossy(&sent_text);
+        assert!(
+            text.contains(r#""condition":"i > 3""#)
+                && text.contains(r#""hitCondition":"2""#)
+                && text.contains(r#""logMessage":"i={i}""#),
+            "{text}"
+        );
+        sent.commands();
+        assert_eq!(session.variables[0], ("counter".to_owned(), "1".to_owned()));
+        assert_eq!(session.tree[1].reference, 12);
         assert_eq!(session.output, ["one", "two"]);
         session.resume("next");
         assert_eq!(sent.commands(), ["next"]);

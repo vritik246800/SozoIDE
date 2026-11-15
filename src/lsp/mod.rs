@@ -10,8 +10,14 @@ use std::{
 
 use serde_json::{Value, json};
 
+pub(crate) mod actions;
 pub(crate) mod client;
+#[cfg(all(test, feature = "servers"))]
+mod real;
+mod requests;
+pub use requests::usage_label;
 
+pub use actions::{CodeAction, FileEdit, Symbol, apply_edits, incremental_change, workspace_edit};
 use client::{Client, Pending};
 
 /// The servers SozoIDE talks to: name (the command), languages by extension and arguments.
@@ -138,8 +144,51 @@ pub struct Place {
     pub end: usize,
 }
 
+/// What an edit of a server is for (TODO 3.1.1–3.1.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditGoal {
+    Rename,
+    Format,
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Event {
+    /// The answer of `prepareRename`: the text to start from, or why it cannot be renamed.
+    RenameReady {
+        path: PathBuf,
+        version: u64,
+        result: Result<Option<String>, String>,
+    },
+    /// The files a rename, a format or a code action changes, checked (`workspace_edit`).
+    Edits {
+        path: PathBuf,
+        version: u64,
+        goal: EditGoal,
+        result: Result<Vec<FileEdit>, String>,
+    },
+    /// The code actions of a row.
+    Actions {
+        path: PathBuf,
+        version: u64,
+        actions: Vec<CodeAction>,
+    },
+    /// The signature at the cursor and its active parameter (columns of the label).
+    Signature {
+        path: PathBuf,
+        version: u64,
+        signature: Option<(String, Option<(usize, usize)>)>,
+    },
+    Symbols {
+        path: Option<PathBuf>,
+        symbols: Vec<Symbol>,
+    },
+    /// A server asks to apply an edit (after a command): the app answers with `answer_apply`.
+    ApplyEdit {
+        server: &'static str,
+        id: Value,
+        label: String,
+        result: Result<Vec<FileEdit>, String>,
+    },
     /// Suggestions for the cursor at `row` and `column` (characters) of `path`.
     Completion {
         path: PathBuf,
@@ -164,6 +213,8 @@ pub enum Event {
         places: Vec<Place>,
     },
     Message(String),
+    /// A server that stopped starts again: the app opens its files again.
+    Restart(&'static str),
 }
 
 /// Why a server is not running: it is not installed, it stopped before answering `initialize`
@@ -201,10 +252,22 @@ pub struct Lsp {
     failed: HashMap<&'static str, Failure>,
     /// The open documents, with the edit count last sent.
     documents: HashMap<PathBuf, u64>,
+    /// The text last sent of each document, for servers that take only what changed.
+    texts: HashMap<PathBuf, String>,
     pub diagnostics: HashMap<PathBuf, Vec<Diagnostic>>,
     /// The requests a disabled `Lsp` (the tests) would have sent: method, file, row, column.
     pub asked: Vec<(String, PathBuf, usize, usize)>,
+    /// Servers that stopped after starting: how many times they started again and when the
+    /// next try is (TODO 3.2.3: 2 s, 8 s, 32 s, then no more).
+    restarts: HashMap<&'static str, (u32, std::time::Instant)>,
+    /// The memory (KiB) and the CPU (%) of each running server, measured while Help shows its
+    /// Dependencies, and when.
+    pub usage: HashMap<&'static str, (u64, f32)>,
+    measured: Option<std::time::Instant>,
 }
+
+/// How many times a server that stops starts again by itself.
+pub const MOST_RESTARTS: u32 = 3;
 
 impl Lsp {
     pub fn new(root: PathBuf, enabled: bool) -> Self {
@@ -214,8 +277,12 @@ impl Lsp {
             clients: HashMap::new(),
             failed: HashMap::new(),
             documents: HashMap::new(),
+            texts: HashMap::new(),
             diagnostics: HashMap::new(),
             asked: Vec::new(),
+            restarts: HashMap::new(),
+            usage: HashMap::new(),
+            measured: None,
         }
     }
 
@@ -266,6 +333,7 @@ impl Lsp {
             }}),
         );
         self.documents.insert(path.to_path_buf(), edits);
+        self.texts.insert(path.to_path_buf(), text.to_owned());
         None
     }
 
@@ -279,12 +347,24 @@ impl Lsp {
         if !self.documents.contains_key(path) {
             return;
         }
+        let old = self.texts.insert(path.to_path_buf(), text.to_owned());
         if let Ok(Some(client)) = self.client(path) {
+            // Only what changed, to a server that says it takes it (TODO 3.1.6).
+            let change = match old {
+                Some(old) if client.ready && sync_kind(&client.capabilities) == 2 => {
+                    let ((row, start), (end_row, end), text) = incremental_change(&old, text);
+                    json!({
+                        "range": {"start": {"line": row, "character": start}, "end": {"line": end_row, "character": end}},
+                        "text": text,
+                    })
+                }
+                _ => json!({"text": text}),
+            };
             client.notify(
                 "textDocument/didChange",
                 json!({
                     "textDocument": {"uri": uri::from_path(path), "version": edits},
-                    "contentChanges": [{"text": text}],
+                    "contentChanges": [change],
                 }),
             );
         }
@@ -296,6 +376,7 @@ impl Lsp {
             return;
         }
         self.diagnostics.remove(path);
+        self.texts.remove(path);
         if let Ok(Some(client)) = self.client(path) {
             client.notify(
                 "textDocument/didClose",
@@ -419,7 +500,14 @@ impl Lsp {
         let mut stopped = Vec::new();
         for (name, client) in &mut self.clients {
             for message in client.received() {
-                handle(client, message, &mut self.diagnostics, &mut events);
+                handle(
+                    name,
+                    &self.root,
+                    client,
+                    message,
+                    &mut self.diagnostics,
+                    &mut events,
+                );
             }
             client.send_later();
             if !client.alive() {
@@ -436,10 +524,58 @@ impl Lsp {
             } else {
                 Failure::Start(why)
             };
-            events.push(Event::Message(failure.message(name)));
+            // A server that ran and stopped tries again, waiting longer each time.
+            let tries = self.restarts.get(name).map_or(0, |(tries, _)| *tries);
+            let again = matches!(failure, Failure::Stopped(_)) && tries < MOST_RESTARTS;
+            let message = failure.message(name);
+            events.push(Event::Message(if again {
+                format!("{message}; it starts again in {} s", 2u64 << (2 * tries))
+            } else if tries >= MOST_RESTARTS {
+                format!("{message}; it stopped {MOST_RESTARTS} times and is left off")
+            } else {
+                message
+            }));
+            if again {
+                let wait = std::time::Duration::from_secs(2 << (2 * tries));
+                self.restarts
+                    .insert(name, (tries + 1, std::time::Instant::now() + wait));
+            }
             self.failed.insert(name, failure);
         }
+        events.extend(self.due_restarts(std::time::Instant::now()));
         events
+    }
+
+    /// The servers whose next try is due: their failure is forgotten and the app opens their
+    /// files again (`Event::Restart`).
+    fn due_restarts(&mut self, now: std::time::Instant) -> Vec<Event> {
+        let due: Vec<&'static str> = self
+            .restarts
+            .iter()
+            .filter(|(name, (_, at))| now >= *at && self.failed.contains_key(*name))
+            .map(|(name, _)| *name)
+            .collect();
+        due.into_iter()
+            .map(|name| {
+                self.failed.remove(name);
+                let other = |path: &PathBuf| server_for(path).is_none_or(|server| server.0 != name);
+                self.documents.retain(|path, _| other(path));
+                Event::Restart(name)
+            })
+            .collect()
+    }
+
+    /// For the tests: server `name` stopped `tries` times and its next try is due at `at`.
+    #[cfg(test)]
+    pub fn stopped(
+        &mut self,
+        name: &'static str,
+        tries: u32,
+        at: std::time::Instant,
+    ) -> Vec<Event> {
+        self.failed.insert(name, Failure::Stopped("crashed".into()));
+        self.restarts.insert(name, (tries, at));
+        self.due_restarts(std::time::Instant::now())
     }
 
     /// Why the server of `path` is not running, if it failed.
@@ -482,6 +618,8 @@ impl Lsp {
 }
 
 fn handle(
+    name: &'static str,
+    root: &Path,
     client: &mut Client,
     message: Value,
     diagnostics: &mut HashMap<PathBuf, Vec<Diagnostic>>,
@@ -489,6 +627,22 @@ fn handle(
 ) {
     let method = message["method"].as_str();
     match (message.get("id").cloned(), method) {
+        // A server asks to change files: nothing is written before the user says yes.
+        (Some(id), Some("workspace/applyEdit")) => {
+            let params = &message["params"];
+            events.push(Event::ApplyEdit {
+                server: name,
+                id,
+                label: params["label"]
+                    .as_str()
+                    .unwrap_or("A change of the language server")
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(120)
+                    .collect(),
+                result: workspace_edit(&params["edit"], root),
+            });
+        }
         // A request of the server: configuration gets one empty answer per item asked for.
         (Some(id), Some(method)) => {
             let result = if method == "workspace/configuration" {
@@ -506,7 +660,7 @@ fn handle(
             if pending == Pending::Initialize {
                 client.capabilities = message["result"]["capabilities"].clone();
                 client.initialized();
-            } else if let Some(event) = answered(pending, &message) {
+            } else if let Some(event) = answered(pending, &message, root) {
                 events.push(event);
             }
         }
@@ -530,10 +684,53 @@ fn handle(
 }
 
 /// The event of the answer `message` to a request of the app.
-fn answered(pending: Pending, message: &Value) -> Option<Event> {
+fn answered(pending: Pending, message: &Value, root: &Path) -> Option<Event> {
     let result = &message["result"];
+    let error = message["error"]["message"].as_str().map(str::to_owned);
     Some(match pending {
-        Pending::Initialize => return None,
+        Pending::Initialize | Pending::Command => return None,
+        Pending::PrepareRename { path, version } => Event::RenameReady {
+            path,
+            version,
+            result: match error {
+                Some(error) => Err(error),
+                None if result.is_null() => Err("This cannot be renamed".into()),
+                None => Ok(result["placeholder"].as_str().map(str::to_owned)),
+            },
+        },
+        Pending::Edit {
+            path,
+            version,
+            goal,
+        } => Event::Edits {
+            result: match (error, goal) {
+                (Some(error), _) => Err(error),
+                (None, EditGoal::Format) => actions::text_edits(result).map(|edits| {
+                    vec![FileEdit {
+                        path: path.clone(),
+                        edits,
+                    }]
+                }),
+                (None, _) => workspace_edit(result, root),
+            },
+            path,
+            version,
+            goal,
+        },
+        Pending::Actions { path, version } => Event::Actions {
+            path,
+            version,
+            actions: actions::code_actions(result),
+        },
+        Pending::Signature { path, version } => Event::Signature {
+            path,
+            version,
+            signature: actions::signature(result),
+        },
+        Pending::Symbols { path } => Event::Symbols {
+            symbols: actions::symbols(result, path.as_deref()),
+            path,
+        },
         Pending::Completion { path, row, column } => Event::Completion {
             path,
             row,
@@ -647,6 +844,14 @@ fn completion_items(result: &Value) -> Vec<Item> {
         .take(MOST_ITEMS)
         .map(|(_, item)| item)
         .collect()
+}
+
+/// How the server wants the changes of a document: 1 whole, 2 only what changed.
+fn sync_kind(capabilities: &Value) -> u64 {
+    let sync = &capabilities["textDocumentSync"];
+    sync.as_u64()
+        .or_else(|| sync["change"].as_u64())
+        .unwrap_or(1)
 }
 
 /// Whether `capabilities` say the server answers `provider` (`true` or its options).
@@ -869,6 +1074,7 @@ mod tests {
                 goal: Goal::References,
             },
             &json!({"id": 3, "result": [{"uri": "file:///a.py", "range": range(2, 4, 8)}]}),
+            Path::new("/"),
         );
         assert_eq!(
             answer,
@@ -885,7 +1091,11 @@ mod tests {
             row: 1,
             column: 5,
         };
-        let hover = answered(pending, &json!({"result": {"contents": "x: int"}}));
+        let hover = answered(
+            pending,
+            &json!({"result": {"contents": "x: int"}}),
+            Path::new("/"),
+        );
         assert!(
             matches!(hover, Some(Event::Hover { version: 2, ref text, .. }) if text == "x: int")
         );
@@ -896,6 +1106,7 @@ mod tests {
                 goal: Goal::Definition,
             },
             &json!({"error": {"code": -32601, "message": "Unhandled method"}}),
+            Path::new("/"),
         );
         assert_eq!(failed, Some(Event::Message("Unhandled method".into())));
 
@@ -992,11 +1203,14 @@ mod tests {
         lsp.places(Goal::Definition, rust, 1, 0, 0, "x").unwrap();
         assert_eq!(lsp.asked.len(), 1);
 
-        // A server that stops before answering `initialize` could not start; after, it
-        // stopped. Both are said once and stay failed.
+        // A server that stops before answering `initialize` could not start and stays failed;
+        // one that stops after it starts again later (TODO 3.2.3), and says when.
         let folder = tempfile::tempdir().unwrap();
         let command = ["git", "hash-object", "--stdin"].map(str::to_owned);
-        for (ready, said) in [(false, "clangd could not start"), (true, "clangd stopped")] {
+        for (ready, said) in [
+            (false, "clangd could not start"),
+            (true, "clangd stopped; it starts again in 2 s"),
+        ] {
             let mut client = Client::start(&command, folder.path()).unwrap();
             client.ready = ready;
             client.kill();
@@ -1009,6 +1223,24 @@ mod tests {
         assert_eq!(
             lsp.failure(c),
             Some(("clangd", &Failure::Stopped(String::new())))
+        );
+        // When its time comes it starts again, its files open again; after 3 times, no more.
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert_eq!(lsp.stopped("clangd", 1, past), [Event::Restart("clangd")]);
+        assert!(lsp.failure(c).is_none());
+        let future = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        assert_eq!(lsp.stopped("clangd", 2, future), []);
+        let mut client = Client::start(&command, folder.path()).unwrap();
+        client.ready = true;
+        client.kill();
+        lsp.failed.remove("clangd");
+        lsp.restarts.insert("clangd", (MOST_RESTARTS, future));
+        lsp.clients.insert("clangd", client);
+        assert_eq!(
+            lsp.poll(),
+            [Event::Message(
+                "clangd stopped; it stopped 3 times and is left off".into()
+            )]
         );
     }
 
@@ -1025,7 +1257,14 @@ mod tests {
                 "method": "experimental/serverStatus",
                 "params": {"health": "ok", "quiescent": quiescent},
             });
-            handle(&mut client, status, &mut diagnostics, &mut events);
+            handle(
+                "rust-analyzer",
+                Path::new("/"),
+                &mut client,
+                status,
+                &mut diagnostics,
+                &mut events,
+            );
             assert_eq!(client.quiescent, Some(quiescent));
             assert_eq!(client.loading(), loading);
         }

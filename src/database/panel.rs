@@ -1,3 +1,217 @@
+impl DatabasePanel {
+    /// `Alt+T`: a new SQL tab, opened.
+    pub fn new_sql_tab(&mut self) {
+        self.sql_tabs[self.sql_tab] = std::mem::take(&mut self.query_text);
+        self.sql_tabs.push(String::new());
+        self.sql_tab = self.sql_tabs.len() - 1;
+        self.query_cursor = 0;
+        self.sql_edited = true;
+    }
+
+    /// `Alt+1`…`Alt+9` or a click: the SQL tab `index`.
+    pub fn open_sql_tab(&mut self, index: usize) {
+        if index >= self.sql_tabs.len() || index == self.sql_tab {
+            return;
+        }
+        self.sql_tabs[self.sql_tab] = std::mem::take(&mut self.query_text);
+        self.sql_tab = index;
+        self.query_text = std::mem::take(&mut self.sql_tabs[index]);
+        self.query_cursor = self.query_text.len();
+        self.sql_edited = true;
+    }
+
+    /// `Alt+W`: the open SQL tab closes; one always stays.
+    pub fn close_sql_tab(&mut self) {
+        if self.sql_tabs.len() == 1 {
+            self.set_query(String::new());
+            return;
+        }
+        self.sql_tabs.remove(self.sql_tab);
+        self.sql_tab = self.sql_tab.min(self.sql_tabs.len() - 1);
+        self.query_text = std::mem::take(&mut self.sql_tabs[self.sql_tab]);
+        self.query_cursor = self.query_text.len();
+    }
+
+    /// `Alt+↑`/`Alt+↓`: the queries of this connection that hold what was typed, newest first;
+    /// past the newest, the text typed comes back.
+    pub fn walk_history(&mut self, older: bool) {
+        let Some(name) = self
+            .active_config()
+            .map(|connection| connection.name.clone())
+        else {
+            return;
+        };
+        let (start, typed) = self
+            .history_walk
+            .clone()
+            .unwrap_or_else(|| (self.history.len(), self.query_text.clone()));
+        let needle = typed.trim().to_lowercase();
+        let fits = |entry: &QueryHistoryEntry| {
+            entry.connection_name == name
+                && entry.query != SECRET_QUERY
+                && entry.query.to_lowercase().contains(&needle)
+        };
+        let next = if older {
+            self.history[..start.min(self.history.len())]
+                .iter()
+                .rposition(fits)
+        } else {
+            self.history
+                .iter()
+                .enumerate()
+                .skip(start + 1)
+                .find(|(_, entry)| fits(entry))
+                .map(|(index, _)| index)
+        };
+        match next {
+            Some(index) => {
+                self.query_text = self.history[index].query.clone();
+                self.history_walk = Some((index, typed));
+            }
+            None if older => return,
+            None => {
+                self.query_text = typed;
+                self.history_walk = None;
+            }
+        }
+        self.query_cursor = self.query_text.len();
+        self.sql_edited = true;
+    }
+
+    /// `Ctrl+Space`: the names for the word before the cursor, or the next of them.
+    pub fn complete(&mut self) {
+        if !self.completions.is_empty() {
+            self.completion = (self.completion + 1) % self.completions.len();
+            return;
+        }
+        let before = &self.query_text[..self.query_cursor.min(self.query_text.len())];
+        self.completions = self
+            .catalog
+            .as_ref()
+            .map(|catalog| more::complete(catalog, before))
+            .unwrap_or_default();
+        self.completion = 0;
+        if self.completions.is_empty() {
+            self.status = Some("No table or column starts so".into());
+        }
+    }
+
+    /// `Tab` or `Enter` with names shown: the chosen one in place of the word.
+    pub fn accept_completion(&mut self) -> bool {
+        let Some(name) = self.completions.get(self.completion).cloned() else {
+            return false;
+        };
+        self.completions.clear();
+        let before = &self.query_text[..self.query_cursor.min(self.query_text.len())];
+        let typed = before
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .map(char::len_utf8)
+            .sum::<usize>();
+        let start = self.query_cursor - typed;
+        self.query_text
+            .replace_range(start..self.query_cursor, &name);
+        self.query_cursor = start + name.len();
+        self.sql_edited = true;
+        true
+    }
+
+    /// The table the results are of, when the last query reads only one.
+    pub fn edited_table(&self) -> Result<String> {
+        let catalog = self
+            .catalog
+            .as_ref()
+            .context("The tables are not read yet")?;
+        let query = self
+            .last_query
+            .as_deref()
+            .context("Run a query of one table first")?;
+        more::table_of(query, catalog)
+            .context("Only the rows of a query of one table can be changed here")
+    }
+
+    /// The `UPDATE` of one cell; `NULL` typed alone is NULL.
+    pub fn edit_statement(&self, row: usize, column: usize, typed: &str) -> Result<Statement> {
+        let (driver, table, result) = self.edit_context()?;
+        let name = result.columns.get(column).context("No such column")?;
+        let value = if typed == "NULL" {
+            DatabaseValue::Null
+        } else {
+            DatabaseValue::Text(typed.to_owned())
+        };
+        more::update_cell(
+            driver,
+            self.catalog.as_ref().context("No tables")?,
+            &table,
+            result,
+            row,
+            name,
+            value,
+        )
+    }
+
+    pub fn delete_statement(&self, row: usize) -> Result<Statement> {
+        let (driver, table, result) = self.edit_context()?;
+        more::delete_row(
+            driver,
+            self.catalog.as_ref().context("No tables")?,
+            &table,
+            result,
+            row,
+        )
+    }
+
+    /// A copy of row `row` without its key: the database gives the key, the cells are then
+    /// changed one by one.
+    pub fn insert_statement(&self, row: usize) -> Result<Statement> {
+        let (driver, table, result) = self.edit_context()?;
+        let object = self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.object(&table))
+            .context("No such table")?;
+        let values: Vec<(String, DatabaseValue)> = result
+            .columns
+            .iter()
+            .zip(result.rows.get(row).context("No such row")?)
+            .filter(|(name, _)| {
+                object
+                    .columns
+                    .iter()
+                    .any(|column| &column.name == *name && !column.key)
+            })
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        more::insert_row(driver, &table, &values)
+    }
+
+    fn edit_context(&self) -> Result<(crate::database::Driver, String, &QueryResult)> {
+        let driver = self.active_config().context("No active connection")?.driver;
+        let table = self.edited_table()?;
+        let result = self.results.as_ref().context("No results")?;
+        Ok((driver, table, result))
+    }
+
+    /// Runs a statement shown and confirmed with `Enter`, then the last query again.
+    pub async fn run_edit(&mut self, statement: Statement) -> Result<()> {
+        let connection = self
+            .active_config()
+            .context("No active connection")?
+            .clone();
+        let pool = self.pool_for(&connection).await?;
+        let changed = more::run_statement(&pool, &statement)
+            .await
+            .inspect_err(|error| {
+                self.error = Some(error.to_string());
+            })?;
+        self.execute(QueryCancellation::new(), QueryKind::Again)
+            .await?;
+        self.status = Some(format!("{changed} row(s) changed"));
+        Ok(())
+    }
+}
+
 /// Whether `query` has a statement that creates, changes or removes tables or views.
 fn changes_tables(query: &str) -> bool {
     query.split(';').any(|statement| {
@@ -17,19 +231,79 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use sqlx::AnyPool;
 
 use super::{
     builder::{Catalog, Design, build_query, load_catalog},
     model::{
-        ConnectionConfig, ConnectionForm, DatabaseTab, QueryCancellation, QueryHistoryEntry,
-        QueryResult, next_char_boundary, previous_char_boundary,
+        ConnectionConfig, ConnectionForm, DatabaseTab, DatabaseValue, QueryCancellation,
+        QueryHistoryEntry, QueryResult, next_char_boundary, previous_char_boundary,
     },
+    more::{self, Statement},
     store::{
-        ConnectionStore, delete_password, load_password, open_pool, persist_connections, run_query,
-        save_password,
+        self, ConnectionStore, Pool, VAULT, delete_password, load_password, open_pool,
+        persist_connections, run_page, run_query, save_password, saved_status,
     },
 };
+
+/// The rows of a page of results.
+pub const PAGE: usize = 1000;
+/// The queries the history keeps.
+const HISTORY: usize = 500;
+/// What the history says in place of a query that may hold a password.
+pub const SECRET_QUERY: &str = "(not kept: it may hold a password)";
+
+/// What `DatabasePanel::execute` runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryKind {
+    /// The SQL of the open tab, its first page.
+    Run,
+    /// A page more of the last query.
+    More,
+    /// The last query again, as many rows as before (after an edit).
+    Again,
+    /// The plan of the SQL of the open tab.
+    Explain,
+    /// How many rows the last query gives.
+    Count,
+}
+
+/// `query` until it ends, is cancelled or takes longer than the setting.
+async fn run_until(
+    pool: &Pool,
+    query: &str,
+    limit: usize,
+    cancellation: &QueryCancellation,
+) -> Result<QueryResult> {
+    if cancellation.is_cancelled() {
+        bail!("Query cancelled");
+    }
+    let mut cancelled = cancellation.sender.subscribe();
+    let execution = async {
+        match crate::settings::get().query_timeout() {
+            Some(limit_time) => tokio::time::timeout(limit_time, run_page(pool, query, limit))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow!(
+                        "The query took longer than {} s: query_timeout_seconds in settings.toml",
+                        limit_time.as_secs()
+                    ))
+                }),
+            None => run_page(pool, query, limit).await,
+        }
+    };
+    tokio::pin!(execution);
+    tokio::select! {
+        biased;
+        changed = cancelled.changed() => {
+            if changed.is_ok() && *cancelled.borrow() {
+                Err(anyhow!("Query cancelled"))
+            } else {
+                execution.await
+            }
+        },
+        result = &mut execution => result,
+    }
+}
 
 /// UI-independent database engine and all state needed by a Ratatui panel.
 pub struct DatabasePanel {
@@ -51,8 +325,20 @@ pub struct DatabasePanel {
     pub builder_error: Option<String>,
     /// The SQL was typed over: the builder no longer replaces it until rebuilt.
     pub sql_edited: bool,
+    /// The rows asked for of the last query: a page more each time (TODO 4.1.2).
+    pub page_limit: usize,
+    /// The query the results are of, to load more, count or edit them.
+    pub last_query: Option<String>,
+    /// Every SQL tab's text; the open one is `query_text` (TODO 4.1.12).
+    pub sql_tabs: Vec<String>,
+    pub sql_tab: usize,
+    /// The query history being walked: where, and the text typed before (its search).
+    history_walk: Option<(usize, String)>,
+    /// Names of tables and columns for the word before the cursor, and the one chosen.
+    pub completions: Vec<String>,
+    pub completion: usize,
     store: ConnectionStore,
-    pools: HashMap<String, AnyPool>,
+    pools: HashMap<String, Pool>,
     active_query: Option<QueryCancellation>,
 }
 
@@ -68,7 +354,7 @@ impl DatabasePanel {
     }
 
     fn with_store(store: ConnectionStore) -> Result<Self> {
-        let connections = store.load()?;
+        let connections = store.load();
         Ok(Self {
             connections,
             active_connection: None,
@@ -85,6 +371,13 @@ impl DatabasePanel {
             design: Design::default(),
             builder_error: None,
             sql_edited: false,
+            page_limit: PAGE,
+            last_query: None,
+            sql_tabs: vec![String::new()],
+            sql_tab: 0,
+            history_walk: None,
+            completions: Vec::new(),
+            completion: 0,
             store,
             pools: HashMap::new(),
             active_query: None,
@@ -135,8 +428,7 @@ impl DatabasePanel {
     pub async fn test_connection(&self, form: &ConnectionForm) -> Result<Duration> {
         let started = Instant::now();
         let pool = open_pool(form).await?;
-        sqlx::query("SELECT 1")
-            .fetch_one(&pool)
+        run_query(&pool, "SELECT 1")
             .await
             .map_err(|error| anyhow!("Connection test query failed: {error}"))?;
         pool.close().await;
@@ -146,8 +438,7 @@ impl DatabasePanel {
     /// Tests the form, stores metadata and any password, then makes it active.
     pub async fn add_connection(&mut self, form: &ConnectionForm) -> Result<String> {
         let pool = open_pool(form).await?;
-        sqlx::query("SELECT 1")
-            .fetch_one(&pool)
+        run_query(&pool, "SELECT 1")
             .await
             .map_err(|error| anyhow!("Connection test query failed: {error}"))?;
         let config = form.to_config()?;
@@ -157,6 +448,7 @@ impl DatabasePanel {
             .iter()
             .any(|connection| connection.id == id);
 
+        let has_password = !form.password.is_empty();
         save_password(id.clone(), form.password.clone()).await?;
         let mut saved = self.connections.clone();
         if let Some(existing) = saved.iter_mut().find(|connection| connection.id == id) {
@@ -190,11 +482,7 @@ impl DatabasePanel {
             .position(|connection| connection.id == id)
             .unwrap_or(0);
         self.active_connection = Some(id.clone());
-        self.status = Some(if is_update {
-            "Connection updated and tested".into()
-        } else {
-            "Connection added and tested".into()
-        });
+        self.status = Some(saved_status(is_update, has_password, VAULT));
         self.error = None;
         Ok(id)
     }
@@ -352,9 +640,19 @@ impl DatabasePanel {
     }
 
     /// The cloned cancellation handle can be triggered by another task while this awaits.
+    #[cfg(test)]
     pub async fn execute_query_cancellable(
         &mut self,
         cancellation: QueryCancellation,
+    ) -> Result<QueryResult> {
+        self.execute(cancellation, QueryKind::Run).await
+    }
+
+    /// Runs the SQL of the tab, a page more of the last query, its plan or its count.
+    pub async fn execute(
+        &mut self,
+        cancellation: QueryCancellation,
+        kind: QueryKind,
     ) -> Result<QueryResult> {
         if self.busy {
             bail!("A query is already running");
@@ -363,10 +661,21 @@ impl DatabasePanel {
             .active_config()
             .context("No active connection")?
             .clone();
-        let query = self.query_text.trim().to_owned();
-        if query.is_empty() {
+        let typed = self.query_text.trim().to_owned();
+        let last = self.last_query.clone().unwrap_or_default();
+        let (query, limit) = match kind {
+            QueryKind::Run => (typed, PAGE),
+            QueryKind::Explain => (more::explain(connection.driver, &typed), PAGE),
+            QueryKind::More => (last.clone(), self.page_limit + PAGE),
+            QueryKind::Again => (last.clone(), self.page_limit),
+            QueryKind::Count => (more::count_query(&last), 1),
+        };
+        if query.trim().is_empty()
+            || (kind != QueryKind::Run && kind != QueryKind::Explain && last.is_empty())
+        {
             bail!("Query is empty");
         }
+        self.history_walk = None;
         self.busy = true;
         self.error = None;
         self.status = Some("Running query...".into());
@@ -388,34 +697,58 @@ impl DatabasePanel {
                 return Err(error);
             }
         };
-        let mut cancelled = cancellation.sender.subscribe();
-        let execution = run_query(&pool, &query);
-        tokio::pin!(execution);
-        let result = if cancellation.is_cancelled() {
-            Err(anyhow!("Query cancelled"))
-        } else {
-            tokio::select! {
-                biased;
-                changed = cancelled.changed() => {
-                    if changed.is_ok() && *cancelled.borrow() {
-                        Err(anyhow!("Query cancelled"))
-                    } else {
-                        execution.await
-                    }
-                },
-                result = &mut execution => result,
+        let mut result = run_until(&pool, &query, limit, &cancellation).await;
+        // A connection to a server that dropped opens again once, and the query runs again.
+        if let Err(error) = &result
+            && !cancellation.is_cancelled()
+            && store::lost(&pool, error)
+        {
+            self.pools.remove(&connection.id);
+            if let Ok(pool) = self.pool_for(&connection).await {
+                result = run_until(&pool, &query, limit, &cancellation).await;
+                if result.is_ok() {
+                    self.status = Some("The connection dropped: connected again".into());
+                }
             }
-        };
+        }
         let duration = started.elapsed();
         self.finish_query();
 
+        if kind == QueryKind::Count {
+            let total = result
+                .as_ref()
+                .ok()
+                .and_then(|result| result.rows.first()?.first().cloned());
+            return match total {
+                Some(total) => {
+                    self.status = Some(format!("{total} row(s) in total"));
+                    result
+                }
+                None => {
+                    let error = result
+                        .err()
+                        .unwrap_or_else(|| anyhow!("No count came back"));
+                    self.error = Some(error.to_string());
+                    Err(error)
+                }
+            };
+        }
         match result {
             Ok(mut result) => {
+                if kind != QueryKind::Explain {
+                    self.last_query = Some(query.clone());
+                    self.page_limit = limit;
+                }
                 result.duration = duration;
                 self.record_history(&connection, &query, duration, Ok(result.rows.len()));
                 self.status = Some(format!(
-                    "{} row(s), {} affected in {} ms",
+                    "{} row(s){}, {} affected in {} ms",
                     result.rows.len(),
+                    if result.more {
+                        " and more: L loads more, # counts them"
+                    } else {
+                        ""
+                    },
                     result.affected_rows,
                     duration.as_millis()
                 ));
@@ -458,6 +791,15 @@ impl DatabasePanel {
         duration: Duration,
         result: Result<usize, String>,
     ) {
+        // A query that may hold a password never stays in the history (TODO 4.1.12).
+        let query = if more::secret(query) {
+            SECRET_QUERY
+        } else {
+            query
+        };
+        if self.history.len() >= HISTORY {
+            self.history.remove(0);
+        }
         self.history.push(QueryHistoryEntry {
             connection_name: connection.name.clone(),
             query: query.into(),
@@ -467,7 +809,7 @@ impl DatabasePanel {
         });
     }
 
-    async fn pool_for(&mut self, config: &ConnectionConfig) -> Result<AnyPool> {
+    async fn pool_for(&mut self, config: &ConnectionConfig) -> Result<Pool> {
         if let Some(pool) = self.pools.get(&config.id) {
             return Ok(pool.clone());
         }
@@ -784,5 +1126,181 @@ mod tests {
         assert!(panel.active_config().is_some());
         assert_eq!(panel.history.len(), 1);
         panel.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_million_rows_come_a_page_at_a_time_and_are_counted_on_request() {
+        let directory = TempDir::new().unwrap();
+        let mut panel = panel(&directory);
+        panel
+            .add_connection(&sqlite_form(&directory, "big"))
+            .await
+            .unwrap();
+        panel.set_query(
+            "CREATE TABLE big (id INTEGER PRIMARY KEY, name TEXT);\
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000000)\
+             INSERT INTO big SELECT i, 'row ' || i FROM n",
+        );
+        panel.execute_query().await.unwrap();
+        panel.set_query("SELECT * FROM big");
+        let started = Instant::now();
+        let first = panel.execute_query().await.unwrap();
+        // The budget: the first page of a million rows in well under a second.
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!((first.rows.len(), first.more), (PAGE, true));
+        assert!(panel.status.as_deref().unwrap().contains("L loads more"));
+        let more = panel
+            .execute(QueryCancellation::new(), QueryKind::More)
+            .await
+            .unwrap();
+        assert_eq!(
+            (more.rows.len(), more.more, panel.page_limit),
+            (2 * PAGE, true, 2 * PAGE)
+        );
+        assert_eq!(more.rows[PAGE][0], DatabaseValue::Integer(PAGE as i64 + 1));
+        panel
+            .execute(QueryCancellation::new(), QueryKind::Count)
+            .await
+            .unwrap();
+        assert_eq!(panel.status.as_deref(), Some("1000000 row(s) in total"));
+        assert_eq!(
+            panel.results.as_ref().unwrap().rows.len(),
+            2 * PAGE,
+            "counting leaves the rows"
+        );
+        panel.set_query("SELECT * FROM big WHERE id < 5");
+        let small = panel.execute_query().await.unwrap();
+        assert_eq!((small.rows.len(), small.more), (4, false));
+        // The plan does not become the query the results are of.
+        let plan = panel
+            .execute(QueryCancellation::new(), QueryKind::Explain)
+            .await
+            .unwrap();
+        assert!(!plan.rows.is_empty());
+        assert_eq!(
+            panel.last_query.as_deref(),
+            Some("SELECT * FROM big WHERE id < 5")
+        );
+        let cancelled = QueryCancellation::new();
+        cancelled.cancel();
+        assert!(panel.execute(cancelled, QueryKind::More).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn the_history_keeps_no_password_and_is_searched_per_connection() {
+        let directory = TempDir::new().unwrap();
+        let mut panel = panel(&directory);
+        panel
+            .add_connection(&sqlite_form(&directory, "h"))
+            .await
+            .unwrap();
+        for query in [
+            "SELECT 1 AS orders",
+            "SELECT 2 AS users",
+            "SELECT 3 AS orders_too",
+        ] {
+            panel.set_query(query);
+            panel.execute_query().await.unwrap();
+        }
+        panel.set_query("ALTER USER bob WITH PASSWORD 'hunter2'");
+        let _ = panel.execute_query().await;
+        assert!(
+            panel
+                .history
+                .iter()
+                .all(|entry| !entry.query.contains("hunter2"))
+        );
+        assert_eq!(panel.history.last().unwrap().query, SECRET_QUERY);
+        panel.set_query("orders");
+        panel.walk_history(true);
+        assert_eq!(panel.query_text, "SELECT 3 AS orders_too");
+        panel.walk_history(true);
+        assert_eq!(panel.query_text, "SELECT 1 AS orders");
+        panel.walk_history(true);
+        assert_eq!(
+            panel.query_text, "SELECT 1 AS orders",
+            "nothing older stays put"
+        );
+        panel.walk_history(false);
+        panel.walk_history(false);
+        assert_eq!(panel.query_text, "orders", "the text typed comes back");
+        // Another connection's queries are not walked.
+        panel.history[0].connection_name = "other".into();
+        panel.set_query("AS orders");
+        panel.walk_history(true);
+        panel.walk_history(true);
+        assert_eq!(panel.query_text, "SELECT 3 AS orders_too");
+    }
+
+    #[tokio::test]
+    async fn sql_tabs_completion_and_edits_with_parameters() {
+        let directory = TempDir::new().unwrap();
+        let mut panel = panel(&directory);
+        panel
+            .add_connection(&sqlite_form(&directory, "e"))
+            .await
+            .unwrap();
+        panel.set_query("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, nickname TEXT)");
+        panel.execute_query().await.unwrap();
+        panel.load_catalog().await.unwrap();
+        // Tabs keep their own text.
+        panel.set_query("SELECT 1");
+        panel.new_sql_tab();
+        assert_eq!((panel.sql_tab, panel.query_text.as_str()), (1, ""));
+        panel.insert_query("SELECT * FROM peo");
+        panel.complete();
+        assert_eq!(panel.completions, ["people"]);
+        assert!(panel.accept_completion());
+        assert_eq!(panel.query_text, "SELECT * FROM people");
+        panel.open_sql_tab(0);
+        assert_eq!(panel.query_text, "SELECT 1");
+        panel.open_sql_tab(1);
+        panel.close_sql_tab();
+        assert_eq!(
+            (panel.sql_tabs.len(), panel.query_text.as_str()),
+            (1, "SELECT 1")
+        );
+        panel.close_sql_tab();
+        assert_eq!((panel.sql_tabs.len(), panel.query_text.as_str()), (1, ""));
+        // An edit, an insert and a delete, each a statement with parameters.
+        panel.set_query("INSERT INTO people (name) VALUES ('Ana')");
+        panel.execute_query().await.unwrap();
+        panel.set_query("SELECT id, name, nickname FROM people");
+        panel.execute_query().await.unwrap();
+        let hostile = "x'); DROP TABLE people; --\u{0}é\"";
+        let update = panel.edit_statement(0, 1, hostile).unwrap();
+        assert!(!update.sql.contains("DROP"));
+        panel.run_edit(update).await.unwrap();
+        assert_eq!(
+            panel.results.as_ref().unwrap().rows[0][1],
+            DatabaseValue::Text(hostile.into())
+        );
+        panel
+            .run_edit(panel.edit_statement(0, 2, "NULL").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            panel.results.as_ref().unwrap().rows[0][2],
+            DatabaseValue::Null
+        );
+        panel
+            .run_edit(panel.insert_statement(0).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(panel.results.as_ref().unwrap().rows.len(), 2);
+        panel
+            .run_edit(panel.delete_statement(0).unwrap())
+            .await
+            .unwrap();
+        let rows = &panel.results.as_ref().unwrap().rows;
+        assert_eq!((rows.len(), &rows[0][0]), (1, &DatabaseValue::Integer(2)));
+        // A query of more than one table is not edited.
+        panel.set_query("SELECT a.id FROM people a JOIN people b ON a.id = b.id");
+        panel.execute_query().await.unwrap();
+        assert!(panel.edit_statement(0, 0, "1").is_err());
     }
 }

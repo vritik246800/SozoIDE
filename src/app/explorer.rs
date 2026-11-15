@@ -16,6 +16,7 @@ use ratatui::style::Color;
 use super::App;
 use crate::editor::file_icon;
 
+#[derive(Clone)]
 pub struct FileEntry {
     pub path: PathBuf,
     pub name: String,
@@ -24,7 +25,20 @@ pub struct FileEntry {
     pub depth: usize,
     pub is_dir: bool,
     pub expanded: bool,
+    /// Not an entry: the row that says how many more a huge folder has (F01, `PAGE`).
+    pub more: usize,
 }
+
+/// A folder shows at most this many entries; the row after them says how many more, and `/`
+/// finds any of them (TODO 5.2.2).
+pub(super) const PAGE: usize = 10_000;
+
+/// Folders with a single folder inside are one row, `a/b/c`, while their parent has at most
+/// this many folders (each needs one more read of the disk).
+const COMPACT_UP_TO: usize = 200;
+
+/// From this many entries on screen, a tree changed by another program is read on a thread.
+pub(super) const LARGE_TREE: usize = 5_000;
 
 /// What the Explorer's right-click menu does (F01).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,28 +46,60 @@ pub enum EntryAction {
     NewFile,
     NewFolder,
     Rename,
+    /// To the system's trash; Ctrl+Z in the Explorer brings it back (R14, Q95).
     Delete,
+    /// `Shift+Delete`: gone for good, after the same question (R14).
+    DeleteForever,
     /// The clipboard: files and folders in the Explorer, text in the editor.
     Cut,
     Copy,
     Paste,
     /// The metadata of a file or folder (F30).
     Properties,
+    /// The path of what is chosen on the clipboard, whole or from the project (F01).
+    CopyPath,
+    CopyRelativePath,
+    /// The system's file manager, with the entry selected (F01).
+    RevealInSystem,
+    /// A copy next to it with a free name (F01).
+    Duplicate,
+    /// A drag onto a folder: what is chosen moves into it, after the question (F01).
+    MoveHere,
+    /// A text file so large that opening it is asked first (R11).
+    OpenLarge,
+    /// Whether the code of this folder may run (F45).
+    Trust,
     /// The editor's questions to the language server (F31).
     Code(crate::lsp::Goal),
 }
 
 impl EntryAction {
+    /// The prompt only asks: there is no name to type.
+    pub fn asks(self) -> bool {
+        matches!(
+            self,
+            Self::Delete | Self::DeleteForever | Self::OpenLarge | Self::Trust | Self::MoveHere
+        )
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::NewFile => "New File",
             Self::NewFolder => "New Folder",
             Self::Rename => "Rename",
             Self::Delete => "Delete",
+            Self::DeleteForever => "Delete for Good",
             Self::Cut => "Cut",
             Self::Copy => "Copy",
             Self::Paste => "Paste",
             Self::Properties => "Properties",
+            Self::CopyPath => "Copy Path",
+            Self::CopyRelativePath => "Copy Relative Path",
+            Self::RevealInSystem => "Reveal in File Manager",
+            Self::Duplicate => "Duplicate",
+            Self::MoveHere => "Move",
+            Self::OpenLarge => "Open",
+            Self::Trust => "Trust",
             Self::Code(goal) => {
                 use crate::lsp::Goal;
                 match goal {
@@ -289,6 +335,10 @@ fn checked_name(name: &str) -> Result<&str> {
     if name == "." || name == ".." || name.contains(['/', '\\']) {
         bail!("A name cannot be . or .. or contain / or \\");
     }
+    // A new line or an escape in a name breaks the lines of every tool that lists it (5.F.2).
+    if name.chars().any(char::is_control) {
+        bail!("A name cannot have control characters (a new line, a tab, an escape)");
+    }
     Ok(name)
 }
 
@@ -323,7 +373,8 @@ pub fn rename_entry(path: &Path, name: &str) -> Result<PathBuf> {
     Ok(renamed)
 }
 
-/// Deletes a file, or a folder with everything in it, for good (Q39); never `root`.
+/// Deletes a file, or a folder with everything in it, for good (Q39, `Shift+Delete`); never
+/// `root`.
 pub fn delete_entry(root: &Path, path: &Path) -> Result<()> {
     if path == root || !path.starts_with(root) {
         bail!("Only files and folders inside the project can be deleted");
@@ -371,7 +422,21 @@ fn copy_name(path: &Path, copies: usize) -> String {
 }
 
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
-    if !fs::symlink_metadata(from)?.is_dir() {
+    let kind = fs::symlink_metadata(from)?.file_type();
+    // A link is copied as a link: what it points to, maybe outside the project, is never
+    // read (5.F.2).
+    if kind.is_symlink() {
+        let target = fs::read_link(from)?;
+        #[cfg(unix)]
+        return std::os::unix::fs::symlink(target, to);
+        #[cfg(windows)]
+        return if from.is_dir() {
+            std::os::windows::fs::symlink_dir(target, to)
+        } else {
+            std::os::windows::fs::symlink_file(target, to)
+        };
+    }
+    if !kind.is_dir() {
         return fs::copy(from, to).map(drop);
     }
     fs::create_dir(to)?;
@@ -402,6 +467,17 @@ pub fn move_entry(root: &Path, path: &Path, folder: &Path) -> Result<PathBuf> {
     Ok(target)
 }
 
+/// The one folder inside `folder`, when it holds nothing else.
+fn only_folder(folder: &Path) -> Option<PathBuf> {
+    let mut children = fs::read_dir(folder).ok()?.filter_map(Result::ok);
+    let only = children.next()?;
+    if children.next().is_some() || !only.file_type().ok()?.is_dir() {
+        return None;
+    }
+    let name = only.file_name();
+    (name != ".git" && name != "target").then(|| only.path())
+}
+
 impl App {
     pub fn refresh_entries(&mut self) -> Result<()> {
         let selected_path = self
@@ -414,9 +490,21 @@ impl App {
             .filter(|entry| entry.expanded)
             .map(|entry| entry.path.clone())
             .collect::<Vec<_>>();
-        self.entries.clear();
-        Self::collect_entries(&self.root, 0, &expanded, &mut self.entries)?;
-        if let Some(path) = selected_path
+        let mut entries = Vec::new();
+        Self::collect_entries(&self.root, 0, &expanded, &mut entries)?;
+        self.set_entries(entries, selected_path);
+        // Only the project's own `.gitignore` (the nested ones are not read for the dimming).
+        let mut ignored = ignore::gitignore::GitignoreBuilder::new(&self.root);
+        ignored.add(self.root.join(".gitignore"));
+        self.gitignore = ignored.build().ok();
+        self.folders = self.folder_times();
+        Ok(())
+    }
+
+    /// The tree read again, with the selection on the entry it was on.
+    fn set_entries(&mut self, entries: Vec<FileEntry>, selected: Option<PathBuf>) {
+        self.entries = entries;
+        if let Some(path) = selected
             && let Some(index) = self.entries.iter().position(|entry| entry.path == path)
         {
             self.selected_entry = index;
@@ -424,8 +512,54 @@ impl App {
         self.selected_entry = self
             .selected_entry
             .min(self.entries.len().saturating_sub(1));
+    }
+
+    /// Another program changed a folder on screen: a small tree is read at once; a large one
+    /// (`LARGE_TREE`) on a thread, so that reading 100 000 names never stops the keys.
+    pub(super) fn follow_folders(&mut self) -> Result<()> {
+        if self.entries.len() < LARGE_TREE {
+            return self.refresh_entries();
+        }
+        if self.entries_reader.is_some() {
+            return Ok(());
+        }
+        // What is being read is what the folders are now: the next change asks again.
         self.folders = self.folder_times();
+        let root = self.root.clone();
+        let expanded = self
+            .entries
+            .iter()
+            .filter(|entry| entry.expanded)
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut entries = Vec::new();
+            if Self::collect_entries(&root, 0, &expanded, &mut entries).is_ok() {
+                let _ = sender.send(entries);
+            }
+        });
+        self.entries_reader = Some(receiver);
         Ok(())
+    }
+
+    /// In the tick: the tree a thread read, once it arrives.
+    pub(super) fn tick_entries(&mut self) {
+        let Some(reader) = &self.entries_reader else {
+            return;
+        };
+        match reader.try_recv() {
+            Ok(entries) => {
+                let selected = self
+                    .entries
+                    .get(self.selected_entry)
+                    .map(|entry| entry.path.clone());
+                self.set_entries(entries, selected);
+                self.entries_reader = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.entries_reader = None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
     }
 
     pub(super) fn collect_entries(
@@ -442,16 +576,35 @@ impl App {
                 name != ".git" && name != "target"
             })
             .collect::<Vec<_>>();
-        children.sort_by_key(|entry| {
+        // The key of each entry is made once: a folder of 100 000 files sorts in a moment.
+        children.sort_by_cached_key(|entry| {
             let is_file = entry
                 .file_type()
                 .map(|kind| kind.is_file())
                 .unwrap_or(false);
-            (is_file, entry.file_name().to_string_lossy().to_lowercase())
+            // Folders first, then names as people read them (`file2` before `file10`).
+            (
+                is_file,
+                super::tree::natural_key(&entry.file_name().to_string_lossy()),
+            )
         });
-        for child in children {
-            let path = child.path();
+        let total = children.len();
+        let folders = children
+            .iter()
+            .filter(|child| child.file_type().is_ok_and(|kind| kind.is_dir()))
+            .count();
+        for child in children.into_iter().take(PAGE) {
+            let mut path = child.path();
             let is_dir = child.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+            let mut name = child.file_name().to_string_lossy().into_owned();
+            // A folder holding only a folder: one row, `a/b/c`, that opens the last one.
+            if is_dir && folders <= COMPACT_UP_TO {
+                while let Some(only) = only_folder(&path) {
+                    name.push('/');
+                    name.push_str(&only.file_name().unwrap_or_default().to_string_lossy());
+                    path = only;
+                }
+            }
             let is_expanded = expanded.contains(&path);
             entries.push(FileEntry {
                 icon: if is_dir {
@@ -459,15 +612,27 @@ impl App {
                 } else {
                     file_icon(&path)
                 },
-                name: child.file_name().to_string_lossy().into_owned(),
+                name,
                 path: path.clone(),
                 depth,
                 is_dir,
                 expanded: is_expanded,
+                more: 0,
             });
             if is_dir && is_expanded {
                 Self::collect_entries(&path, depth + 1, expanded, entries)?;
             }
+        }
+        if total > PAGE {
+            entries.push(FileEntry {
+                icon: (' ', Color::Reset),
+                name: format!("… {} more: / finds them", total - PAGE),
+                path: dir.join(""),
+                depth,
+                is_dir: false,
+                expanded: false,
+                more: total - PAGE,
+            });
         }
         Ok(())
     }
@@ -476,6 +641,11 @@ impl App {
         let Some(entry) = self.entries.get(self.selected_entry) else {
             return;
         };
+        if entry.more > 0 {
+            self.explorer_filter = Some(String::new());
+            self.status = "Type part of the name to find it".into();
+            return;
+        }
         let path = entry.path.clone();
         if entry.is_dir {
             self.toggle_directory(&path);
@@ -497,9 +667,18 @@ impl App {
             actions.push(EntryAction::Paste);
         }
         if target != self.root {
-            actions.extend([EntryAction::Rename, EntryAction::Delete]);
+            actions.extend([
+                EntryAction::Duplicate,
+                EntryAction::Rename,
+                EntryAction::Delete,
+            ]);
         }
-        actions.push(EntryAction::Properties);
+        actions.extend([
+            EntryAction::CopyPath,
+            EntryAction::CopyRelativePath,
+            EntryAction::RevealInSystem,
+            EntryAction::Properties,
+        ]);
         if let Some(index) = index.filter(|index| *index < self.entries.len()) {
             self.selected_entry = index;
         }
@@ -527,6 +706,10 @@ impl App {
             }
             EntryAction::Paste => return self.paste_entry(&menu.target),
             EntryAction::Properties => return self.open_properties(&menu.target),
+            EntryAction::CopyPath => return self.copy_paths(false),
+            EntryAction::CopyRelativePath => return self.copy_paths(true),
+            EntryAction::RevealInSystem => return self.reveal_in_system(),
+            EntryAction::Duplicate => return self.duplicate_chosen(),
             _ => {}
         }
         let name = if action == EntryAction::Rename {
@@ -570,6 +753,17 @@ impl App {
         }
     }
 
+    /// Esc on the prompt: nothing is done; to «Trust this folder?» it is the answer no.
+    pub(super) fn cancel_name(&mut self) {
+        let trust = self
+            .name_prompt
+            .take()
+            .is_some_and(|prompt| prompt.action == EntryAction::Trust);
+        if trust {
+            self.answer_trust(false);
+        }
+    }
+
     /// Creates or renames as the prompt says; on an error the prompt stays with it.
     pub fn confirm_name(&mut self) {
         let Some(prompt) = &mut self.name_prompt else {
@@ -584,11 +778,66 @@ impl App {
                 .parent()
                 .map_or_else(|| self.root.clone(), Path::to_path_buf)
         };
-        if prompt.action == EntryAction::Delete {
+        if prompt.action == EntryAction::Trust {
+            self.name_prompt = None;
+            return self.answer_trust(true);
+        }
+        if prompt.action == EntryAction::OpenLarge {
             let target = prompt.target.clone();
-            match delete_entry(&self.root, &target) {
-                Ok(()) => self.deleted(&target),
-                Err(error) => prompt.error = Some(format!("{error:#}")),
+            match self.open_file_now(target) {
+                Ok(()) => self.name_prompt = None,
+                Err(error) => {
+                    if let Some(prompt) = &mut self.name_prompt {
+                        prompt.error = Some(format!("{error:#}"));
+                    }
+                }
+            }
+            return;
+        }
+        if prompt.action == EntryAction::MoveHere {
+            match self.confirm_move() {
+                Ok(()) => self.name_prompt = None,
+                Err(error) => {
+                    if let Some(prompt) = &mut self.name_prompt {
+                        prompt.error = Some(format!("{error:#}"));
+                    }
+                }
+            }
+            return;
+        }
+        // Several marked entries: all of them to the trash, after one question.
+        if prompt.action == EntryAction::Delete && self.marked.len() > 1 {
+            let first = prompt.target.clone();
+            match self.trash_marked() {
+                Ok(()) => self.deleted(&first, false),
+                Err(error) => {
+                    if let Some(prompt) = &mut self.name_prompt {
+                        prompt.error = Some(format!("{error:#}"));
+                    }
+                }
+            }
+            return;
+        }
+        if matches!(
+            prompt.action,
+            EntryAction::Delete | EntryAction::DeleteForever
+        ) {
+            let (target, forever) = (
+                prompt.target.clone(),
+                prompt.action == EntryAction::DeleteForever,
+            );
+            let result = if forever {
+                delete_entry(&self.root, &target)
+            } else {
+                self.trash_entry(&target)
+            };
+            match result {
+                Ok(()) => self.deleted(&target, forever),
+                Err(error) => {
+                    if let Some(prompt) = &mut self.name_prompt {
+                        prompt.error = Some(format!("{error:#}"));
+                    }
+                }
             }
             return;
         }
@@ -608,6 +857,10 @@ impl App {
         self.name_prompt = None;
         if action == EntryAction::Rename {
             self.renamed(&old, &path);
+            self.file_undo = Some(super::tree::FileUndo::Moved {
+                from: old.clone(),
+                to: path.clone(),
+            });
         } else if let Some(entry) = self.entries.iter_mut().find(|entry| entry.path == parent) {
             entry.expanded = true;
         }
@@ -680,6 +933,10 @@ impl App {
             // A move is done once; its tabs follow it.
             self.file_clipboard = None;
             self.renamed(&path, &pasted);
+            self.file_undo = Some(super::tree::FileUndo::Moved {
+                from: path.clone(),
+                to: pasted.clone(),
+            });
         }
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.path == folder) {
             entry.expanded = true;
@@ -699,7 +956,7 @@ impl App {
     }
 
     /// After a delete: the tabs of what was deleted close without saving it back.
-    fn deleted(&mut self, path: &Path) {
+    fn deleted(&mut self, path: &Path, forever: bool) {
         self.name_prompt = None;
         while let Some(index) = self
             .open_files
@@ -712,13 +969,19 @@ impl App {
         if let Err(error) = self.refresh_entries() {
             self.status = error.to_string();
         }
-        self.status = format!(
-            "Deleted {}",
-            path.strip_prefix(&self.root).unwrap_or(path).display()
-        );
+        let name = path.strip_prefix(&self.root).unwrap_or(path).display();
+        self.status = if forever {
+            format!("Deleted {name} for good")
+        } else {
+            format!("Moved {name} to the Trash: Ctrl+Z in the Explorer brings it back")
+        };
     }
 
     /// Follows a rename in the tree (expanded folders) and in the open tabs.
+    pub(super) fn follow_rename(&mut self, old: &Path, new: &Path) {
+        self.renamed(old, new);
+    }
+
     fn renamed(&mut self, old: &Path, new: &Path) {
         for entry in &mut self.entries {
             if let Ok(rest) = entry.path.strip_prefix(old) {
@@ -739,18 +1002,68 @@ impl App {
     }
 
     fn toggle_directory(&mut self, path: &Path) {
-        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.path == path) {
-            entry.expanded = !entry.expanded;
-        }
-        if let Err(error) = self.refresh_entries() {
-            self.status = error.to_string();
-        }
+        let open = self
+            .entries
+            .iter()
+            .any(|entry| entry.path == path && !entry.expanded);
+        self.set_folder(path, open);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_huge_folder_changed_elsewhere_is_read_again_without_stopping_the_keys() {
+        use std::time::{Duration, Instant};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        for index in 0..20_000 {
+            fs::write(root.join(format!("file{index:05}.txt")), "").unwrap();
+        }
+        let mut app = App::new(root.to_path_buf()).unwrap();
+        // A page of the folder, and the row that says how many more there are (TODO 5.2.2).
+        assert_eq!(app.entries.len(), 10_001);
+        assert_eq!(app.entries[10_000].more, 10_000);
+
+        // Nothing changed: asking costs the time of one question to the disk per folder.
+        let started = Instant::now();
+        for _ in 0..100 {
+            app.watch_disk();
+        }
+        let each = started.elapsed() / 100;
+        assert!(each < Duration::from_millis(5), "{each:?} for a watch");
+        assert!(app.entries_reader.is_none());
+
+        // Another program adds a file: the watch comes back at once and a thread reads.
+        fs::write(root.join("added.txt"), "").unwrap();
+        let started = Instant::now();
+        app.watch_disk();
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_millis(20),
+            "{took:?} to start reading"
+        );
+        assert!(app.entries_reader.is_some());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while app.entries_reader.is_some() {
+            assert!(Instant::now() < deadline, "the tree never arrived");
+            app.tick_entries();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.entries.len(), 10_001);
+        assert_eq!(app.entries[10_000].more, 10_001);
+        assert!(app.entries.iter().any(|entry| entry.name == "added.txt"));
+
+        // A small tree is still read at once, with no thread.
+        let small = tempfile::tempdir().unwrap();
+        let mut app = App::new(small.path().to_path_buf()).unwrap();
+        fs::write(small.path().join("new.txt"), "").unwrap();
+        app.watch_disk();
+        assert!(app.entries_reader.is_none());
+        assert_eq!(app.entries.len(), 1);
+    }
 
     #[test]
     fn properties_read_a_file_a_folder_and_a_link() {
@@ -897,5 +1210,51 @@ mod tests {
         assert!(move_entry(root, &src, &src.join("inner")).is_err());
         assert!(move_entry(root, root, &src).is_err());
         assert_eq!(move_entry(root, &moved, &src).unwrap(), moved);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn hostile_names_links_out_of_the_project_and_folders_into_themselves_are_refused() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "not yours").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        // Names with a new line, a tab, an escape, `..` or a separator.
+        for name in ["a\nb", "tab\there", "x\u{1b}[31m", "..", "a/b", "  "] {
+            assert!(create_entry(root, name, false).is_err(), "{name:?}");
+        }
+        assert!(
+            create_entry(root, "é 漢字.txt", false).is_ok(),
+            "Unicode is fine"
+        );
+        // A link to a file outside, copied, stays a link: the file it points to is not read in.
+        std::os::unix::fs::symlink(outside.path().join("secret.txt"), root.join("link.txt"))
+            .unwrap();
+        let folder = root.join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        let copied = copy_entry(&root.join("link.txt"), &folder).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&copied)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        // Copies of the same name never write over one another.
+        let first = copy_entry(&root.join("é 漢字.txt"), root).unwrap();
+        let second = copy_entry(&root.join("é 漢字.txt"), root).unwrap();
+        assert_ne!(first, second);
+        // A folder into itself, and the project anywhere, are refused.
+        assert!(move_entry(root, &folder, &folder).is_err());
+        assert!(copy_entry(&folder, &folder.join("x")).is_err());
+        assert!(move_entry(root, root, &folder).is_err());
+        assert!(
+            move_entry(root, outside.path(), &folder).is_err(),
+            "nothing from outside"
+        );
+        assert!(delete_entry(root, &outside.path().join("secret.txt")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("secret.txt")).unwrap(),
+            "not yours"
+        );
     }
 }

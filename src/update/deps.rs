@@ -6,15 +6,16 @@
 use std::{
     env,
     ffi::OsStr,
-    io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
     sync::mpsc::{Receiver, channel},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use rayon::prelude::*;
+
+use crate::process;
 
 pub const TOOLS: [&str; 3] = ["git", "curl", "ffmpeg"];
 
@@ -113,10 +114,8 @@ pub fn upgrade(install: &[String]) -> Vec<String> {
 /// What to put before a package manager on Linux: nothing as root, `sudo` otherwise (the
 /// terminal of the Dependencies tab can ask for the password).
 pub fn sudo() -> &'static [&'static str] {
-    let root = Command::new("id")
-        .arg("-u")
-        .output()
-        .is_ok_and(|output| output.stdout.trim_ascii() == b"0");
+    let root = process::output(Command::new("id").arg("-u"), process::QUICK)
+        .is_some_and(|output| output.stdout.trim_ascii() == b"0");
     if root { &[] } else { &["sudo"] }
 }
 
@@ -358,14 +357,9 @@ pub fn own_tools(components: Vec<Component>) -> Vec<Component> {
 
 /// The tmux this machine has, when it can run the terminals (F38): `mouse` is from 2.1.
 pub fn tmux_usable() -> bool {
-    Command::new("tmux")
-        .arg("-V")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .is_ok_and(|output| {
-            output.status.success() && version_at_least(&String::from_utf8_lossy(&output.stdout))
-        })
+    process::output(Command::new("tmux").arg("-V"), process::QUICK).is_some_and(|output| {
+        output.status.success() && version_at_least(&String::from_utf8_lossy(&output.stdout))
+    })
 }
 
 /// `tmux 3.5a`, `tmux next-3.6` or `tmux master`: anything not an older number passes.
@@ -419,38 +413,130 @@ pub fn found(program: &str, probe: &[String]) -> Found {
 /// input (it is stopped).
 fn run(probe: &[String]) -> Option<(bool, Option<String>)> {
     let program = locate(&probe[0]).unwrap_or_else(|| PathBuf::from(&probe[0]));
-    let mut child = Command::new(program)
-        .args(&probe[1..])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < Duration::from_secs(4) => {
-                thread::sleep(Duration::from_millis(20));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    };
-    let mut text = String::new();
-    child.stdout.take()?.read_to_string(&mut text).ok()?;
+    let output = process::output(Command::new(program).args(&probe[1..]), process::QUICK)?;
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     if text.trim().is_empty() {
-        child.stderr.take()?.read_to_string(&mut text).ok()?;
+        text = String::from_utf8_lossy(&output.stderr).into_owned();
     }
+    let status = output.status;
     let line = text
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map(|line| line.chars().take(60).collect());
     Some((status.success(), line))
+}
+
+/// The packages a manager's upgrade command names: the words after its subcommand that are
+/// not options (`brew upgrade ffmpeg`, `apt-get install --only-upgrade -y nodejs npm`,
+/// `winget upgrade --id Git.Git --exact`).
+pub fn packages_of(update: &[String]) -> (String, Vec<String>) {
+    let start = update
+        .iter()
+        .position(|word| matches!(word.as_str(), "brew" | "apt-get" | "dnf" | "winget"));
+    let Some(start) = start else {
+        return (String::new(), Vec::new());
+    };
+    let manager = update[start].clone();
+    let rest = &update[start + 1..];
+    let names = if manager == "winget" {
+        rest.windows(2)
+            .filter(|pair| pair[0] == "--id")
+            .map(|pair| pair[1].clone())
+            .collect()
+    } else {
+        rest.iter()
+            .skip(1)
+            .filter(|word| !word.starts_with('-'))
+            .cloned()
+            .collect()
+    };
+    (manager, names)
+}
+
+/// The packages `manager` says have a newer version, from what it printed (`brew outdated
+/// --quiet`, `apt list --upgradable`, `dnf -q check-update`, `winget upgrade`).
+pub fn outdated_in(manager: &str, printed: &str) -> Vec<String> {
+    printed
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            match manager {
+                "brew" => line.split_whitespace().next().map(str::to_owned),
+                "apt-get" => line
+                    .split_once('/')
+                    .map(|(name, _)| name.to_owned())
+                    .filter(|_| line.contains("upgradable")),
+                "dnf" => line
+                    .split_whitespace()
+                    .next()
+                    .and_then(|name| name.rsplit_once('.'))
+                    .map(|(name, _)| name.to_owned()),
+                "winget" => line
+                    .split_whitespace()
+                    .find(|word| {
+                        word.contains('.') && word.chars().next().is_some_and(char::is_alphabetic)
+                    })
+                    .map(str::to_owned),
+                _ => None,
+            }
+        })
+        .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+        .collect()
+}
+
+/// For each component, whether its package manager has a newer version (TODO 6.2.2, Q71):
+/// none when it cannot say (no manager, or the question failed). Each manager is asked once,
+/// on a thread, and answers from what it already knows; SozoIDE itself sends nothing.
+pub fn check_outdated(components: &[Component]) -> Receiver<Vec<Option<bool>>> {
+    let (sender, receiver) = channel();
+    let wanted: Vec<(String, Vec<String>)> = components
+        .iter()
+        .map(|component| {
+            component
+                .update
+                .as_deref()
+                .map(packages_of)
+                .unwrap_or_default()
+        })
+        .collect();
+    thread::spawn(move || {
+        let mut answers: std::collections::HashMap<String, Option<Vec<String>>> =
+            std::collections::HashMap::new();
+        for (manager, _) in &wanted {
+            if manager.is_empty() || answers.contains_key(manager) {
+                continue;
+            }
+            let question: &[&str] = match manager.as_str() {
+                "brew" => &["brew", "outdated", "--quiet"],
+                "apt-get" => &["apt", "list", "--upgradable"],
+                "dnf" => &["dnf", "-q", "check-update"],
+                _ => &["winget", "upgrade", "--accept-source-agreements"],
+            };
+            let mut command = Command::new(question[0]);
+            command.args(&question[1..]);
+            // dnf says 100 when there are updates: what counts is what it printed.
+            let printed = crate::process::output(&mut command, Duration::from_secs(30))
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+            answers.insert(
+                manager.clone(),
+                printed.map(|printed| outdated_in(manager, &printed)),
+            );
+        }
+        let states = wanted
+            .iter()
+            .map(|(manager, names)| {
+                let outdated = answers.get(manager)?.as_ref()?;
+                (!names.is_empty()).then(|| {
+                    names
+                        .iter()
+                        .any(|name| outdated.iter().any(|old| old.eq_ignore_ascii_case(name)))
+                })
+            })
+            .collect();
+        let _ = sender.send(states);
+    });
+    receiver
 }
 
 /// What is found of each component, read in parallel on threads; all of it arrives at once.
@@ -587,12 +673,10 @@ pub fn server_command(name: &str, arguments: &[&str]) -> Option<Vec<String>> {
         .or_else(|| {
             let xcrun = cfg!(target_os = "macos")
                 && name == "clangd"
-                && Command::new("xcrun")
-                    .args(["--find", "clangd"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .is_ok_and(|status| status.success());
+                && process::succeeds(
+                    Command::new("xcrun").args(["--find", "clangd"]),
+                    process::QUICK,
+                );
             xcrun.then(|| vec!["xcrun".to_owned(), name.to_owned()])
         })?;
     Some(
@@ -1028,6 +1112,51 @@ mod tests {
         assert_eq!(
             never.recv_timeout(Duration::from_secs(10)),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn managers_say_which_packages_have_a_newer_version() {
+        let words = |text: &str| {
+            text.split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            packages_of(&words("brew upgrade ffmpeg")),
+            ("brew".into(), vec!["ffmpeg".into()])
+        );
+        assert_eq!(packages_of(&words("sudo env DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y nodejs npm")).1, ["nodejs", "npm"]);
+        assert_eq!(
+            packages_of(&words("winget upgrade --id Git.Git --exact --silent")).1,
+            ["Git.Git"]
+        );
+        assert_eq!(
+            packages_of(&words("python3 -m pip install --upgrade debugpy")).0,
+            ""
+        );
+        assert_eq!(outdated_in("brew", "ffmpeg\ngit\n"), ["ffmpeg", "git"]);
+        assert_eq!(
+            outdated_in(
+                "apt-get",
+                "Listing...\ngit/stable 1:2.47 amd64 [upgradable from: 1:2.45]\n"
+            ),
+            ["git"]
+        );
+        assert_eq!(
+            outdated_in("dnf", "\ncurl.x86_64  8.11-1.fc43  updates\n"),
+            ["curl"]
+        );
+        assert_eq!(
+            outdated_in(
+                "winget",
+                "Name  Id        Version Available\n----\nGit   Git.Git   2.45    2.47\n"
+            ),
+            ["Git.Git"]
+        );
+        assert!(
+            outdated_in("brew", "\u{1b}[31mevil\n").is_empty()
+                || !outdated_in("brew", "\u{1b}[31mevil\n")[0].contains('\u{1b}')
         );
     }
 }

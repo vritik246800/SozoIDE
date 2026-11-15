@@ -6,7 +6,8 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-pub use markdown::{MarkdownDocument, Row};
+pub use markdown::is_markdown_path as is_markdown;
+pub use markdown::{MarkdownDocument, Pointer, Row, heading_row, headings};
 use markdown::{is_markdown_path, visual_column_to_char};
 use ratatui::{
     style::Color,
@@ -16,20 +17,44 @@ use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 
 use crate::media::{self, Media};
 
+mod edit;
 mod highlight;
 mod markdown;
 mod mermaid;
 mod pdf;
 mod search;
+mod text;
 
+pub use edit::{EditorConfig, Indent, detect_indent, editor_config};
 use highlight::FileHighlight;
 pub use highlight::{file_icon, highlight_lines, language_name};
 use pdf::{PageView, PdfDocument, is_pdf_path};
 #[cfg(test)]
-pub use pdf::{sample as sample_pdf, sample_pages as sample_pdf_pages};
-pub use search::{MAX_MATCHES, SearchMatch, SearchScope, SearchState};
+pub use pdf::{
+    sample as sample_pdf, sample_pages as sample_pdf_pages,
+    sample_with_outline as sample_pdf_with_outline,
+};
+pub use search::{
+    MAX_MATCHES, Planned, SearchMatch, SearchOptions, SearchScope, SearchState, apply_replace,
+    matcher, plan_replace, replace_first, replace_line,
+};
+pub use text::{Encoding, char_width};
 
-const AUTOSAVE_DELAY: Duration = Duration::from_secs(2);
+/// From this many lines a file opens in plain text and its colours come from a thread
+/// (TODO 2.1.10): opening never waits for them.
+const COLOUR_ON_THREAD: usize = 2_000;
+
+/// Where the colours worked out on a thread arrive.
+type Colours = std::sync::mpsc::Receiver<(FileHighlight, Vec<Vec<Span<'static>>>)>;
+/// A text file above `LARGE_FILE` opens read only and without colours; above `HUGE_FILE` the
+/// app asks first; above `MAX_FILE` it does not open (R11).
+const LARGE_FILE: u64 = 5 * 1024 * 1024;
+const HUGE_FILE: u64 = 50 * 1024 * 1024;
+// ponytail: a file is read whole, as lines and as spans; a paged reader if logs over 512 MB
+// ever matter.
+const MAX_FILE: u64 = 512 * 1024 * 1024;
+/// A PDF is read whole before its first page is drawn.
+const MOST_PDF: u64 = 256 * 1024 * 1024;
 /// Edits of one kind closer than this undo together: a word typed, a paste.
 const UNDO_GROUP: Duration = Duration::from_secs(1);
 /// Steps of undo kept for each file.
@@ -52,6 +77,14 @@ enum Change {
     Reload,
 }
 
+/// A text file so large that the app asks before reading it whole (R11). Pictures, videos and
+/// PDFs have their own readers and limits.
+pub fn is_huge_text(path: &Path) -> bool {
+    media::kind(path).is_none()
+        && !is_pdf_path(path)
+        && fs::metadata(path).is_ok_and(|file| file.len() > HUGE_FILE)
+}
+
 pub struct OpenFile {
     pub path: PathBuf,
     pub name: String,
@@ -72,6 +105,8 @@ pub struct OpenFile {
     /// The first row on screen (`rows`, not source lines) and the first column.
     pub scroll: u16,
     pub scroll_x: u16,
+    /// The first row as drawn: it runs to `scroll` in steps after a page (`SCROLL`, F08).
+    pub shown_scroll: crate::animation::Scroll,
     /// The widest line as drawn, for the horizontal scroll.
     pub max_width: usize,
     /// The editor pane that shows this tab when the editor is split (F19), set by the app.
@@ -86,11 +121,31 @@ pub struct OpenFile {
     /// selects nothing.
     pub anchor: Option<(usize, usize)>,
     pub dirty: bool,
+    /// Too large to edit (`LARGE_FILE`): read, selected, copied and searched, never changed.
+    pub read_only: bool,
     /// Counts the edits, from 1: the language server is sent the text when it changes (F26).
     pub edits: u64,
     trailing_newline: bool,
     /// The text before each edit, for `undo`, and the kind and time of the last one.
     history: Vec<Snapshot>,
+    /// What `undo` took back, for `redo` (TODO 2.1.1); a new edit forgets it.
+    future: Vec<Snapshot>,
+    /// How this file indents: its `.editorconfig`, else its lines, else the settings.
+    pub indent: Indent,
+    /// Its lines end with `\r\n`; it is saved so, never mixed (TODO 2.1.7).
+    pub crlf: bool,
+    pub encoding: Encoding,
+    /// Not valid text (bad UTF-8): shown, never saved over (TODO 2.1.7).
+    pub not_text: bool,
+    /// What `.editorconfig` asks of a save.
+    config: EditorConfig,
+    /// Long lines wrap into rows of `wrap_width` columns (TODO 2.1.8).
+    pub wrap: bool,
+    pub wrap_width: usize,
+    /// How long after the last key the file saves itself; none: never (F42).
+    pub autosave: Option<Duration>,
+    /// Colours being worked out on a thread, for the text as it was at that edit.
+    colouring: Option<(u64, Colours)>,
     last_change: Option<(Change, Instant)>,
     last_edit: Option<Instant>,
     /// The file on disk when it was read or saved: its modification time and size, to see
@@ -109,13 +164,17 @@ impl OpenFile {
             // Pictures, GIFs, videos and models are drawn as text (Q43); a PDF page is its text,
             // or a picture in the terminal's picture protocol when it draws more than text (Q50).
             let (language, pdf, media) = if is_pdf_path(&path) {
+                if fs::metadata(&path).is_ok_and(|file| file.len() > MOST_PDF) {
+                    anyhow::bail!("{name} is larger than 256 MB: too large to open");
+                }
                 let bytes = fs::read(&path)
                     .with_context(|| format!("Could not open {}", path.display()))?;
-                let document = PdfDocument::open(bytes)
+                let document = media::within(media::OPENING, || PdfDocument::open(bytes))
                     .with_context(|| format!("Could not open {}", path.display()))?;
                 ("PDF", Some(document), None)
             } else {
-                let media = Media::open(&path)?;
+                let file = path.clone();
+                let media = media::within(media::OPENING, move || Media::open(&file))?;
                 (media.language(), None, Some(media))
             };
             let mut file = Self {
@@ -133,6 +192,7 @@ impl OpenFile {
                 media,
                 scroll: 0,
                 scroll_x: 0,
+                shown_scroll: crate::animation::Scroll::new(std::time::Instant::now(), 0),
                 max_width: 0,
                 pane: 0,
                 follow_cursor: false,
@@ -141,9 +201,20 @@ impl OpenFile {
                 cursor_column: 0,
                 anchor: None,
                 dirty: false,
+                read_only: false,
                 edits: 1,
                 trailing_newline: false,
                 history: Vec::new(),
+                future: Vec::new(),
+                indent: Indent::default(),
+                crlf: false,
+                encoding: Encoding::Utf8,
+                not_text: false,
+                config: EditorConfig::default(),
+                wrap: false,
+                wrap_width: 0,
+                autosave: None,
+                colouring: None,
                 last_change: None,
                 last_edit: None,
                 disk: None,
@@ -155,10 +226,50 @@ impl OpenFile {
         }
 
         let disk = on_disk(&path);
-        let (lines, trailing_newline) = read_lines(&path)?;
+        let size = disk.map_or(0, |(_, size)| size);
+        if size > MAX_FILE {
+            anyhow::bail!("{name} is larger than 512 MB: too large to open");
+        }
+        let decoded = read_lines(&path)?;
+        let not_text = !decoded.valid;
+        let read_only = size > LARGE_FILE || not_text;
+        let (lines, trailing_newline, crlf, encoding) = (
+            decoded.lines,
+            decoded.trailing_newline,
+            decoded.crlf,
+            decoded.encoding,
+        );
+        let settings = crate::settings::get();
+        let config = editor_config(&path, path.ancestors().last().unwrap_or(&path));
+        let indent = config
+            .indent
+            .or_else(|| detect_indent(&lines))
+            .unwrap_or(Indent {
+                tabs: !settings.insert_spaces,
+                width: settings.tab_width,
+            });
+        let wrap = if markdown::is_markdown_path(&path) {
+            settings.wrap_markdown
+        } else {
+            settings.wrap
+        };
         let mut highlight = FileHighlight::default();
-        let highlighted = highlight.update(&path, &lines);
-        let language = language_name(&path, &lines[0]);
+        let plain = |lines: &[String]| {
+            lines
+                .iter()
+                .map(|line| vec![Span::raw(line.clone())])
+                .collect()
+        };
+        let (highlighted, language) = if read_only {
+            (plain(&lines), "Read only")
+        } else if lines.len() >= COLOUR_ON_THREAD {
+            (plain(&lines), language_name(&path, &lines[0]))
+        } else {
+            (
+                highlight.update(&path, &lines),
+                language_name(&path, &lines[0]),
+            )
+        };
         let mut file = Self {
             path,
             name,
@@ -174,6 +285,7 @@ impl OpenFile {
             media: None,
             scroll: 0,
             scroll_x: 0,
+            shown_scroll: crate::animation::Scroll::new(std::time::Instant::now(), 0),
             max_width: 0,
             pane: 0,
             follow_cursor: false,
@@ -182,15 +294,66 @@ impl OpenFile {
             cursor_column: 0,
             anchor: None,
             dirty: false,
+            read_only,
             edits: 1,
             trailing_newline,
             history: Vec::new(),
+            future: Vec::new(),
+            indent,
+            crlf,
+            encoding,
+            not_text,
+            config,
+            wrap,
+            wrap_width: 0,
+            autosave: settings.autosave(),
+            colouring: None,
             last_change: None,
             last_edit: None,
             disk,
         };
+        if !read_only && file.lines.len() >= COLOUR_ON_THREAD {
+            file.colour_on_thread(FileHighlight::default());
+        }
         file.layout();
         Ok(file)
+    }
+
+    /// Works out the colours of the whole text on a thread; `tick_colours` takes them.
+    fn colour_on_thread(&mut self, mut highlight: FileHighlight) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (path, lines) = (self.path.clone(), self.lines.clone());
+        std::thread::spawn(move || {
+            let spans = highlight.update(&path, &lines);
+            let _ = sender.send((highlight, spans));
+        });
+        self.colouring = Some((self.edits, receiver));
+    }
+
+    /// In the tick: the colours from the thread, when they are for this text; for an older one
+    /// the thread goes again from where it got (only what changed is worked out again).
+    pub fn tick_colours(&mut self) -> bool {
+        let Some((edits, receiver)) = &self.colouring else {
+            return false;
+        };
+        let Ok((highlight, spans)) = receiver.try_recv() else {
+            return false;
+        };
+        if *edits == self.edits {
+            self.highlight = highlight;
+            self.highlighted = spans;
+            self.colouring = None;
+            self.layout();
+            true
+        } else {
+            self.colour_on_thread(highlight);
+            false
+        }
+    }
+
+    /// The colours are still on their way (the file is drawn in plain text).
+    pub fn colouring(&self) -> bool {
+        self.colouring.is_some()
     }
 
     /// Text to edit, not a picture, a PDF, a video or a model.
@@ -203,8 +366,44 @@ impl OpenFile {
         markdown::wiki_link_at(self.lines.get(row)?, column)
     }
 
+    /// Outside code in a Markdown file: a task box ticked or not at `column` of `row`, as one
+    /// edit (TODO 5.1.9); false when there is none there.
+    pub fn toggle_task_at(&mut self, row: usize, column: usize) -> bool {
+        if self
+            .markdown
+            .as_ref()
+            .is_none_or(|document| document.is_code(row))
+        {
+            return false;
+        }
+        let Some(changed) = self
+            .lines
+            .get(row)
+            .and_then(|line| markdown::toggle_task(line, column))
+        else {
+            return false;
+        };
+        let length = self.lines[row].chars().count();
+        self.replace_range(row, 0, length, &changed);
+        true
+    }
+
+    /// A `[text](target)` or a `[^note]` at `column` of `row` of a Markdown file.
+    pub fn pointer_at(&self, row: usize, column: usize) -> Option<Pointer> {
+        let document = self.markdown.as_ref()?;
+        if document.is_code(row) {
+            return None;
+        }
+        markdown::pointer_at(self.lines.get(row)?, column)
+    }
+
+    /// The `#heading` of a `[[ ]]` at `column` of `row`.
+    pub fn wiki_heading_at(&self, row: usize, column: usize) -> Option<String> {
+        markdown::wiki_heading_at(self.lines.get(row)?, column)
+    }
+
     pub fn is_text(&self) -> bool {
-        self.shows_text() && self.pdf.is_none()
+        self.shows_text() && self.pdf.is_none() && !self.read_only
     }
 
     /// Lines of text on screen, to edit or, on a page of a PDF, to select and search.
@@ -217,6 +416,24 @@ impl OpenFile {
         self.pdf
             .as_ref()
             .map(|document| (document.page, document.pages()))
+    }
+
+    /// Zooms or moves the page of a PDF drawn as a picture (TODO 5.1.6); false for other keys.
+    pub fn zoom_page(
+        &mut self,
+        character: Option<char>,
+        arrow: Option<(f32, f32)>,
+        picker: &mut Picker,
+    ) -> bool {
+        let Some(document) = &mut self.pdf else {
+            return false;
+        };
+        if self.image.is_none() || !document.zoom_key(character, arrow) {
+            return false;
+        }
+        let page = document.page;
+        self.set_page(page, picker);
+        true
     }
 
     /// Shows page `page` of a PDF (from 0, kept inside the document).
@@ -242,6 +459,10 @@ impl OpenFile {
                 lines
             }
             PageView::Picture(picture) => {
+                let picture = match &self.pdf {
+                    Some(document) => document.zoomed(picture),
+                    None => picture,
+                };
                 self.image = Some(picker.new_resize_protocol(picture));
                 Vec::new()
             }
@@ -335,6 +556,9 @@ impl OpenFile {
 
     /// Removes the selected text and leaves the cursor where it started.
     pub fn delete_selection(&mut self) -> bool {
+        if self.read_only {
+            return false;
+        }
         if self.selection().is_some() {
             self.remember(Change::Cut);
         }
@@ -367,7 +591,19 @@ impl OpenFile {
         if !self.dirty || self.pdf.is_some() {
             return Ok(());
         }
-        fs::write(&self.path, self.text())
+        if self.not_text {
+            anyhow::bail!("{} is not valid text: it is never saved over", self.name);
+        }
+        if self.config.trim_trailing == Some(true) {
+            for line in &mut self.lines {
+                let kept = line.trim_end_matches([' ', '\t']).len();
+                line.truncate(kept);
+            }
+        }
+        if self.config.final_newline == Some(true) {
+            self.trailing_newline = true;
+        }
+        fs::write(&self.path, text::encode(&self.text(), self.encoding))
             .with_context(|| format!("Could not save {}", self.path.display()))?;
         self.dirty = false;
         self.last_edit = None;
@@ -390,11 +626,13 @@ impl OpenFile {
     /// before.
     pub fn reload(&mut self) -> Result<()> {
         let disk = on_disk(&self.path);
-        let (lines, trailing_newline) = read_lines(&self.path)?;
+        let decoded = read_lines(&self.path)?;
         self.last_change = None;
         self.remember(Change::Reload);
-        self.lines = lines;
-        self.trailing_newline = trailing_newline;
+        self.lines = decoded.lines;
+        self.trailing_newline = decoded.trailing_newline;
+        self.crlf = decoded.crlf;
+        self.encoding = decoded.encoding;
         self.anchor = None;
         self.dirty = false;
         self.last_edit = None;
@@ -409,18 +647,21 @@ impl OpenFile {
 
     /// The text as it is saved.
     pub fn text(&self) -> String {
-        let mut text = self.lines.join("\n");
+        let end = if self.crlf { "\r\n" } else { "\n" };
+        let mut text = self.lines.join(end);
         if self.trailing_newline {
-            text.push('\n');
+            text.push_str(end);
         }
         text
     }
 
     pub fn autosave_due(&self, now: Instant) -> bool {
         self.dirty
-            && self
-                .last_edit
-                .is_some_and(|last_edit| now.duration_since(last_edit) >= AUTOSAVE_DELAY)
+            && !self.not_text
+            && self.autosave.is_some_and(|delay| {
+                self.last_edit
+                    .is_some_and(|last_edit| now.duration_since(last_edit) >= delay)
+            })
     }
 
     pub fn move_cursor(&mut self, row_delta: isize, column_delta: isize) {
@@ -517,7 +758,61 @@ impl OpenFile {
                     highlighted.clone()
                 }
             });
+        if self.wrap && self.wrap_width > 0 && !row.is_diagram() {
+            let from = row.part_index() * self.wrap_width;
+            let spans = text::slice_spans(&spans, from, from + self.wrap_width);
+            let number = (!row.filler && row.part_index() == 0).then_some(row.source + 1);
+            return (number, spans);
+        }
         ((!row.filler).then_some(row.source + 1), spans)
+    }
+
+    /// The source line of display row `display` when it shows text (not the rows a diagram
+    /// adds), also on the rows a wrapped line goes on to.
+    pub fn display_source(&self, display: usize) -> Option<usize> {
+        self.rows
+            .get(display)
+            .filter(|row| !row.filler)
+            .map(|row| row.source)
+    }
+
+    /// The first column of the source line that display row `display` shows: more than 0 on
+    /// the rows a wrapped line goes on to.
+    pub fn display_offset(&self, display: usize) -> usize {
+        match self.rows.get(display) {
+            Some(row) if self.wrap && self.wrap_width > 0 => row.part_index() * self.wrap_width,
+            _ => 0,
+        }
+    }
+
+    /// The row on screen and the column of the cursor, also on a wrapped line.
+    pub fn cursor_place(&self) -> (usize, usize) {
+        let x = self.cursor_x();
+        let first = self.display_row(self.cursor_row);
+        if self.wrap && self.wrap_width > 0 {
+            let parts = text::wrapped_rows(&self.lines[self.cursor_row], self.wrap_width);
+            let part = (x / self.wrap_width).min(parts - 1);
+            (first + part, x - part * self.wrap_width)
+        } else {
+            (first, x)
+        }
+    }
+
+    /// Alt+Z: long lines wrap on screen, or not.
+    pub fn toggle_wrap(&mut self) {
+        self.wrap = !self.wrap;
+        self.scroll_x = 0;
+        self.follow_cursor = true;
+        self.layout();
+    }
+
+    /// The editor's width for wrapping, from the frame; the rows are worked out again when
+    /// it changes.
+    pub fn set_wrap_width(&mut self, width: usize) {
+        if self.wrap && self.wrap_width != width {
+            self.wrap_width = width;
+            self.layout();
+        }
     }
 
     pub fn cursor_column_for_click(&self, row: usize, visual_column: usize) -> usize {
@@ -545,13 +840,12 @@ impl OpenFile {
     /// `width` columns; keeps both scrolls inside the text.
     pub fn scroll_to_cursor(&mut self, height: usize, width: usize) {
         if std::mem::take(&mut self.follow_cursor) {
-            let row = self.display_row(self.cursor_row);
+            let (row, column) = self.cursor_place();
             if row < self.scroll as usize {
                 self.scroll = row as u16;
             } else if height > 0 && row >= self.scroll as usize + height {
                 self.scroll = (row + 1 - height) as u16;
             }
-            let column = self.cursor_x();
             if column < self.scroll_x as usize {
                 self.scroll_x = column as u16;
             } else if width > 0 && column >= self.scroll_x as usize + width {
@@ -565,6 +859,9 @@ impl OpenFile {
     }
 
     pub fn insert(&mut self, character: char) {
+        if self.read_only {
+            return;
+        }
         self.remember(Change::Type);
         self.remove_selection();
         self.put(character);
@@ -577,7 +874,7 @@ impl OpenFile {
             .chars()
             .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
             .collect::<Vec<_>>();
-        if characters.is_empty() && self.selection().is_none() {
+        if self.read_only || characters.is_empty() && self.selection().is_none() {
             return;
         }
         // A paste is a step of its own, never part of the edit before it.
@@ -606,7 +903,7 @@ impl OpenFile {
     }
 
     pub fn backspace(&mut self) {
-        if self.delete_selection() {
+        if self.read_only || self.delete_selection() {
             return;
         }
         if self.cursor_column > 0 || self.cursor_row > 0 {
@@ -629,7 +926,7 @@ impl OpenFile {
     }
 
     pub fn delete(&mut self) {
-        if self.delete_selection() {
+        if self.read_only || self.delete_selection() {
             return;
         }
         let line_length = self.current_line().chars().count();
@@ -663,11 +960,8 @@ impl OpenFile {
         if self.history.len() == UNDO_STEPS {
             self.history.remove(0);
         }
-        self.history.push(Snapshot {
-            lines: self.lines.clone(),
-            cursor: (self.cursor_row, self.cursor_column),
-            trailing_newline: self.trailing_newline,
-        });
+        self.history.push(self.snapshot());
+        self.future.clear();
     }
 
     /// Puts back the text before the last edit; false when there is nothing to undo.
@@ -675,18 +969,32 @@ impl OpenFile {
         let Some(snapshot) = self.history.pop() else {
             return false;
         };
-        self.lines = snapshot.lines;
-        (self.cursor_row, self.cursor_column) = snapshot.cursor;
-        self.trailing_newline = snapshot.trailing_newline;
-        self.anchor = None;
-        self.last_change = None;
-        self.changed();
+        self.future.push(self.snapshot());
+        self.restore(snapshot);
         true
     }
 
     #[cfg(test)]
     pub fn make_autosave_due(&mut self) {
-        self.last_edit = Some(Instant::now() - AUTOSAVE_DELAY);
+        self.last_edit = Some(Instant::now() - self.autosave.unwrap_or_default());
+    }
+
+    /// The text of the same file in the other pane, as it is edited there (TODO 5.2.6): it
+    /// is the other tab that saves it.
+    pub fn take_text_of(&mut self, lines: &[String]) {
+        if self.lines == lines {
+            return;
+        }
+        self.lines = lines.to_vec();
+        self.changed();
+        (self.dirty, self.last_edit, self.follow_cursor) = (false, None, false);
+        self.cursor_row = self.cursor_row.min(self.lines.len().saturating_sub(1));
+        let length = self
+            .lines
+            .get(self.cursor_row)
+            .map_or(0, |line| line.chars().count());
+        self.cursor_column = self.cursor_column.min(length);
+        self.anchor = None;
     }
 
     fn changed(&mut self) {
@@ -694,17 +1002,49 @@ impl OpenFile {
         self.dirty = true;
         self.edits += 1;
         self.last_edit = Some(Instant::now());
-        self.highlighted = self.highlight.update(&self.path, &self.lines);
+        if self.colouring.is_some() {
+            // The thread brings the colours; until then the text is plain.
+            self.highlighted = self
+                .lines
+                .iter()
+                .map(|line| vec![Span::raw(line.clone())])
+                .collect();
+        } else {
+            self.highlighted = self.highlight.update(&self.path, &self.lines);
+        }
         self.layout();
     }
 
     /// Parses the Markdown again and works out the rows on screen and the widest line.
     fn layout(&mut self) {
-        self.markdown = is_markdown_path(&self.path).then(|| MarkdownDocument::parse(&self.lines));
+        // A large file is shown as it is: drawing its Markdown would take as long as its colours.
+        // Pictures are read from beside the document, never from above the folder it is in.
+        let folder = self
+            .path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
+        self.markdown = (is_markdown_path(&self.path) && !self.read_only)
+            .then(|| MarkdownDocument::parse_in(&self.lines, &folder, &folder));
         self.rows = match &self.markdown {
             Some(document) => document.rows(self.lines.len()),
             None => (0..self.lines.len()).map(Row::plain).collect(),
         };
+        // Long lines wrap into more rows, without a number (TODO 2.1.8); diagrams keep theirs.
+        if self.wrap && self.wrap_width > 0 {
+            let width = self.wrap_width;
+            self.rows = std::mem::take(&mut self.rows)
+                .into_iter()
+                .flat_map(|row| {
+                    let parts = if row.is_diagram() {
+                        1
+                    } else {
+                        text::wrapped_rows(&self.lines[row.source], width)
+                    };
+                    (0..parts).map(move |part| row.part(part))
+                })
+                .collect();
+        }
         let widest = self
             .lines
             .iter()
@@ -746,17 +1086,12 @@ fn on_disk(path: &Path) -> Option<(SystemTime, u64)> {
 }
 
 /// The lines of a text file and whether it ends with a newline.
-fn read_lines(path: &Path) -> Result<(Vec<String>, bool)> {
+fn read_lines(path: &Path) -> Result<text::Decoded> {
     let bytes = fs::read(path).with_context(|| format!("Could not open {}", path.display()))?;
-    if bytes.contains(&0) {
-        anyhow::bail!("{} is a binary file", path.display());
-    }
-    let text = String::from_utf8_lossy(&bytes);
-    let mut lines = text.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    Ok((lines, text.ends_with('\n')))
+    text::decode(&bytes).ok_or_else(|| {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        anyhow::anyhow!("{name} is a binary file: there is no text in it to show")
+    })
 }
 
 /// The byte where character `column` of `line` starts, or its end.
@@ -770,6 +1105,13 @@ fn byte_at(line: &str, column: usize) -> usize {
 /// the file anywhere under `root` whose path ends in it, then the one with its name. `.md`
 /// when it has no extension.
 pub fn find_document(target: &str, from: Option<&Path>, root: &Path) -> Option<PathBuf> {
+    // A link is text someone else may have written: it opens nothing outside the project,
+    // by `..`, by a whole path or through a link on disk.
+    let inside = root.canonicalize().ok()?;
+    document(target, from, root).filter(|found| found.starts_with(&inside))
+}
+
+fn document(target: &str, from: Option<&Path>, root: &Path) -> Option<PathBuf> {
     let target = target.replace('\\', "/");
     let name = if Path::new(&target).extension().is_some() {
         target
@@ -815,6 +1157,38 @@ fn full(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_wiki_link_never_opens_what_is_outside_the_project() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("vault");
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        std::fs::write(root.join("notes/a.md"), "[[../../secret]]").unwrap();
+        std::fs::write(root.join("inside.md"), "in").unwrap();
+        let secret = directory.path().join("secret.md");
+        std::fs::write(&secret, "private").unwrap();
+        let from = root.join("notes/a.md");
+        let find = |target: &str| find_document(target, Some(&from), &root);
+        assert_eq!(
+            find("../inside"),
+            root.join("inside.md").canonicalize().ok()
+        );
+        for target in [
+            "../../secret",
+            "..\\..\\secret",
+            "notes/../../secret",
+            secret.to_str().unwrap(),
+            "../../secret.md",
+        ] {
+            assert_eq!(find(target), None, "{target}");
+        }
+        // Nor through a link on disk that leaves the project.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&secret, root.join("way-out.md")).unwrap();
+            assert_eq!(find("way-out"), None);
+        }
+    }
+
     #[test]
     fn a_wiki_link_finds_its_document_as_a_vault_does() {
         let directory = tempfile::tempdir().unwrap();
@@ -1056,6 +1430,81 @@ mod tests {
         assert_eq!(file.lines, [""]);
         file.backspace();
         assert_eq!(file.lines, [""]);
+    }
+
+    #[test]
+    fn a_large_file_opens_read_only_without_colours_and_a_binary_one_says_what_it_is() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut picker = Picker::halfblocks();
+        let small = directory.path().join("small.rs");
+        std::fs::write(&small, "fn main() {}\n").unwrap();
+        let file = OpenFile::load(small.clone(), &mut picker).unwrap();
+        assert!(!file.read_only && file.is_text() && file.language == "Rust");
+        assert!(
+            file.highlighted[0].len() > 1,
+            "a small file has its colours"
+        );
+        assert!(!is_huge_text(&small));
+
+        // One byte over the limit: read, selected and copied, never changed nor saved.
+        let large = directory.path().join("large.rs");
+        let line = "fn main() { let answer = 42; } // filler\n";
+        let text = line.repeat(LARGE_FILE as usize / line.len() + 1);
+        std::fs::write(&large, &text).unwrap();
+        let mut file = OpenFile::load(large.clone(), &mut picker).unwrap();
+        assert!(file.read_only && !file.is_text() && file.shows_text());
+        assert_eq!(file.language, "Read only");
+        assert_eq!(file.highlighted[0].len(), 1, "no colours");
+        file.insert('x');
+        file.insert_str("pasted");
+        file.backspace();
+        file.delete();
+        file.select_all();
+        assert!(!file.delete_selection());
+        assert!(!file.dirty && !file.undo());
+        assert_eq!(file.selected_text().unwrap().len(), text.len() - 1);
+        file.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&large).unwrap().len(), text.len());
+
+        // The size is asked from the disk, without reading the file: a sparse one is enough.
+        let huge = directory.path().join("huge.log");
+        std::fs::File::create(&huge)
+            .unwrap()
+            .set_len(HUGE_FILE + 1)
+            .unwrap();
+        assert!(is_huge_text(&huge));
+        let video = directory.path().join("huge.mp4");
+        std::fs::File::create(&video)
+            .unwrap()
+            .set_len(HUGE_FILE + 1)
+            .unwrap();
+        assert!(!is_huge_text(&video), "a video has its own reader");
+        let over = directory.path().join("over.log");
+        std::fs::File::create(&over)
+            .unwrap()
+            .set_len(MAX_FILE + 1)
+            .unwrap();
+        let error = OpenFile::load(over, &mut picker).err().unwrap().to_string();
+        assert_eq!(error, "over.log is larger than 512 MB: too large to open");
+
+        let pdf = directory.path().join("huge.pdf");
+        std::fs::File::create(&pdf)
+            .unwrap()
+            .set_len(MOST_PDF + 1)
+            .unwrap();
+        let error = OpenFile::load(pdf, &mut picker).err().unwrap().to_string();
+        assert_eq!(error, "huge.pdf is larger than 256 MB: too large to open");
+
+        let binary = directory.path().join("data.bin");
+        std::fs::write(&binary, [b'a', 0, 0xff, b'\n']).unwrap();
+        let error = OpenFile::load(binary, &mut picker)
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            error,
+            "data.bin is a binary file: there is no text in it to show"
+        );
     }
 
     #[test]

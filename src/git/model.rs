@@ -625,7 +625,7 @@ pub struct GitCommandOutput {
     pub timed_out: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitAction {
     Refresh,
     StageSelected,
@@ -644,6 +644,26 @@ pub enum GitAction {
     UnstageDiff,
     /// The diff of the next (`true`) or previous change.
     DiffNeighbour(bool),
+    /// The hunk of the Diff tab under the cursor, or its marked lines (TODO 4.1.1).
+    Hunk(super::HunkAction),
+    /// The selected change discarded; a copy goes to the cache first.
+    DiscardSelected,
+    /// The last commit amended, with a new message or its own (TODO 4.1.3).
+    Amend(Option<String>),
+    StashPush(String),
+    StashApply(usize),
+    StashDrop(usize),
+    CreateTag(String),
+    CreateBranch(String),
+    RenameBranch(String, String),
+    /// A branch deleted: only a merged one unless forced (TODO 4.1.4).
+    DeleteBranch(String, bool),
+    /// Conflict `n` of a file resolved (TODO 4.1.7).
+    Resolve(std::path::PathBuf, usize, super::Resolution),
+    /// The commits that changed a file, for the Inspect tab (TODO 4.1.6).
+    FileHistory(std::path::PathBuf),
+    /// A page more of the timeline (TODO 4.1.8).
+    MoreCommits,
 }
 
 #[cfg(test)]

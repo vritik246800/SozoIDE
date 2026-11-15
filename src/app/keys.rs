@@ -36,17 +36,55 @@ pub enum Action {
     Back,
     FindInFile,
     FindInWorkspace,
+    Replace,
+    GoToLine,
+    QuickOpen,
+    CommandPalette,
+    Redo,
+    ToggleComment,
+    WrapLines,
+    FormatDocument,
+    CodeActions,
+    Problems,
     Breakpoint,
     Debug,
     StepOver,
     StepInto,
+    StepOut,
+    RunToCursor,
+    PauseDebug,
+    BreakpointOptions,
+    Evaluate,
+    AddWatch,
     StopDebug,
+    Blame,
+    FileHistory,
+    FindInTerminal,
+    ClearTerminal,
+    SplitTerminal,
+    Maximize,
+    ResetLayout,
+    Layouts,
+    FocusLeft,
+    FocusRight,
+    FocusUp,
+    FocusDown,
+    Tasks,
+    LastTask,
+    TestAtCursor,
+    OpenToSide,
+    CompareFiles,
+    ContextMenu,
+    MovePanelLeft,
+    MovePanelRight,
+    MovePanelUp,
+    MovePanelDown,
     Help,
     About,
     Quit,
 }
 
-pub const ACTIONS: [Action; 30] = [
+pub const ACTIONS: [Action; 68] = [
     Action::Explorer,
     Action::BottomTerminal,
     Action::RightTerminal,
@@ -69,11 +107,49 @@ pub const ACTIONS: [Action; 30] = [
     Action::Back,
     Action::FindInFile,
     Action::FindInWorkspace,
+    Action::Replace,
+    Action::GoToLine,
+    Action::QuickOpen,
+    Action::CommandPalette,
+    Action::Redo,
+    Action::ToggleComment,
+    Action::WrapLines,
+    Action::FormatDocument,
+    Action::CodeActions,
+    Action::Problems,
     Action::Breakpoint,
     Action::Debug,
     Action::StepOver,
     Action::StepInto,
+    Action::StepOut,
+    Action::RunToCursor,
+    Action::PauseDebug,
+    Action::BreakpointOptions,
+    Action::Evaluate,
+    Action::AddWatch,
     Action::StopDebug,
+    Action::Blame,
+    Action::FileHistory,
+    Action::FindInTerminal,
+    Action::ClearTerminal,
+    Action::SplitTerminal,
+    Action::Maximize,
+    Action::ResetLayout,
+    Action::Layouts,
+    Action::FocusLeft,
+    Action::FocusRight,
+    Action::FocusUp,
+    Action::FocusDown,
+    Action::Tasks,
+    Action::LastTask,
+    Action::TestAtCursor,
+    Action::OpenToSide,
+    Action::CompareFiles,
+    Action::ContextMenu,
+    Action::MovePanelLeft,
+    Action::MovePanelRight,
+    Action::MovePanelUp,
+    Action::MovePanelDown,
     Action::Help,
     Action::About,
     Action::Quit,
@@ -105,11 +181,49 @@ impl Action {
             Self::Back => "go_back",
             Self::FindInFile => "find_in_file",
             Self::FindInWorkspace => "find_in_workspace",
+            Self::Replace => "replace",
+            Self::GoToLine => "go_to_line",
+            Self::QuickOpen => "open_file",
+            Self::CommandPalette => "command_palette",
+            Self::Redo => "redo",
+            Self::ToggleComment => "toggle_comment",
+            Self::WrapLines => "wrap_lines",
+            Self::FormatDocument => "format",
+            Self::CodeActions => "code_actions",
+            Self::Problems => "problems",
             Self::Breakpoint => "breakpoint",
             Self::Debug => "debug",
             Self::StepOver => "step_over",
             Self::StepInto => "step_into",
+            Self::StepOut => "step_out",
+            Self::RunToCursor => "run_to_cursor",
+            Self::PauseDebug => "pause",
+            Self::BreakpointOptions => "breakpoint_options",
+            Self::Evaluate => "evaluate",
+            Self::AddWatch => "add_watch",
             Self::StopDebug => "stop_debugging",
+            Self::Blame => "blame",
+            Self::FileHistory => "file_history",
+            Self::FindInTerminal => "find_in_terminal",
+            Self::ClearTerminal => "clear_terminal",
+            Self::SplitTerminal => "split_terminal",
+            Self::Maximize => "maximize",
+            Self::ResetLayout => "reset_layout",
+            Self::Layouts => "layouts",
+            Self::FocusLeft => "focus_left",
+            Self::FocusRight => "focus_right",
+            Self::FocusUp => "focus_up",
+            Self::FocusDown => "focus_down",
+            Self::Tasks => "tasks",
+            Self::LastTask => "last_task",
+            Self::TestAtCursor => "test_at_cursor",
+            Self::OpenToSide => "open_to_side",
+            Self::CompareFiles => "compare_files",
+            Self::ContextMenu => "context_menu",
+            Self::MovePanelLeft => "move_panel_left",
+            Self::MovePanelRight => "move_panel_right",
+            Self::MovePanelUp => "move_panel_up",
+            Self::MovePanelDown => "move_panel_down",
             Self::Help => "help",
             Self::About => "about",
             Self::Quit => "quit",
@@ -141,11 +255,49 @@ impl Action {
             Self::Back => "Back to where you were",
             Self::FindInFile => "Find in the file",
             Self::FindInWorkspace => "Find in the workspace",
+            Self::Replace => "Replace",
+            Self::GoToLine => "Go to a line",
+            Self::QuickOpen => "Open a file by its name",
+            Self::CommandPalette => "Every command",
+            Self::Redo => "Redo",
+            Self::ToggleComment => "Comment or uncomment the lines",
+            Self::WrapLines => "Wrap long lines on screen",
+            Self::FormatDocument => "Format the file or the selection",
+            Self::CodeActions => "Code actions and quick fixes",
+            Self::Problems => "Problems of the project",
             Self::Breakpoint => "Breakpoint on the line",
             Self::Debug => "Build and debug, or continue",
             Self::StepOver => "Step over",
             Self::StepInto => "Step into",
+            Self::StepOut => "Step out",
+            Self::RunToCursor => "Run to the cursor",
+            Self::PauseDebug => "Pause the program",
+            Self::BreakpointOptions => "Breakpoint with a condition, a count or a message",
+            Self::Evaluate => "Evaluate an expression at the pause",
+            Self::AddWatch => "Watch an expression",
             Self::StopDebug => "Stop debugging or what runs",
+            Self::Blame => "Who changed each line (Git blame)",
+            Self::FileHistory => "The commits that changed the file",
+            Self::FindInTerminal => "Find in the terminal's history",
+            Self::ClearTerminal => "Clear the terminal's history",
+            Self::SplitTerminal => "Two shells side by side in a terminal",
+            Self::Maximize => "The panel with the focus over the whole window",
+            Self::ResetLayout => "The layout SozoIDE came with",
+            Self::Layouts => "Layouts kept with a name",
+            Self::FocusLeft => "Focus the panel on the left",
+            Self::FocusRight => "Focus the panel on the right",
+            Self::FocusUp => "Focus the panel above",
+            Self::FocusDown => "Focus the panel below",
+            Self::Tasks => "Run a named task of .sozo.toml",
+            Self::LastTask => "Run the last task again",
+            Self::TestAtCursor => "Run the test under the cursor",
+            Self::OpenToSide => "The file also in the other pane",
+            Self::CompareFiles => "Compare the file with another, side by side",
+            Self::ContextMenu => "The menu of a right click, from the keyboard",
+            Self::MovePanelLeft => "Move the panel to the left edge",
+            Self::MovePanelRight => "Move the panel to the right edge",
+            Self::MovePanelUp => "Move the panel to the top edge",
+            Self::MovePanelDown => "Move the panel to the bottom edge",
             Self::Help => "Help",
             Self::About => "About",
             Self::Quit => "Quit",
@@ -189,11 +341,81 @@ impl Action {
                 KeyCode::Char('p'),
                 KeyModifiers::CONTROL | KeyModifiers::SHIFT,
             ),
+            Self::Replace => ctrl('h'),
+            Self::GoToLine => ctrl('l'),
+            Self::QuickOpen => ctrl('o'),
+            Self::CommandPalette => Binding::new(
+                KeyCode::Char('o'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            Self::Redo => ctrl('y'),
+            Self::ToggleComment => ctrl('/'),
+            Self::WrapLines => Binding::new(KeyCode::Char('z'), KeyModifiers::ALT),
+            Self::FormatDocument => {
+                Binding::new(KeyCode::Char('f'), KeyModifiers::ALT | KeyModifiers::SHIFT)
+            }
+            Self::CodeActions => ctrl('.'),
+            Self::Problems => Binding::new(
+                KeyCode::Char('m'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
             Self::Breakpoint => Binding::new(KeyCode::F(9), KeyModifiers::NONE),
             Self::Debug => Binding::new(KeyCode::F(5), KeyModifiers::NONE),
             Self::StepOver => Binding::new(KeyCode::F(10), KeyModifiers::NONE),
             Self::StepInto => Binding::new(KeyCode::F(11), KeyModifiers::NONE),
+            Self::StepOut => Binding::new(KeyCode::F(11), KeyModifiers::SHIFT),
+            Self::RunToCursor => Binding::new(KeyCode::F(10), KeyModifiers::CONTROL),
+            Self::PauseDebug => Binding::new(KeyCode::F(8), KeyModifiers::NONE),
+            Self::BreakpointOptions => Binding::new(KeyCode::F(9), KeyModifiers::SHIFT),
+            Self::Evaluate => Binding::new(
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            Self::AddWatch => Binding::new(
+                KeyCode::Char('w'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
             Self::StopDebug => Binding::new(KeyCode::F(5), KeyModifiers::SHIFT),
+            Self::Blame => Binding::new(KeyCode::Char('g'), KeyModifiers::ALT),
+            Self::FileHistory => Binding::new(KeyCode::Char('h'), KeyModifiers::ALT),
+            Self::FindInTerminal => Binding::new(KeyCode::F(3), KeyModifiers::NONE),
+            Self::ClearTerminal => Binding::new(KeyCode::F(3), KeyModifiers::SHIFT),
+            Self::SplitTerminal => Binding::new(KeyCode::F(6), KeyModifiers::SHIFT),
+            Self::Maximize => ctrl('m'),
+            Self::ResetLayout => Binding::new(KeyCode::Char('0'), KeyModifiers::ALT),
+            Self::Layouts => Binding::new(KeyCode::Char('l'), KeyModifiers::ALT),
+            Self::FocusLeft => {
+                Binding::new(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::CONTROL)
+            }
+            Self::FocusRight => {
+                Binding::new(KeyCode::Right, KeyModifiers::ALT | KeyModifiers::CONTROL)
+            }
+            Self::FocusUp => Binding::new(KeyCode::Up, KeyModifiers::ALT | KeyModifiers::CONTROL),
+            Self::FocusDown => {
+                Binding::new(KeyCode::Down, KeyModifiers::ALT | KeyModifiers::CONTROL)
+            }
+            Self::Tasks => Binding::new(KeyCode::F(7), KeyModifiers::ALT),
+            Self::LastTask => Binding::new(KeyCode::F(8), KeyModifiers::ALT),
+            Self::TestAtCursor => Binding::new(KeyCode::F(9), KeyModifiers::ALT),
+            Self::OpenToSide => Binding::new(KeyCode::Char('s'), KeyModifiers::ALT),
+            Self::CompareFiles => Binding::new(KeyCode::Char('d'), KeyModifiers::ALT),
+            Self::ContextMenu => Binding::new(KeyCode::F(10), KeyModifiers::SHIFT),
+            Self::MovePanelLeft => Binding::new(
+                KeyCode::Left,
+                KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            Self::MovePanelRight => Binding::new(
+                KeyCode::Right,
+                KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            Self::MovePanelUp => Binding::new(
+                KeyCode::Up,
+                KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            Self::MovePanelDown => Binding::new(
+                KeyCode::Down,
+                KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
             Self::Help => Binding::new(KeyCode::F(1), KeyModifiers::NONE),
             Self::About => Binding::new(KeyCode::F(2), KeyModifiers::NONE),
             Self::Quit => ctrl('q'),
@@ -299,6 +521,11 @@ impl Binding {
         Some(Self { code, modifiers })
     }
 
+    /// The key as an event, to run a command chosen in the palette as if it was pressed.
+    pub fn event(self) -> KeyEvent {
+        KeyEvent::new(self.code, self.modifiers)
+    }
+
     /// As `keys.toml` keeps it, the same on every system: "Ctrl+Alt+B", "Shift+F5".
     pub fn text(self) -> String {
         self.label("")
@@ -399,8 +626,7 @@ impl Keymap {
     pub fn load(path: Option<&Path>, os: &'static str) -> Self {
         let mut keymap = Self::defaults(os);
         let changed = path
-            .and_then(|path| fs::read_to_string(path).ok())
-            .and_then(|text| toml::from_str::<BTreeMap<String, String>>(&text).ok())
+            .map(crate::storage::read::<BTreeMap<String, String>>)
             .unwrap_or_default();
         for (index, action) in ACTIONS.iter().enumerate() {
             if let Some(binding) = changed
@@ -426,11 +652,8 @@ impl Keymap {
                 _ => Ok(()),
             };
         }
-        if let Some(folder) = path.parent() {
-            fs::create_dir_all(folder)?;
-        }
         let text = toml::to_string(&changed).map_err(std::io::Error::other)?;
-        fs::write(path, text)
+        crate::storage::write(path, &text)
     }
 
     fn index(action: Action) -> usize {
@@ -510,13 +733,32 @@ pub struct KeyEditor {
     pub message: Option<String>,
     /// The next frame of Help scrolls to `selected`.
     pub follow: bool,
+    /// What was typed after `/`: Help shows only the rows that have it (TODO 2.3.5).
+    pub filter: Option<String>,
 }
 
 impl App {
     /// Help's own keys: Tab and BackTab choose a command, Enter waits for its new keys and R
     /// asks to reset them all. False for the keys Help leaves to scrolling and closing.
     pub(super) fn handle_shortcut_key(&mut self, key: KeyEvent) -> bool {
+        // `/` and typing narrow Help to the rows with the text; Esc shows them all again.
+        if let Some(filter) = &mut self.key_editor.filter {
+            match key.code {
+                KeyCode::Esc => self.key_editor.filter = None,
+                KeyCode::Backspace => {
+                    filter.pop();
+                }
+                KeyCode::Char(character)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) && filter.len() < 40 =>
+                {
+                    filter.push(character);
+                }
+                _ => return false,
+            }
+            return true;
+        }
         match key.code {
+            KeyCode::Char('/') => self.key_editor.filter = Some(String::new()),
             KeyCode::Tab | KeyCode::BackTab => {
                 let forward =
                     key.code == KeyCode::Tab && !key.modifiers.contains(KeyModifiers::SHIFT);

@@ -13,7 +13,8 @@ use git2::{
 use super::model::*;
 
 /// Enough history to scroll back through months of work across every branch.
-const COMMIT_LIMIT: usize = 1000;
+/// The commits of a page of the timeline; `more` asks the next page (TODO 4.1.8).
+pub const COMMIT_PAGE: usize = 1000;
 
 pub(super) fn read_status(repo: &Repository) -> Result<WorkingTreeStatus> {
     if repo.workdir().is_none() {
@@ -46,7 +47,7 @@ pub(super) fn read_status(repo: &Repository) -> Result<WorkingTreeStatus> {
             .as_ref()
             .and_then(|delta| delta.new_file().path().or_else(|| delta.old_file().path()))
             .map(Path::to_path_buf)
-            .or_else(|| entry.path().map(PathBuf::from));
+            .or_else(|| entry.path().ok().map(PathBuf::from));
         let Some(path) = path else {
             continue;
         };
@@ -163,6 +164,43 @@ pub fn explorer_changes(root: &Path) -> ExplorerChanges {
     changes
 }
 
+/// The lines that differ between `old` and `new`, as a diff shows them (`-` and `+`, with
+/// `@@` before each block); at most 400 lines (TODO 2.2.6).
+pub fn compare_texts(old: &str, new: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let Ok(patch) = git2::Patch::from_buffers(old.as_bytes(), None, new.as_bytes(), None, None)
+    else {
+        return lines;
+    };
+    for hunk in 0..patch.num_hunks() {
+        let Ok((header, count)) = patch.hunk(hunk) else {
+            continue;
+        };
+        lines.push(
+            String::from_utf8_lossy(header.header())
+                .trim_end()
+                .to_owned(),
+        );
+        for line in 0..count {
+            let Ok(line) = patch.line_in_hunk(hunk, line) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(line.content());
+            let text: String = text
+                .trim_end_matches(['\n', '\r'])
+                .chars()
+                .filter(|c| !c.is_control() || *c == '\t')
+                .collect();
+            lines.push(format!("{}{text}", line.origin()));
+            if lines.len() >= 400 {
+                lines.push("…".into());
+                return lines;
+            }
+        }
+    }
+    lines
+}
+
 /// Each row of `text`, the editor's copy of `path`, that differs from the file in the last
 /// commit (F34): nothing outside a repository, before the first commit or for a file Git does
 /// not follow. `\r\n` counts as `\n`, so `autocrlf` does not mark every line.
@@ -221,7 +259,7 @@ pub fn line_marks(path: &Path, text: &str) -> HashMap<usize, LineMark> {
     marks
 }
 
-pub(super) fn read_commits(repo: &Repository) -> Result<Vec<CommitInfo>> {
+pub(super) fn read_commits(repo: &Repository, limit: usize) -> Result<Vec<CommitInfo>> {
     if head_commit(repo)?.is_none() {
         return Ok(Vec::new());
     }
@@ -246,7 +284,7 @@ pub(super) fn read_commits(repo: &Repository) -> Result<Vec<CommitInfo>> {
     walk.push_glob("refs/remotes/*")?;
     let labels = ref_labels(repo)?;
     let mut commits = Vec::new();
-    for id in walk.take(COMMIT_LIMIT) {
+    for id in walk.take(limit) {
         let id = match id {
             Ok(id) => id,
             Err(error)
@@ -274,10 +312,10 @@ fn ref_labels(repo: &Repository) -> Result<std::collections::HashMap<Oid, Vec<St
         .head()
         .ok()
         .filter(|head| head.is_branch())
-        .and_then(|head| head.shorthand().map(ToString::to_string));
+        .and_then(|head| head.shorthand().ok().map(ToString::to_string));
     for reference in repo.references()? {
         let reference = reference?;
-        let (Some(name), Ok(commit)) = (reference.shorthand(), reference.peel_to_commit()) else {
+        let (Ok(name), Ok(commit)) = (reference.shorthand(), reference.peel_to_commit()) else {
             continue;
         };
         let label = if reference.is_tag() {
@@ -354,7 +392,7 @@ pub(super) fn read_branches(repo: &Repository) -> Result<Vec<BranchInfo>> {
             behind,
             summary: commit
                 .as_ref()
-                .and_then(|commit| commit.summary().map(ToString::to_string))
+                .and_then(|commit| commit.summary().ok().flatten().map(ToString::to_string))
                 .unwrap_or_default(),
             committed_at: commit
                 .as_ref()
@@ -375,11 +413,11 @@ pub(super) fn read_launchpad(
 ) -> Result<LaunchpadSummary> {
     let (current_branch, upstream, ahead, behind) = current_branch_position(repo)?;
     let mut remotes = Vec::new();
-    for name in repo.remotes()?.iter().flatten() {
+    for name in repo.remotes()?.iter().flatten().flatten() {
         let url = repo
             .find_remote(name)
             .ok()
-            .and_then(|remote| remote.url().map(ToString::to_string));
+            .and_then(|remote| remote.url().ok().map(ToString::to_string));
         remotes.push(RemoteInfo {
             name: name.to_string(),
             url,
@@ -413,7 +451,7 @@ pub(super) fn current_branch_position(
     if !head.is_branch() {
         return Ok((None, None, 0, 0));
     }
-    let name = head.shorthand().map(ToString::to_string);
+    let name = head.shorthand().ok().map(ToString::to_string);
     let local_id = head.target();
     let branch = git2::Branch::wrap(head);
     let upstream = branch
@@ -618,7 +656,7 @@ pub(super) fn commit_info(commit: &git2::Commit<'_>) -> CommitInfo {
         id: commit.id().to_string(),
         short_id: short_id(commit.id()),
         parent_ids: commit.parent_ids().map(|id| id.to_string()).collect(),
-        summary: commit.summary().unwrap_or("").to_string(),
+        summary: commit.summary().ok().flatten().unwrap_or("").to_string(),
         author: signature.name().unwrap_or("Unknown").to_string(),
         author_email: signature.email().unwrap_or("").to_string(),
         committed_at: git_time_to_chrono(commit.time()),

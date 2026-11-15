@@ -1,6 +1,6 @@
 [package]
 name = "SozoIDE"
-version = "0.8.3"
+version = "0.9.0"
 edition = "2024"
 authors = ["Vritik Valabdas"]
 description = "A terminal-native integrated development environment"
@@ -22,31 +22,58 @@ gltf = "1.4"
 hayro = "0.8.0"
 pdf-extract = "0.12.1"
 glam = "0.34"
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "ico", "webp", "tiff", "tga", "pnm", "qoi", "hdr"] }
-keyring = "3.6"
+# SVG drawn into pixels (TODO 5.1.5, Q95): no text fonts, no network, no files it points to.
+resvg = { version = "=0.49.0", default-features = false }
+# The real vault on macOS (Keychain) and Windows (Credential Manager); on Linux the Secret
+# Service when it runs, else the kernel keyutils (Q04).
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "linux-native-async-persistent", "async-secret-service", "tokio", "crypto-rust"] }
 mermaid-text = "0.57.0"
 portable-pty = "0.9"
+# Search options and replace in the editor (Q95): already in the tree by `ignore`.
+regex = "1.13"
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 rayon = "1.12"
 ratatui-image = { version = "10.0", default-features = false, features = ["crossterm"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10.9"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "mysql", "any"] }
+# Each database by its own driver, behind `database::store::Pool` (Q98): SQLite by rusqlite with
+# its bundled SQLite, PostgreSQL by tokio-postgres, MySQL by mysql_async; TLS by rustls with ring.
+mysql_async = { version = "0.37.1", default-features = false, features = ["minimal-rust", "rustls-tls", "ring"] }
+rusqlite = { version = "0.41.0", features = ["bundled", "column_decltype"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-postgres = { version = "0.7.18", default-features = false, features = ["runtime"] }
+tokio-postgres-rustls = { version = "0.14.0", default-features = false, features = ["ring"] }
+webpki-roots = "1"
 syntect = { version = "5.3", default-features = false, features = ["parsing", "dump-load", "default-syntaxes", "regex-fancy"] }
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "sync"] }
 toml = "0.9"
+# Delete in the Explorer goes to the system's Trash, Recycle Bin or freedesktop trash (Q95).
+trash = { version = "5.3", default-features = false, features = ["coinit_apartmentthreaded", "freedesktop"] }
 tui-term = "0.3.4"
+# Columns of characters on screen, for wrapped lines (already in the tree by ratatui).
+unicode-width = "0.2"
 two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 vt100 = "0.16.2"
 wait-timeout = "0.2"
+
+[features]
+# Tests with the real language servers and debug adapters of the machine (TODO 3.4.1).
+servers = []
+# Tests against real PostgreSQL and MySQL servers (TODO 4.4.1, CI job `Databases`).
+databases = []
+# The times a person feels, measured alone (TODO 6.1.4): `cargo test --features budgets --bin sozo budgets`.
+budgets = []
 
 [dev-dependencies]
 # Only to check the copied glyphs: it reads its table from the build machine at runtime (E10).
 nerd_fonts = "0.1.9"
 tempfile = "3.23"
+# Property tests of the parsers (TODO 6.1.3, Q95): any input, never a panic.
+proptest = { version = "=1.12.0", default-features = false, features = ["std"] }
 
 [profile.release]
 lto = "thin"
@@ -64,6 +91,11 @@ assets = [
     ["target/release/sozo", "usr/bin/sozo", "755"],
     ["packaging/linux/sozoide.desktop", "usr/share/applications/sozoide.desktop", "644"],
     ["assets/Sozo.png", "usr/share/icons/hicolor/256x256/apps/sozoide.png", "644"],
+    # Written by packaging/build-linux.sh from the binary (`--completions`, `--man`).
+    ["target/completions/sozo.bash", "usr/share/bash-completion/completions/sozo", "644"],
+    ["target/completions/_sozo", "usr/share/zsh/vendor-completions/_sozo", "644"],
+    ["target/completions/sozo.fish", "usr/share/fish/vendor_completions.d/sozo.fish", "644"],
+    ["target/completions/sozo.1.gz", "usr/share/man/man1/sozo.1.gz", "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -72,6 +104,10 @@ assets = [
     { source = "target/release/sozo", dest = "/usr/bin/sozo", mode = "755" },
     { source = "packaging/linux/sozoide.desktop", dest = "/usr/share/applications/sozoide.desktop", mode = "644" },
     { source = "assets/Sozo.png", dest = "/usr/share/icons/hicolor/256x256/apps/sozoide.png", mode = "644" },
+    { source = "target/completions/sozo.bash", dest = "/usr/share/bash-completion/completions/sozo", mode = "644" },
+    { source = "target/completions/_sozo", dest = "/usr/share/zsh/site-functions/_sozo", mode = "644" },
+    { source = "target/completions/sozo.fish", dest = "/usr/share/fish/vendor_completions.d/sozo.fish", mode = "644" },
+    { source = "target/completions/sozo.1.gz", dest = "/usr/share/man/man1/sozo.1.gz", mode = "644", doc = true },
 ]
 
 # Weak dependencies (F24): `rpm -U` in the updater does not need them. Fedora calls FFmpeg

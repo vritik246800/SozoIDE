@@ -1,0 +1,27 @@
+---
+// What changed in every version, read from the app's own notes at build (TODO 6.4.4), like the
+// version of the splash: src/update/notes.rs.
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import Page from '../../layouts/Page.astro';
+
+const source = readFileSync(resolve(process.cwd(), '../src/update/notes.rs'), 'utf8');
+const unquote = (text: string) => text.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+const blocks = [...source.matchAll(/version: "([^"]+)",\s*new: &\[([\s\S]*?)\],\s*fixed: &\[([\s\S]*?)\],/g)];
+const notes = blocks.map(([, version, added, fixed]) => ({
+  version,
+  added: [...added.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => unquote(match[1])),
+  fixed: [...fixed.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => unquote(match[1])),
+}));
+if (notes.length === 0) throw new Error('No notes read from src/update/notes.rs');
+---
+
+<Page title="What's new" description="What changed in every version of SozoIDE.">
+  {notes.map((note) => (
+    <section id={`v${note.version}`}>
+      <h2>Version {note.version}</h2>
+      {note.added.length > 0 && (<><h3>New</h3><ul>{note.added.map((line) => <li>{line}</li>)}</ul></>)}
+      {note.fixed.length > 0 && (<><h3>Fixed</h3><ul>{note.fixed.map((line) => <li>{line}</li>)}</ul></>)}
+    </section>
+  ))}
+</Page>

@@ -50,6 +50,9 @@ pub struct Project {
 }
 
 /// The file of a project's own commands (Q68).
+mod output;
+pub use output::{named_tasks, problems_in, test_at};
+
 pub const TASKS_FILE: &str = ".sozo.toml";
 
 /// Folders a monorepo's projects are not in.
@@ -405,6 +408,20 @@ pub fn task_line(
     Ok(parts.join(" && "))
 }
 
+/// `line` as it is typed into a terminal, or why it is not. The line goes through the line
+/// editor of the shell, where a control character in a file or folder name is a key (Ctrl+U
+/// would erase what came before it, a line break would run the rest), and `cmd.exe` expands
+/// `%NAME%` even inside quotes.
+pub fn typed(line: &str, os: &str) -> Result<String, String> {
+    if line.chars().any(char::is_control) {
+        return Err("Not run: a file or folder name has a control character".into());
+    }
+    if os == "windows" && line.contains('%') {
+        return Err("Not run: cmd.exe would expand the % in a file or folder name".into());
+    }
+    Ok(format!("{line}\r"))
+}
+
 /// `words` as one line of the shell of `os`.
 pub fn shell_line(words: &[String], os: &str) -> String {
     let windows = os == "windows";
@@ -558,7 +575,8 @@ pub fn command(
 /// A word the shell takes as it is: single quotes in POSIX shells, double quotes in `cmd.exe`.
 fn quote(word: &str, windows: bool) -> String {
     if windows {
-        format!("\"{word}\"")
+        // No Windows name has a `"`: one that came from elsewhere would end the quotes.
+        format!("\"{}\"", word.replace('"', ""))
     } else {
         format!("'{}'", word.replace('\'', r"'\''"))
     }
@@ -569,6 +587,75 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    /// What `sh` makes of `line`: one word per line of the output.
+    #[cfg(unix)]
+    fn sh_words(line: &str) -> Vec<String> {
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("printf '%s\\n' {line}")])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{line}");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn hostile_names_stay_one_word_or_are_not_typed_at_all() {
+        let hostile = [
+            "a; rm -rf ~",
+            "$(touch pwned)",
+            "`touch pwned`",
+            "a && b | c > d < e",
+            "it's \"quoted\"",
+            "$HOME ${PATH} !! * ? ~",
+            "-rf",
+            "a\\b",
+            "",
+        ];
+        // In `sh` every one of them arrives as the single word it is.
+        #[cfg(unix)]
+        for name in hostile {
+            let line = shell_line(&["echo".into(), name.to_string(), "end".into()], "linux");
+            assert_eq!(sh_words(&line), ["echo", name, "end"], "{line}");
+        }
+        // In `cmd.exe` the name stays inside one pair of quotes: a `"` of its own is dropped.
+        for name in hostile {
+            let line = shell_line(&[name.to_string()], "windows");
+            if name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_./=:@+,".contains(c))
+                && !name.is_empty()
+            {
+                assert_eq!(line, name);
+            } else {
+                assert!(line.starts_with('"') && line.ends_with('"'), "{line}");
+                assert_eq!(line.matches('"').count(), 2, "{line}");
+            }
+        }
+
+        // What quoting cannot make safe is not typed: the line editor of the shell reads a
+        // control character as a key, and `cmd.exe` expands %NAME% inside quotes.
+        for name in [
+            "a\nrm -rf ~",
+            "a\rb",
+            "x\u{15}rm -rf ~",
+            "\u{1b}[2Jx",
+            "tab\tbed",
+            "a\0b",
+        ] {
+            let line = shell_line(&["echo".into(), name.to_string()], "linux");
+            assert!(typed(&line, "linux").is_err(), "{name:?}");
+            assert!(typed(&line, "windows").is_err(), "{name:?}");
+        }
+        let line = shell_line(&["echo".into(), "%USERPROFILE%".into()], "windows");
+        assert!(typed(&line, "windows").is_err());
+        assert_eq!(typed("echo '100%'", "linux").unwrap(), "echo '100%'\r");
+        assert_eq!(typed("cargo build", "windows").unwrap(), "cargo build\r");
+    }
 
     #[test]
     fn each_language_runs_with_its_tool_and_projects_run_whole() {

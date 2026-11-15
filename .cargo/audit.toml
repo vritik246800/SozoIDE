@@ -1,0 +1,5 @@
+# Advisories that cannot be fixed yet: why each one is still here and what removes it.
+# Any other advisory fails `packaging/security-check.sh`. None today: the last one (the SQLite
+# bundled by sqlx, RUSTSEC-2026-0459) left with rusqlite and libsqlite3-sys 0.39 (Q98).
+[advisories]
+ignore = []

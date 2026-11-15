@@ -138,22 +138,13 @@ impl GitPanel {
             );
         }
         if output.exit_code != Some(0) {
+            // What went wrong in words (no upstream, rejected, no credentials, TODO 4.1.5).
             let details = if output.stderr.trim().is_empty() {
-                output.stdout.trim()
+                &output.stdout
             } else {
-                output.stderr.trim()
+                &output.stderr
             };
-            bail!(
-                "Git command failed (exit code {}): {}",
-                output
-                    .exit_code
-                    .map_or_else(|| "unknown".to_string(), |code| code.to_string()),
-                if details.is_empty() {
-                    "no error output"
-                } else {
-                    details
-                }
-            );
+            bail!("{}", super::more::readable_error(details));
         }
         self.refresh()?;
         let stdout = output.stdout.trim();
@@ -166,7 +157,7 @@ impl GitPanel {
     }
 }
 
-fn run_git(root: &Path, args: &[&str]) -> Result<GitCommandOutput> {
+pub(super) fn run_git(root: &Path, args: &[&str]) -> Result<GitCommandOutput> {
     let command_label = format!(
         "git {}",
         args.iter()
@@ -179,6 +170,8 @@ fn run_git(root: &Path, args: &[&str]) -> Result<GitCommandOutput> {
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
+        // No `ext::` or `fd::` remote runs a command of the repository's choosing (4.F.2).
+        .env("GIT_ALLOW_PROTOCOL", "file:git:http:https:ssh")
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

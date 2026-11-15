@@ -5,9 +5,19 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Every Monday on main: a new advisory or a new Clippy lint shows up before the next release.
+  schedule:
+    - cron: '17 5 * * 1'
 
+# Actions of others are pinned to a commit, with the version beside it (Dependabot moves
+# both); the ones GitHub publishes stay on their major version.
 permissions:
   contents: read
+
+# A new push to a pull request replaces the run of the one before.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -19,13 +29,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-10-16
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # What only a release build does: the first start and an update refused by its checksum.
+      - if: runner.os != 'Windows'
+        run: cargo test --release --test first_start
 
   site:
     name: Landing page
@@ -42,3 +55,146 @@ jobs:
           cache-dependency-path: site/package-lock.json
       - run: npm ci
       - run: npm run build
+      # Links, other domains, rel="noopener", 320/390/1440 px and the console (TODO 6.4.7),
+      # with the Chrome the runner has.
+      - run: node scripts/check-site.mjs
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-10-16
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      # Into ~/.cargo/bin, which the cache keeps: the next run finds it installed.
+      - run: cargo install --locked cargo-audit
+      - run: bash packaging/security-check.sh
+      - name: Check the scripts and the workflows
+        run: |
+          for script in packaging/*.sh site/scripts/*.sh .githooks/*; do
+            bash -n "$script"
+          done
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+
+  # The language servers and the debug adapters, really installed and really started
+  # (TODO 3.4.1): a definition and a rename from each server, a stop at a breakpoint from
+  # each adapter. ROADMAP F26 and F27 are ☑ only with this job green.
+  servers:
+    name: Servers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-10-16
+        with:
+          components: rust-analyzer
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install the servers and the adapters
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clangd gdb
+          npm install --global pyright typescript typescript-language-server
+          go install golang.org/x/tools/gopls@latest
+          go install github.com/go-delve/delve/cmd/dlv@latest
+          python -m pip install debugpy
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - run: cargo test --features servers --bin sozo real
+
+  # The tools SozoIDE recommends, installed for real by its scripts (TODO 6.2.2): Debian and
+  # Fedora in containers as root, Windows with winget on its runner.
+  tools:
+    name: Tools (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: debian
+            os: ubuntu-latest
+            container: debian:13
+          - name: fedora
+            os: ubuntu-latest
+            container: fedora:43
+          - name: windows
+            os: windows-latest
+            container: ''
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@v7
+      - if: matrix.name != 'windows'
+        run: |
+          bash packaging/install-tools.sh --yes git curl ffmpeg tmux
+          bash packaging/install-tools.sh --check git curl ffmpeg tmux
+      - if: matrix.name == 'windows'
+        shell: cmd
+        run: |
+          call packaging\install-tools.cmd --yes
+          call packaging\install-tools.cmd --check
+
+  # The times a person feels, measured with nothing else running (TODO 6.1.4).
+  budgets:
+    name: Budgets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-10-16
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo test --features budgets --bin sozo budgets -- --test-threads=1 --nocapture
+
+  # The share of lines the tests run, never under its minimum (TODO 6.1.3).
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-10-16
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: bash packaging/coverage.sh
+
+  # PostgreSQL and MySQL for real (TODO 4.4.1): containers of the GitHub runner, free, thrown
+  # away with the job. The password is only for them and never leaves this job.
+  databases:
+    name: Databases
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: sozo
+          POSTGRES_PASSWORD: sozo-test-only
+          POSTGRES_DB: sozo
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U sozo" --health-interval 5s --health-timeout 5s --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: sozo-test-only
+          MYSQL_USER: sozo
+          MYSQL_PASSWORD: sozo-test-only
+          MYSQL_DATABASE: sozo
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -usozo -psozo-test-only --silent" --health-interval 5s --health-timeout 5s --health-retries 30
+    env:
+      SOZO_TEST_POSTGRES: postgres://sozo@127.0.0.1:5432/sozo
+      SOZO_TEST_MYSQL: mysql://sozo@127.0.0.1:3306/sozo
+      SOZO_TEST_PASSWORD: sozo-test-only
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-10-16
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo test --features databases --bin sozo database::real

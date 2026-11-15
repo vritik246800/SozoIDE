@@ -63,6 +63,8 @@ Darwin)
 Linux)
     if command -v apt-get >/dev/null 2>&1; then
         install=(${sudo_word[@]+"${sudo_word[@]}"} apt-get install -y "${missing[@]}")
+        # A system just installed has no package lists yet: read them first (TODO 6.2.2).
+        refresh=(${sudo_word[@]+"${sudo_word[@]}"} apt-get update)
     elif command -v dnf >/dev/null 2>&1; then
         install=(${sudo_word[@]+"${sudo_word[@]}"} dnf install -y "${missing[@]/#ffmpeg/ffmpeg-free}")
     else
@@ -76,6 +78,9 @@ Linux)
     ;;
 esac
 
+if [[ -n ${refresh+x} ]]; then
+    echo "Will run: ${refresh[*]}"
+fi
 echo "Will run: ${install[*]}"
 if ! $yes; then
     read -r -p "Install? [y/N] " answer || answer=
@@ -83,6 +88,9 @@ if ! $yes; then
         echo "Nothing installed. SozoIDE works without them."
         exit 0
     }
+fi
+if [[ -n ${refresh+x} ]]; then
+    "${refresh[@]}"
 fi
 "${install[@]}"
 

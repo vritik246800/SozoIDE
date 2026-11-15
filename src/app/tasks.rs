@@ -93,6 +93,9 @@ pub struct Dependencies {
     pub(super) reader: Option<Receiver<Vec<Found>>>,
     /// The row being installed or updated and what will say it changed (F35).
     pub watching: Option<(usize, Receiver<Found>)>,
+    /// Whether each one's package manager has a newer version (TODO 6.2.2); none unknown.
+    pub outdated: Vec<Option<bool>>,
+    pub(super) outdated_reader: Option<Receiver<Vec<Option<bool>>>>,
 }
 
 impl Dependencies {
@@ -100,12 +103,15 @@ impl Dependencies {
     /// a reader with nobody to answer, so opening the tab starts no real check (E53).
     #[cfg(test)]
     pub fn checked(components: Vec<Component>, found: Option<Vec<Found>>) -> Self {
+        let checking = found.is_none();
         Self {
             reader: found.is_none().then(|| std::sync::mpsc::channel().1),
             components,
             found,
             selected: 0,
             watching: None,
+            outdated: Vec::new(),
+            outdated_reader: checking.then(|| std::sync::mpsc::channel().1),
         }
     }
 
@@ -134,6 +140,9 @@ impl App {
     /// F7, Shift+F7, Ctrl+F7 and Ctrl+F5: the project's command, after the dialog the first
     /// time; several projects are chosen first; without one, Run runs the open file (F25).
     pub(super) fn run_task(&mut self, task: Task) {
+        if !self.trusted(true) {
+            return;
+        }
         self.flush_all_files();
         let os = std::env::consts::OS;
         let projects = detect(&self.root, os);
@@ -212,14 +221,81 @@ impl App {
         });
     }
 
+    /// A named task of `.sozo.toml`, after its dialog (TODO 5.2.5).
+    pub(super) fn run_named(&mut self, name: &str, command: &[String]) {
+        let line = crate::run::shell_line(command, std::env::consts::OS);
+        self.ask_and_run(
+            format!("Run the task {name}"),
+            vec![("Task", name.to_owned()), ("Command", line.clone())],
+            line,
+        );
+    }
+
+    /// The test the cursor is in, alone (TODO 5.2.5).
+    pub(super) fn run_test_at_cursor(&mut self) {
+        let Some(file) = self.active_tab.and_then(|index| self.open_files.get(index)) else {
+            return;
+        };
+        match crate::run::test_at(&file.path, &file.lines, file.cursor_row, &self.root) {
+            Some((words, name)) => {
+                let line = crate::run::shell_line(&words, std::env::consts::OS);
+                self.ask_and_run(
+                    format!("Run the test {name}"),
+                    vec![("Test", name), ("Command", line.clone())],
+                    line,
+                );
+            }
+            None => {
+                self.status =
+                    "The cursor is not in a test (Rust, Python, Go, JavaScript, TypeScript)".into()
+            }
+        }
+    }
+
+    /// `Alt+F8`: the last named task or test again.
+    pub(super) fn run_last_task(&mut self) {
+        match self.last_task.clone() {
+            Some((title, line)) => self.ask_and_run(title, vec![("Command", line.clone())], line),
+            None => self.status = "No task has run yet: Alt+F7 lists them".into(),
+        }
+    }
+
+    /// Runs `line` in the bottom terminal in a trusted folder: at once when it was confirmed
+    /// before, else after the dialog shows it.
+    fn ask_and_run(&mut self, title: String, rows: Vec<(&'static str, String)>, line: String) {
+        if !self.trusted(true) {
+            return;
+        }
+        self.flush_all_files();
+        self.last_task = Some((title.clone(), line.clone()));
+        let running = format!("Running: {line}");
+        if self.confirmed.contains(&line) {
+            return self.type_command(&line, running, true);
+        }
+        self.confirm = Some(Confirm {
+            title,
+            rows,
+            line,
+            running,
+            task: true,
+            server: None,
+            component: None,
+        });
+    }
+
     /// The line goes to the bottom terminal, which opens with the focus.
-    fn type_command(&mut self, line: &str, status: String, task: bool) {
+    pub(super) fn type_command(&mut self, line: &str, status: String, task: bool) {
+        let line = match crate::run::typed(line, std::env::consts::OS) {
+            Ok(line) => line,
+            Err(why) => {
+                self.status = why;
+                return;
+            }
+        };
         self.show_bottom_terminal = true;
         self.focus = Focus::BottomTerminal;
         self.terminal_selection = None;
-        self.bottom_terminal
-            .current_mut()
-            .send_text(&format!("{line}\r"));
+        self.bottom_terminal.current_mut().send_text(&line);
         self.status = status;
         if task {
             self.task_running = true;
@@ -417,11 +493,17 @@ impl App {
             selected: 0,
             reader: None,
             watching: None,
+            outdated: Vec::new(),
+            outdated_reader: None,
         });
         // Every time the tab opens, from what was found before: something may have been
         // installed or removed since (F35).
         if dependencies.reader.is_none() {
             dependencies.reader = Some(deps::check(&dependencies.components));
+            // The package managers say what has a newer version (TODO 6.2.2); never in tests.
+            if !cfg!(test) && dependencies.outdated_reader.is_none() {
+                dependencies.outdated_reader = Some(deps::check_outdated(&dependencies.components));
+            }
         }
     }
 
@@ -430,6 +512,7 @@ impl App {
         if let Some(dependencies) = &mut self.dependencies {
             dependencies.found = None;
             dependencies.reader = None;
+            dependencies.outdated_reader = None;
         }
         self.open_dependencies();
     }
@@ -449,6 +532,14 @@ impl App {
         let Some(dependencies) = &mut self.dependencies else {
             return;
         };
+        if let Some(Ok(outdated)) = dependencies
+            .outdated_reader
+            .as_ref()
+            .map(Receiver::try_recv)
+        {
+            dependencies.outdated = outdated;
+            dependencies.outdated_reader = None;
+        }
         let mut changed = false;
         match dependencies.reader.as_ref().map(Receiver::try_recv) {
             Some(Ok(found)) => {

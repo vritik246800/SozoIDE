@@ -9,7 +9,8 @@ use crate::{
     animation::InterfaceMotion,
     database::{
         ConnectionField, ConnectionForm, DatabasePanel, DatabaseTab, Operator, QueryCancellation,
-        Sort, Total, cycle,
+        QueryKind, Sort, Total, cycle,
+        more::{Export, Statement, export},
     },
 };
 
@@ -35,6 +36,15 @@ pub enum DatabaseAction {
     Copy,
     /// The SQL made again from the builder, over what was typed.
     Rebuild,
+    /// The plan of the SQL (`Alt+E`).
+    Explain,
+    /// A page more of the results (`L`).
+    LoadMore,
+    /// How many rows the last query gives (`#`).
+    Count,
+    /// A new SQL tab (`Alt+T`), or the tab `n`.
+    NewSqlTab,
+    SqlTab(usize),
 }
 
 /// The part of the workspace the keys go to.
@@ -80,7 +90,8 @@ enum TaskKind {
     Test(ConnectionForm),
     Save(ConnectionForm),
     Catalog,
-    Run(QueryCancellation),
+    Run(QueryCancellation, QueryKind),
+    Edit(Statement),
 }
 
 pub struct DatabaseController {
@@ -101,6 +112,18 @@ pub struct DatabaseController {
     pub result_horizontal_scroll: usize,
     /// SQL that Copy put aside for the app, which owns the clipboard.
     pub copy_request: Option<String>,
+    /// Results exported, for the app: to the clipboard, or to a new file of that extension.
+    pub export_request: Option<(String, Option<&'static str>)>,
+    /// The cell of the results under the cursor: row and column.
+    pub cell: (usize, usize),
+    /// The value typed for that cell, before its `UPDATE` is shown.
+    pub cell_edit: Option<String>,
+    /// A statement shown that runs only after `Enter` (TODO 4.1.11).
+    pub confirm: Option<Statement>,
+    /// The whole value of the cell in a box (`Space`).
+    pub cell_popup: bool,
+    /// The cell moved: the view scrolls the results to show it once.
+    pub follow_cell: bool,
     runtime: Runtime,
     task: Option<JoinHandle<()>>,
     cancellation: Option<QueryCancellation>,
@@ -131,6 +154,12 @@ impl DatabaseController {
             result_scroll: 0,
             result_horizontal_scroll: 0,
             copy_request: None,
+            export_request: None,
+            cell: (0, 0),
+            cell_edit: None,
+            confirm: None,
+            cell_popup: false,
+            follow_cell: false,
             runtime: Runtime::new()?,
             task: None,
             cancellation: None,
@@ -170,17 +199,31 @@ impl DatabaseController {
             self.handle_form_key(key);
             return true;
         }
+        if self.overlay_key(key) {
+            return true;
+        }
         if key.code == KeyCode::Esc {
             return false;
         }
         let Some(tab) = self.panel.try_lock().map(|panel| panel.tab).ok() else {
             return true;
         };
+        if tab != DatabaseTab::Connections && self.workspace_key(key) {
+            return true;
+        }
         let run = key.code == KeyCode::F(5)
             || (key.code == KeyCode::Enter
                 && (key.modifiers.contains(KeyModifiers::CONTROL)
                     || key.modifiers.contains(KeyModifiers::ALT)));
+        let completing = self
+            .panel
+            .try_lock()
+            .is_ok_and(|panel| !panel.completions.is_empty());
         match key.code {
+            KeyCode::Tab if completing => {
+                self.sql_key(key);
+                return true;
+            }
             KeyCode::Tab | KeyCode::BackTab => {
                 let next = if key.code == KeyCode::Tab {
                     tab.next()
@@ -352,9 +395,110 @@ impl DatabaseController {
         });
     }
 
+    /// The boxes over the panel take every key while open.
+    fn overlay_key(&mut self, key: KeyEvent) -> bool {
+        if self.confirm.is_some() {
+            match key.code {
+                KeyCode::Enter => {
+                    if let Some(statement) = self.confirm.take()
+                        && !self.operation
+                    {
+                        self.spawn(TaskKind::Edit(statement));
+                    }
+                }
+                KeyCode::Esc => self.confirm = None,
+                _ => {}
+            }
+            return true;
+        }
+        if let Some(text) = &mut self.cell_edit {
+            match key.code {
+                KeyCode::Esc => self.cell_edit = None,
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    text.push(character);
+                }
+                KeyCode::Enter => {
+                    let typed = self.cell_edit.take().unwrap_or_default();
+                    let (row, column) = self.cell;
+                    self.prepare(|panel| panel.edit_statement(row, column, &typed));
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if self.cell_popup {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ')) {
+                self.cell_popup = false;
+            }
+            return true;
+        }
+        let shown = self
+            .panel
+            .try_lock()
+            .is_ok_and(|panel| !panel.completions.is_empty());
+        if shown && key.code == KeyCode::Esc {
+            self.with_panel_mut(|panel| panel.completions.clear());
+            return true;
+        }
+        false
+    }
+
+    /// The statement of an edit, shown for `Enter`; or why it cannot be made.
+    fn prepare(&mut self, make: impl FnOnce(&DatabasePanel) -> anyhow::Result<Statement>) {
+        let Ok(mut panel) = self.panel.try_lock() else {
+            return;
+        };
+        match make(&panel) {
+            Ok(statement) => self.confirm = Some(statement),
+            Err(error) => panel.error = Some(error.to_string()),
+        }
+    }
+
+    /// The keys of the connected workspace in any of its parts: plan and SQL tabs.
+    fn workspace_key(&mut self, key: KeyEvent) -> bool {
+        if !key.modifiers.contains(KeyModifiers::ALT) {
+            return false;
+        }
+        match key.code {
+            KeyCode::Char('e' | 'E') => self.action(DatabaseAction::Explain),
+            KeyCode::Char('t' | 'T') => self.action(DatabaseAction::NewSqlTab),
+            KeyCode::Char('w' | 'W') => self.with_panel_mut(DatabasePanel::close_sql_tab),
+            KeyCode::Char(digit @ '1'..='9') => {
+                self.action(DatabaseAction::SqlTab(digit as usize - '1' as usize));
+            }
+            _ => return false,
+        }
+        true
+    }
+
     fn sql_key(&mut self, key: KeyEvent) {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
-        self.with_panel_mut(|panel| match key.code {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        self.with_panel_mut(|panel| {
+            if !panel.completions.is_empty() {
+                if matches!(key.code, KeyCode::Tab | KeyCode::Enter) && panel.accept_completion() {
+                    return;
+                }
+                if !(control && key.code == KeyCode::Char(' ')) {
+                    panel.completions.clear();
+                }
+            }
+            match key.code {
+                KeyCode::Char(' ') if control => panel.complete(),
+                KeyCode::Up if alt => panel.walk_history(true),
+                KeyCode::Down if alt => panel.walk_history(false),
+                _ => sql_edit(panel, key.code, control),
+            }
+        });
+    }
+}
+
+fn sql_edit(panel: &mut DatabasePanel, code: KeyCode, control: bool) {
+    {
+        match code {
             KeyCode::Enter => panel.insert_query("\n"),
             KeyCode::Backspace => panel.query_backspace(),
             KeyCode::Delete => panel.query_delete(),
@@ -366,20 +510,77 @@ impl DatabaseController {
             KeyCode::End => panel.query_end(),
             KeyCode::Char(character) if !control => panel.insert_query(&character.to_string()),
             _ => {}
-        });
+        }
     }
+}
 
+impl DatabaseController {
+    /// The results: a cell moves with the arrows; `Enter` edits it, `Delete` deletes its row,
+    /// `+` copies it as a new row (each after `Enter` on its statement), `Space` shows it whole,
+    /// `C`/`J`/`M` copy the results as CSV, JSON or Markdown (with `Shift`, to a file), `L`
+    /// loads a page more, `#` counts them all.
     fn results_key(&mut self, code: KeyCode) {
+        let (rows, columns) = self
+            .panel
+            .try_lock()
+            .ok()
+            .and_then(|panel| {
+                let result = panel.results.as_ref()?;
+                Some((result.rows.len(), result.columns.len()))
+            })
+            .unwrap_or((0, 0));
+        let last = |count: usize| count.saturating_sub(1);
+        self.follow_cell = true;
+        let (row, column) = &mut self.cell;
         match code {
-            KeyCode::Up => self.result_scroll = self.result_scroll.saturating_sub(1),
-            KeyCode::Down => self.result_scroll += 1,
-            KeyCode::PageUp => self.result_scroll = self.result_scroll.saturating_sub(10),
-            KeyCode::PageDown => self.result_scroll += 10,
-            KeyCode::Left => {
-                self.result_horizontal_scroll = self.result_horizontal_scroll.saturating_sub(4);
+            KeyCode::Up => *row = row.saturating_sub(1),
+            KeyCode::Down => *row = (*row + 1).min(last(rows)),
+            KeyCode::PageUp => *row = row.saturating_sub(10),
+            KeyCode::PageDown => *row = (*row + 10).min(last(rows)),
+            KeyCode::Left => *column = column.saturating_sub(1),
+            KeyCode::Right => *column = (*column + 1).min(last(columns)),
+            KeyCode::Home => {
+                self.cell = (0, 0);
+                (self.result_scroll, self.result_horizontal_scroll) = (0, 0);
             }
-            KeyCode::Right => self.result_horizontal_scroll += 4,
-            KeyCode::Home => (self.result_scroll, self.result_horizontal_scroll) = (0, 0),
+            KeyCode::Enter if rows > 0 => {
+                let value = self.panel.try_lock().ok().and_then(|panel| {
+                    panel
+                        .results
+                        .as_ref()?
+                        .rows
+                        .get(self.cell.0)?
+                        .get(self.cell.1)
+                        .map(|value| match value {
+                            crate::database::DatabaseValue::Text(text) => text.clone(),
+                            other => other.to_string(),
+                        })
+                });
+                self.cell_edit = value;
+            }
+            KeyCode::Delete if rows > 0 => {
+                let row = self.cell.0;
+                self.prepare(|panel| panel.delete_statement(row));
+            }
+            KeyCode::Char('+') | KeyCode::Insert if rows > 0 => {
+                let row = self.cell.0;
+                self.prepare(|panel| panel.insert_statement(row));
+            }
+            KeyCode::Char(' ') if rows > 0 => self.cell_popup = true,
+            KeyCode::Char(letter @ ('c' | 'C' | 'j' | 'J' | 'm' | 'M')) => {
+                let format = match letter.to_ascii_lowercase() {
+                    'c' => Export::Csv,
+                    'j' => Export::Json,
+                    _ => Export::Markdown,
+                };
+                let to_file = letter.is_ascii_uppercase();
+                self.export_request = self.panel.try_lock().ok().and_then(|panel| {
+                    let text = export(panel.results.as_ref()?, format);
+                    Some((text, to_file.then_some(format.extension())))
+                });
+            }
+            KeyCode::Char('l' | 'L') => self.action(DatabaseAction::LoadMore),
+            KeyCode::Char('#') => self.action(DatabaseAction::Count),
             _ => {}
         }
     }
@@ -396,6 +597,10 @@ impl DatabaseController {
             KeyCode::F(5) => self.action(DatabaseAction::TestConnection),
             KeyCode::Left if form.field == ConnectionField::Driver => form.cycle_driver(false),
             KeyCode::Right if form.field == ConnectionField::Driver => form.cycle_driver(true),
+            KeyCode::Left if form.field == ConnectionField::Tls => form.cycle_tls(false),
+            KeyCode::Right | KeyCode::Char(_) if form.field == ConnectionField::Tls => {
+                form.cycle_tls(true);
+            }
             KeyCode::Left => form.move_left(),
             KeyCode::Right => form.move_right(),
             KeyCode::Home => form.move_home(),
@@ -463,7 +668,11 @@ impl DatabaseController {
     pub fn scroll(&mut self, point: (u16, u16), up: bool, sideways: bool) {
         if contains(self.regions.results, point) {
             if sideways {
-                self.results_key(if up { KeyCode::Left } else { KeyCode::Right });
+                self.result_horizontal_scroll = if up {
+                    self.result_horizontal_scroll.saturating_sub(4)
+                } else {
+                    self.result_horizontal_scroll + 4
+                };
             } else if up {
                 self.result_scroll = self.result_scroll.saturating_sub(3);
             } else {
@@ -545,12 +754,46 @@ impl DatabaseController {
                     Some(error)
                 });
                 if !self.operation && stale.is_none() {
-                    let cancellation = QueryCancellation::new();
-                    self.cancellation = Some(cancellation.clone());
-                    self.spawn(TaskKind::Run(cancellation));
+                    self.run(QueryKind::Run);
                     self.focus = DatabaseFocus::Results;
                     (self.result_scroll, self.result_horizontal_scroll) = (0, 0);
+                    self.cell = (0, 0);
                 }
+            }
+            DatabaseAction::Explain => {
+                if !self.operation {
+                    self.run(QueryKind::Explain);
+                    self.focus = DatabaseFocus::Results;
+                    self.cell = (0, 0);
+                }
+            }
+            DatabaseAction::LoadMore => {
+                let more = self
+                    .panel
+                    .try_lock()
+                    .is_ok_and(|panel| panel.results.as_ref().is_some_and(|result| result.more));
+                if more && !self.operation {
+                    self.run(QueryKind::More);
+                }
+            }
+            DatabaseAction::Count => {
+                if !self.operation {
+                    self.run(QueryKind::Count);
+                }
+            }
+            DatabaseAction::NewSqlTab => {
+                self.with_panel_mut(|panel| {
+                    panel.new_sql_tab();
+                    panel.tab = DatabaseTab::Sql;
+                });
+                self.focus = DatabaseFocus::Content;
+            }
+            DatabaseAction::SqlTab(index) => {
+                self.with_panel_mut(|panel| {
+                    panel.open_sql_tab(index);
+                    panel.tab = DatabaseTab::Sql;
+                });
+                self.focus = DatabaseFocus::Content;
             }
             DatabaseAction::CancelQuery => {
                 if let Some(cancellation) = &self.cancellation {
@@ -644,6 +887,12 @@ impl DatabaseController {
         }
     }
 
+    fn run(&mut self, kind: QueryKind) {
+        let cancellation = QueryCancellation::new();
+        self.cancellation = Some(cancellation.clone());
+        self.spawn(TaskKind::Run(cancellation, kind));
+    }
+
     fn open_form(&mut self) {
         self.form = Some(ConnectionForm::default());
         self.motion.open_dialog(Instant::now());
@@ -674,8 +923,13 @@ impl DatabaseController {
                     Err(error) => panel.error = Some(error.to_string()),
                 },
                 TaskKind::Catalog => load_workspace(&mut panel).await,
-                TaskKind::Run(cancellation) => {
-                    if let Err(error) = panel.execute_query_cancellable(cancellation).await {
+                TaskKind::Run(cancellation, kind) => {
+                    if let Err(error) = panel.execute(cancellation, kind).await {
+                        panel.error = Some(error.to_string());
+                    }
+                }
+                TaskKind::Edit(statement) => {
+                    if let Err(error) = panel.run_edit(statement).await {
                         panel.error = Some(error.to_string());
                     }
                 }
@@ -865,12 +1119,12 @@ mod tests {
         assert_eq!(rows[0][1], crate::database::DatabaseValue::Float(25.0));
         key(&mut controller, KeyCode::Right);
         key(&mut controller, KeyCode::Down);
+        key(&mut controller, KeyCode::Down);
+        key(&mut controller, KeyCode::Right);
         assert_eq!(
-            (
-                controller.result_horizontal_scroll,
-                controller.result_scroll
-            ),
-            (4, 1)
+            controller.cell,
+            (1, 1),
+            "the cell stops at the last row and column"
         );
         controller.action(DatabaseAction::Copy);
         assert_eq!(controller.copy_request.as_deref(), Some(sql.as_str()));
@@ -881,6 +1135,131 @@ mod tests {
         controller.focus = DatabaseFocus::Content;
         key(&mut controller, KeyCode::Delete);
         assert_eq!(controller.panel.blocking_lock().design.fields.len(), 1);
+    }
+
+    #[test]
+    fn a_cell_is_edited_only_after_its_statement_is_shown_and_results_are_exported() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut controller =
+            DatabaseController::with_config_path(directory.path().join("connections.toml"))
+                .unwrap();
+        let mut form = ConnectionForm::default();
+        form.name = "Edit".into();
+        form.database = directory.path().join("edit.db").display().to_string();
+        controller.spawn(TaskKind::Save(form));
+        wait(&mut controller);
+        controller.panel.blocking_lock().insert_query(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT); INSERT INTO t (name) VALUES ('a'), ('b')",
+        );
+        controller.action(DatabaseAction::RunQuery);
+        wait(&mut controller);
+        controller.spawn(TaskKind::Catalog);
+        wait(&mut controller);
+        {
+            let mut panel = controller.panel.blocking_lock();
+            panel.set_query("SELECT id, name FROM t ORDER BY id");
+            panel.sql_edited = true;
+        }
+        controller.action(DatabaseAction::RunQuery);
+        wait(&mut controller);
+        let key = |controller: &mut DatabaseController, code: KeyCode| {
+            controller.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+        };
+        let name = |controller: &DatabaseController| {
+            controller
+                .panel
+                .blocking_lock()
+                .results
+                .as_ref()
+                .unwrap()
+                .rows[0][1]
+                .clone()
+        };
+        // Enter opens the value, Enter again shows the UPDATE; Esc there changes nothing.
+        {
+            let panel = controller.panel.blocking_lock();
+            assert!(panel.error.is_none(), "{:?}", panel.error);
+            assert_eq!(
+                (panel.tab, controller.focus),
+                (DatabaseTab::Diagram, DatabaseFocus::Results)
+            );
+        }
+        key(&mut controller, KeyCode::Right);
+        key(&mut controller, KeyCode::Enter);
+        assert_eq!(controller.cell_edit.as_deref(), Some("a"));
+        key(&mut controller, KeyCode::Backspace);
+        for character in "it's".chars() {
+            key(&mut controller, KeyCode::Char(character));
+        }
+        key(&mut controller, KeyCode::Enter);
+        let statement = controller.confirm.clone().unwrap();
+        assert!(statement.sql.starts_with("UPDATE t SET name = ?"));
+        assert!(
+            key(&mut controller, KeyCode::Esc),
+            "Esc closes the box, not the panel"
+        );
+        assert!(controller.confirm.is_none());
+        assert!(!controller.operation);
+        assert_eq!(
+            name(&controller),
+            crate::database::DatabaseValue::Text("a".into())
+        );
+        // The same again, with Enter: it runs and the results come back.
+        controller.confirm = Some(statement);
+        key(&mut controller, KeyCode::Enter);
+        wait(&mut controller);
+        assert_eq!(
+            name(&controller),
+            crate::database::DatabaseValue::Text("it's".into())
+        );
+        // Delete asks too.
+        key(&mut controller, KeyCode::Delete);
+        assert!(
+            controller
+                .confirm
+                .as_ref()
+                .unwrap()
+                .sql
+                .starts_with("DELETE FROM t")
+        );
+        key(&mut controller, KeyCode::Esc);
+        // Space shows the cell whole, Esc closes it.
+        key(&mut controller, KeyCode::Char(' '));
+        assert!(controller.cell_popup);
+        assert!(key(&mut controller, KeyCode::Esc));
+        assert!(!controller.cell_popup);
+        // C copies CSV, Shift+M asks for a Markdown file.
+        key(&mut controller, KeyCode::Char('c'));
+        let (text, file) = controller.export_request.take().unwrap();
+        assert_eq!(
+            (text.as_str(), file),
+            ("id,name\r\n1,it's\r\n2,b\r\n", None)
+        );
+        key(&mut controller, KeyCode::Char('M'));
+        assert_eq!(controller.export_request.take().unwrap().1, Some("md"));
+        // Alt+T opens a new SQL tab, Alt+1 goes back to the first.
+        let alt = |controller: &mut DatabaseController, character: char| {
+            controller.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::ALT))
+        };
+        alt(&mut controller, 't');
+        assert_eq!(controller.panel.blocking_lock().sql_tab, 1);
+        alt(&mut controller, '1');
+        assert_eq!(
+            controller.panel.blocking_lock().query_text,
+            "SELECT id, name FROM t ORDER BY id"
+        );
+        // Ctrl+Space shows the names, Esc hides them without closing the panel.
+        controller.focus = DatabaseFocus::Content;
+        controller.panel.blocking_lock().set_query("SELECT na");
+        controller.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        assert_eq!(controller.panel.blocking_lock().completions, ["name"]);
+        controller.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(controller.panel.blocking_lock().query_text, "SELECT name");
+        assert_eq!(
+            controller.panel.blocking_lock().tab,
+            DatabaseTab::Sql,
+            "Tab took the name, not the next tab"
+        );
     }
 
     fn wait(controller: &mut DatabaseController) {

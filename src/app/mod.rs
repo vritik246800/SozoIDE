@@ -17,20 +17,34 @@ use crate::{
     update::{Notes, UpdateState, Updater, Welcome, deps, notes_since},
 };
 
+mod arrange;
+mod blame;
+mod code;
 mod debugging;
+mod editing;
 mod explorer;
+mod finder;
 mod input;
 mod intellisense;
 mod keys;
 mod layout;
+mod marks;
 mod motion;
+mod requests;
 mod session;
 mod tasks;
+mod tree;
 
+pub use code::{ActionMenu, EditPreview, RenameBox};
+pub use debugging::{DebugConfirm, DebugInput, DebugInputKind, DebugTarget};
+#[cfg(test)]
+pub use editing::LICENSES;
+pub use editing::{ReplacePlan, folders_line};
 pub use explorer::{
     EntryAction, EntryMenu, FileEntry, FolderCount, Kind, NamePrompt, PropertiesDialog, grouped,
     human_size,
 };
+pub use finder::{FINDER_ROWS, Finder, FinderMode, FinderRow};
 pub use intellisense::{Completion, PreviewRow, SHOWN_ITEMS, goal_names};
 pub use keys::{Action, KeyEditor, Keymap};
 use layout::{Divider, TabDrag, inner_size};
@@ -39,7 +53,10 @@ pub use layout::{
     TabBar, TerminalSelection, Tile, video_areas,
 };
 pub(crate) use motion::AppMotion;
+#[cfg(test)]
+pub(crate) use motion::NOTICE_LIFE;
 pub use tasks::{Dependencies, HelpTab, Setup};
+pub use tree::ExplorerAction;
 
 /// How often the open files and the Explorer are compared with the disk.
 const WATCH_INTERVAL: Duration = Duration::from_secs(1);
@@ -57,13 +74,14 @@ pub const BOTTOM_TERMINALS: usize = 3;
 pub const RIGHT_TERMINALS: usize = 2;
 
 /// Pages of the first-start tutorial (`ui::overlays` writes them).
-pub const TUTORIAL_STEPS: usize = 6;
+pub const TUTORIAL_STEPS: usize = 7;
 
 /// Nerd Fonts glyphs by their `nerd_fonts` name. Copied instead of `NerdFonts::load()`, which
 /// reads its table at runtime from the build machine's cargo registry and panics on every other
 /// machine (ERRORS.md E10); a test keeps them equal to the crate's table.
-const ICONS: [(&str, char); 3] = [
+const ICONS: [(&str, char); 4] = [
     ("custom-folder", '\u{e5ff}'),
+    ("dev-git_branch", '\u{e725}'),
     ("custom-folder_open", '\u{e5fe}'),
     ("dev-terminal", '\u{e795}'),
 ];
@@ -75,6 +93,52 @@ pub struct App {
     pub explorer_scroll: usize,
     /// The columns the Explorer is scrolled sideways by (F01).
     pub explorer_scroll_x: usize,
+    /// The file of the active tab the Explorer last revealed (F01).
+    revealed: Option<PathBuf>,
+    /// A folder's rows on their way in or out (`ROWS`).
+    pub explorer_rows: Option<tree::RowsMotion>,
+    /// What Ctrl+Z in the Explorer undoes (R14).
+    file_undo: Option<tree::FileUndo>,
+    /// The entries marked with Shift or Ctrl (F01).
+    pub marked: std::collections::BTreeSet<PathBuf>,
+    /// The text typed after `/` in the Explorer (F01).
+    pub explorer_filter: Option<String>,
+    /// Where a dragged entry moves after the question (F01).
+    pub move_into: Option<PathBuf>,
+    /// The row a drag in the Explorer started on.
+    entry_drag: Option<usize>,
+    /// The project's `.gitignore`, read with the tree: what it names is drawn dim (F01).
+    pub gitignore: Option<ignore::gitignore::Gitignore>,
+    /// `I` in the Explorer: whether ignored entries are drawn dim.
+    pub dim_ignored: bool,
+    /// Open a file by its name, or the command palette (F41).
+    pub finder: Option<Finder>,
+    /// The text of the Go to line box (TODO 2.2.2).
+    pub go_to_line: Option<String>,
+    /// A replace in the workspace waiting for Enter (TODO 2.1.3).
+    pub replace_plan: Option<ReplacePlan>,
+    /// A file with edits not saved that changed on disk, and its comparison (TODO 2.2.6).
+    pub disk_prompt: Option<PathBuf>,
+    pub disk_compare: Option<Vec<String>>,
+    /// Two files side by side (`Alt+D`, TODO 5.2.6).
+    pub comparison: Option<editing::Comparison>,
+    /// The last click in the text: when, where and how many in a row (TODO 2.2.4).
+    last_click: Option<(Instant, (u16, u16), u8)>,
+    /// Open tabs whose files another program deleted, said once (TODO 2.2.5).
+    deleted_tabs: std::collections::HashSet<PathBuf>,
+    /// Code Intelligence of TODO 3.2.1: the rename box, the code actions, the signature at the
+    /// cursor and edits waiting for Enter.
+    pub rename: Option<RenameBox>,
+    pub action_menu: Option<ActionMenu>,
+    pub signature: Option<code::Signature>,
+    pub edit_preview: Option<EditPreview>,
+    /// A command chosen in the palette runs without the keys of a panel.
+    from_palette: bool,
+    /// The debugger's box, the options of each breakpoint and the launch waiting for Enter
+    /// (TODO 3.2.2).
+    pub debug_input: Option<DebugInput>,
+    pub breakpoint_options: std::collections::HashMap<(PathBuf, usize), crate::debug::Breakpoint>,
+    pub debug_confirm: Option<DebugConfirm>,
     pub open_files: Vec<OpenFile>,
     pub active_tab: Option<usize>,
     pub focus: Focus,
@@ -87,6 +151,9 @@ pub struct App {
     pub git: GitController,
     /// How the window is shared (F39) and the length of each panel in either direction.
     pub tiles: Tile,
+    /// One panel over the whole window (`Ctrl+M`) and the Layouts dialog (TODO 5.2.3).
+    pub maximized: Option<Panel>,
+    pub layout_menu: Option<arrange::LayoutMenu>,
     pub explorer_width: u16,
     pub explorer_height: u16,
     pub right_terminal_width: u16,
@@ -136,6 +203,10 @@ pub struct App {
     /// The language servers (F26), the suggestions open under the cursor and when the edited
     /// text last went to the servers.
     pub lsp: crate::lsp::Lsp,
+    /// Whether the code of this folder may run: language servers, the debugger and the
+    /// commands of the project (F45). None until the user is asked, the first time one of
+    /// them is needed; kept with the session of the folder.
+    pub trust: Option<bool>,
     pub completion: Option<Completion>,
     /// Code Intelligence (F31): the hover waited for, asked or shown, the Peek box and the
     /// places left by going to a definition or a result, for Back.
@@ -170,6 +241,8 @@ pub struct App {
     pub project_choice: Option<tasks::ProjectChoice>,
     chosen_project: Option<PathBuf>,
     confirmed: std::collections::HashSet<String>,
+    /// The last named task or test run, for `Alt+F8` (TODO 5.2.5): its title and line.
+    last_task: Option<(String, String)>,
     task_running: bool,
     /// F33: Help's tab and the Dependencies tab.
     pub help_tab: tasks::HelpTab,
@@ -182,6 +255,8 @@ pub struct App {
     /// modification times of those folders.
     watched: Instant,
     folders: Vec<Option<SystemTime>>,
+    /// A large tree being read again on a thread (`follow_folders`).
+    entries_reader: Option<Receiver<Vec<FileEntry>>>,
     /// What Git says changed in the project, for the Explorer's marks (F01), and the reading
     /// running in the background, one at a time.
     pub git_changes: ExplorerChanges,
@@ -189,6 +264,8 @@ pub struct App {
     /// The same for the lines of the open files, in the editor's margin (F34), and when it was
     /// last asked.
     pub line_marks: LineMarks,
+    /// The blame of a file on screen, asked with `Alt+G` (TODO 4.1.6).
+    pub blame: Option<(PathBuf, Vec<crate::git::Blame>)>,
     line_marks_reader: Option<Receiver<LineMarks>>,
     /// The repository's `.git` folder, when of a repository; the times of what a commit, a
     /// stage, a checkout or a fetch change; whether the Source Control is behind them (F35).
@@ -266,6 +343,31 @@ impl App {
             selected_entry: 0,
             explorer_scroll: 0,
             explorer_scroll_x: 0,
+            revealed: None,
+            explorer_rows: None,
+            file_undo: None,
+            marked: std::collections::BTreeSet::new(),
+            explorer_filter: None,
+            move_into: None,
+            entry_drag: None,
+            gitignore: None,
+            dim_ignored: true,
+            finder: None,
+            go_to_line: None,
+            replace_plan: None,
+            disk_prompt: None,
+            disk_compare: None,
+            comparison: None,
+            last_click: None,
+            deleted_tabs: std::collections::HashSet::new(),
+            rename: None,
+            action_menu: None,
+            signature: None,
+            edit_preview: None,
+            from_palette: false,
+            debug_input: None,
+            breakpoint_options: std::collections::HashMap::new(),
+            debug_confirm: None,
             open_files: Vec::new(),
             active_tab: None,
             focus: Focus::Explorer,
@@ -277,6 +379,8 @@ impl App {
             show_git: false,
             git,
             tiles: Tile::default(),
+            maximized: None,
+            layout_menu: None,
             explorer_width: 30,
             explorer_height: 12,
             right_terminal_width: 42,
@@ -291,7 +395,7 @@ impl App {
             keys_path,
             key_editor: KeyEditor::default(),
             regions: Regions::default(),
-            status: "Ready".to_string(),
+            status: crate::settings::warning().unwrap_or("Ready").to_string(),
             should_quit: false,
             overlay: Overlay::None,
             search: None,
@@ -312,10 +416,13 @@ impl App {
             project_choice: None,
             chosen_project: None,
             confirmed: std::collections::HashSet::new(),
+            last_task: None,
             task_running: false,
             help_tab: tasks::HelpTab::default(),
             dependencies: None,
             lsp: crate::lsp::Lsp::new(lsp_root, !cfg!(test)),
+            // Debug builds keep no sessions: nothing to remember the answer in, so no question.
+            trust: session::sessions_path().is_none().then_some(true),
             completion: None,
             hover: None,
             peek: None,
@@ -337,9 +444,11 @@ impl App {
             file_clipboard: None,
             watched: now,
             folders: Vec::new(),
+            entries_reader: None,
             git_changes: ExplorerChanges::new(),
             git_changes_reader: None,
             line_marks: LineMarks::new(),
+            blame: None,
             line_marks_reader: None,
             git_dir: None,
             git_stamp: Vec::new(),
@@ -390,6 +499,19 @@ impl App {
         });
         self.motion
             .sync_content(self.show_git, self.show_database, tab);
+        // Menus open line by line, the focus is traced, a new message comes in (F08).
+        let menu = self.entry_menu.is_some() || self.completion_view().is_some();
+        self.motion.sync_menu(menu);
+        self.motion.sync_focus(self.focus as u8);
+        self.motion.sync_notice(&self.status);
+        // The Explorer follows the active tab: its folders open and its row is selected.
+        let active = tab.map(|(_, path)| path.to_path_buf());
+        if active.is_some() && active != self.revealed {
+            self.revealed.clone_from(&active);
+            if let Some(path) = active {
+                self.reveal(&path);
+            }
+        }
         if self.splash_visible && now >= self.splash_until && !self.motion.splash_closing() {
             self.motion.close_splash(now);
         }
@@ -405,6 +527,13 @@ impl App {
         }
         if let Some(search) = &mut self.search {
             search.poll();
+        }
+        if let Some(finder) = &mut self.finder {
+            finder.poll();
+        }
+        // Colours of long files arrive from their thread (TODO 2.1.10).
+        for file in &mut self.open_files {
+            file.tick_colours();
         }
         let due = self
             .open_files
@@ -431,6 +560,7 @@ impl App {
             self.save_session();
         }
         self.tick_properties();
+        self.tick_entries();
         match self.git_changes_reader.as_ref().map(Receiver::try_recv) {
             Some(Ok(changes)) => {
                 if changes != self.git_changes {
@@ -447,31 +577,33 @@ impl App {
         self.tick_lsp(now);
         self.tick_debug();
         self.database.tick_at(now);
-        // Copy in the SQL tab: the app owns the clipboard.
-        if let Some(text) = self.database.copy_request.take() {
-            self.copy(text);
-        }
         self.git.tick_at(now);
-        // The Diff tab asked for its file in the editor.
-        if let Some(path) = self.git.open_request.take() {
-            match self.open_file(path) {
-                Ok(()) => self.show_git = false,
-                Err(error) => self.status = error.to_string(),
-            }
-        }
+        self.panel_requests();
+        self.sync_twins();
         self.tick_update();
     }
 
     /// Follows what other programs do to the project: open files read again (unless they have
     /// edits not saved yet, which stay, Q40) and the Explorer when a folder on screen changes.
     fn watch_disk(&mut self) {
+        let mut prompt = None;
         for file in &mut self.open_files {
+            // A file deleted by another program: its tab says so once, and keeps the text.
+            if file.is_text() && !file.path.exists() {
+                if self.deleted_tabs.insert(file.path.clone()) {
+                    self.status = format!("{} was deleted: its text stays in the tab", file.name);
+                }
+                continue;
+            }
+            self.deleted_tabs.remove(&file.path);
             if !file.changed_on_disk() {
                 continue;
             }
             self.status = if file.dirty {
+                // The question waits for K, R or C; nothing is lost meanwhile (TODO 2.2.6).
                 file.keep_edits();
-                format!("{} changed on disk: your edits are kept", file.name)
+                prompt = Some(file.path.clone());
+                format!("{} changed on disk", file.name)
             } else {
                 match file.reload() {
                     Ok(()) => format!("Reloaded {}", file.name),
@@ -479,8 +611,11 @@ impl App {
                 }
             };
         }
+        if let Some(path) = prompt {
+            self.ask_about_disk(path);
+        }
         if self.folder_times() != self.folders
-            && let Err(error) = self.refresh_entries()
+            && let Err(error) = self.follow_folders()
         {
             self.status = error.to_string();
         }
@@ -686,8 +821,11 @@ impl App {
     /// Ctrl+R (F25): saves everything and types the command that runs `file` into the bottom
     /// terminal, which opens and takes the focus.
     pub(super) fn run_file(&mut self, file: PathBuf) {
+        if !self.trusted(true) {
+            return;
+        }
         self.flush_all_files();
-        let scratch = std::env::temp_dir().join("sozo-run");
+        let scratch = crate::storage::private_folder("run");
         let command = crate::run::command(
             &file,
             &self.root,
@@ -697,32 +835,10 @@ impl App {
         );
         match command {
             Ok(line) => {
-                self.show_bottom_terminal = true;
-                self.focus = Focus::BottomTerminal;
-                self.bottom_terminal
-                    .current_mut()
-                    .send_text(&format!("{line}\r"));
-                self.status = format!("Running {}", file.display());
+                self.type_command(&line, format!("Running {}", file.display()), false);
             }
             Err(error) => self.status = error,
         }
-    }
-
-    /// `+` on the bottom terminal: another shell in a tab of its own, up to three (F04).
-    pub(super) fn add_terminal(&mut self) {
-        if self.bottom_terminal.tabs.len() < BOTTOM_TERMINALS {
-            self.bottom_terminal.add(&self.root);
-        }
-        self.show_bottom_terminal = true;
-        self.focus = Focus::BottomTerminal;
-        self.terminal_selection = None;
-    }
-
-    /// `x` on a tab of the bottom terminal closes it with its shell; the last one stays.
-    pub(super) fn close_terminal(&mut self, index: usize) {
-        self.bottom_terminal.close(index);
-        self.focus = Focus::BottomTerminal;
-        self.terminal_selection = None;
     }
 
     /// The length `panel` takes along `direction` as it shows now: 0 while it is hidden, less
@@ -907,19 +1023,85 @@ impl App {
             self.focus = Focus::Editor;
             return Ok(());
         }
+        // A text file this large is read whole into memory: say so and wait for Enter (R11).
+        if crate::editor::is_huge_text(&path) {
+            self.name_prompt = Some(NamePrompt {
+                action: EntryAction::OpenLarge,
+                target: path,
+                name: String::new(),
+                error: None,
+            });
+            return Ok(());
+        }
+        self.open_file_now(path)
+    }
+
+    /// Opens `path` in a new tab, whatever its size.
+    pub(super) fn open_file_now(&mut self, path: PathBuf) -> Result<()> {
         let mut file = OpenFile::load(path, &mut self.picker)?;
         file.pane = self.active_pane();
-        if file.is_text()
+        let server = file.is_text() && crate::lsp::server_for(&file.path).is_some();
+        if server
+            && self.trusted(false)
             && let Some(message) = self.lsp.open(&file.path, &file.text(), file.edits)
         {
             self.status = message;
         }
         self.flush_active_file();
-        self.status = format!("Opened {}", file.name);
+        self.status = if file.read_only {
+            format!(
+                "Opened {} read only: over 5 MB, too large to edit or colour",
+                file.name
+            )
+        } else {
+            format!("Opened {}", file.name)
+        };
         self.open_files.push(file);
         self.active_tab = Some(self.open_files.len() - 1);
         self.focus = Focus::Editor;
         Ok(())
+    }
+
+    /// Whether the code of this folder may run. The first time it is needed the user is asked
+    /// (and nothing runs until the answer); after a no, only what the user asks for by hand
+    /// (`again`: Run, Build, Debug) asks once more.
+    pub(super) fn trusted(&mut self, again: bool) -> bool {
+        match self.trust {
+            Some(true) => true,
+            Some(false) if !again => false,
+            _ => {
+                if self.name_prompt.is_none() {
+                    self.name_prompt = Some(NamePrompt {
+                        action: EntryAction::Trust,
+                        target: self.root.clone(),
+                        name: String::new(),
+                        error: None,
+                    });
+                }
+                false
+            }
+        }
+    }
+
+    /// The answer to «Trust this folder?»: kept with its session; with a yes, the language
+    /// servers of the open files start.
+    pub(super) fn answer_trust(&mut self, trust: bool) {
+        self.trust = Some(trust);
+        self.save_session();
+        if !trust {
+            self.status =
+                "Not trusted: no language servers, debugging or project commands here".into();
+            return;
+        }
+        self.status = "Trusted: language servers and project commands are on".into();
+        for index in 0..self.open_files.len() {
+            let file = &self.open_files[index];
+            if file.is_text()
+                && let Some(message) = self.lsp.open(&file.path, &file.text(), file.edits)
+            {
+                self.status = message;
+            }
+        }
     }
 
     /// The pane with the focus: the one that shows the active tab.
@@ -1101,9 +1283,9 @@ impl App {
             Ok(()) => format!("Saved {name}"),
             Err(error) => error.to_string(),
         };
+        self.format_after_save(index);
     }
 
-    #[cfg(test)]
     pub fn active_file(&self) -> Option<&OpenFile> {
         self.active_tab.and_then(|index| self.open_files.get(index))
     }
@@ -1156,13 +1338,12 @@ fn system_clipboard_text() -> Option<String> {
         ],
     };
     tools.iter().find_map(|tool| {
-        let output = Command::new(tool[0])
-            .args(&tool[1..])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()
-            .filter(|output| output.status.success())?;
+        // A clipboard whose owner does not answer must not stop the keys.
+        let output = crate::process::output(
+            Command::new(tool[0]).args(&tool[1..]),
+            Duration::from_secs(2),
+        )
+        .filter(|output| output.status.success())?;
         let text = String::from_utf8_lossy(&output.stdout).into_owned();
         // PowerShell ends what it prints with a line break of its own.
         let text = if cfg!(windows) {
@@ -1217,7 +1398,7 @@ fn system_clipboard(text: String) {
 }
 
 /// The command that opens a link in the default browser of `os`.
-fn opener(os: &str, url: &str) -> Command {
+pub(super) fn opener(os: &str, url: &str) -> Command {
     let mut command = match os {
         "macos" => Command::new("open"),
         "windows" => {
@@ -1234,6 +1415,159 @@ fn opener(os: &str, url: &str) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nothing_of_a_folder_runs_before_it_is_trusted() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "notes\n").unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        let sessions = root.join("sessions.toml");
+        let key = |app: &mut App, code| app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+        let asking = |app: &App| {
+            app.name_prompt
+                .as_ref()
+                .is_some_and(|prompt| prompt.action == EntryAction::Trust)
+        };
+        let typed = |app: &App| {
+            app.bottom_terminal.current().size();
+            app.show_bottom_terminal
+        };
+
+        // The tests and debug builds keep no sessions and ask nothing.
+        let mut app = App::new(root.to_path_buf()).unwrap();
+        assert_eq!(app.trust, Some(true));
+
+        // A folder never opened before: a file with no language server asks nothing.
+        app.trust = None;
+        app.sessions = Some(sessions.clone());
+        app.open_file(root.join("notes.txt")).unwrap();
+        assert!(!asking(&app));
+        // A file of a language does, and its server is told nothing until the answer.
+        app.open_file(root.join("main.rs")).unwrap();
+        assert!(asking(&app));
+        assert!(
+            !app.lsp.behind(&root.join("main.rs"), 0),
+            "no document sent"
+        );
+        // No: the file is read and edited, and the next one does not ask again.
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(app.trust, Some(false));
+        assert!(app.status.starts_with("Not trusted"), "{}", app.status);
+        app.close_tab(1);
+        app.open_file(root.join("main.rs")).unwrap();
+        assert!(!asking(&app));
+        // Run, Build and Debug ask again instead of running, and run nothing.
+        for run in [
+            (|app: &mut App| app.run_file(app.root.join("main.rs"))) as fn(&mut App),
+            |app: &mut App| app.run_task(crate::run::Task::Build),
+            |app: &mut App| app.debug_start_or_continue(),
+        ] {
+            run(&mut app);
+            assert!(asking(&app));
+            assert!(!typed(&app) && app.confirm.is_none() && app.debug.is_none());
+            key(&mut app, KeyCode::Esc);
+        }
+        // The answer is kept with the folder: opening it again does not ask.
+        let mut again = App::new(root.to_path_buf()).unwrap();
+        again.trust = None;
+        again.sessions = Some(sessions.clone());
+        again.restore_session().unwrap();
+        assert_eq!(again.trust, Some(false));
+
+        // Yes: Enter trusts, and the commands of the project run after their own dialog.
+        app.run_task(crate::run::Task::Build);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.trust, Some(true));
+        assert!(app.name_prompt.is_none());
+        app.run_task(crate::run::Task::Build);
+        assert!(
+            app.confirm.is_some() || app.status.starts_with("Failed"),
+            "{}",
+            app.status
+        );
+        let mut again = App::new(root.to_path_buf()).unwrap();
+        again.trust = None;
+        again.sessions = Some(sessions);
+        again.restore_session().unwrap();
+        assert_eq!(again.trust, Some(true));
+    }
+
+    #[test]
+    fn a_place_outside_the_project_opens_read_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("main.c"), "int main() {}\n").unwrap();
+        let header = directory.path().join("stdio.h");
+        std::fs::write(&header, "int printf();\n").unwrap();
+        let mut app = App::new(root.clone()).unwrap();
+
+        // Where a language server sends the editor: a header of the system.
+        app.jump_to(header.clone(), 0, 4);
+        let file = &mut app.open_files[0];
+        assert!(file.read_only && file.cursor_column == 4);
+        file.insert('x');
+        assert!(!file.dirty);
+        assert!(app.status.contains("outside the project"), "{}", app.status);
+        assert_eq!(std::fs::read_to_string(&header).unwrap(), "int printf();\n");
+
+        // A place of the project is edited as always.
+        app.jump_to(root.join("main.c"), 0, 0);
+        let file = &mut app.open_files[1];
+        assert!(!file.read_only);
+        file.insert('x');
+        assert!(file.dirty);
+    }
+
+    #[test]
+    fn a_huge_file_asks_before_it_opens_and_a_large_one_opens_read_only() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::new(directory.path().to_path_buf()).unwrap();
+        let key = |app: &mut App, code| app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+
+        // Over 50 MB (a sparse file: only its size is read): nothing opens until Enter.
+        let huge = directory.path().join("huge.log");
+        std::fs::File::create(&huge)
+            .unwrap()
+            .set_len(50 * 1024 * 1024 + 1)
+            .unwrap();
+        app.open_file(huge.clone()).unwrap();
+        let prompt = app.name_prompt.as_ref().unwrap();
+        assert_eq!(
+            (prompt.action, &prompt.target),
+            (EntryAction::OpenLarge, &huge)
+        );
+        assert!(app.open_files.is_empty());
+        // Nothing is typed into the question, and Esc leaves the file closed.
+        key(&mut app, KeyCode::Char('x'));
+        assert!(app.name_prompt.as_ref().unwrap().name.is_empty());
+        key(&mut app, KeyCode::Esc);
+        assert!(app.name_prompt.is_none() && app.open_files.is_empty());
+        // Enter reads it; this one is all zeros, and the dialog says why it did not open.
+        app.open_file(huge).unwrap();
+        key(&mut app, KeyCode::Enter);
+        let error = app.name_prompt.as_ref().unwrap().error.clone().unwrap();
+        assert!(error.contains("binary file"), "{error}");
+        key(&mut app, KeyCode::Esc);
+
+        // Over 5 MB: opens at once, read only, and typing changes nothing.
+        let large = directory.path().join("large.txt");
+        std::fs::write(&large, "0123456789abcdef\n".repeat(320_000)).unwrap();
+        app.open_file(large).unwrap();
+        assert!(app.name_prompt.is_none());
+        assert!(app.status.contains("read only"), "{}", app.status);
+        key(&mut app, KeyCode::Char('x'));
+        key(&mut app, KeyCode::Backspace);
+        key(&mut app, KeyCode::Enter);
+        app.editor_paste("pasted");
+        let file = &app.open_files[0];
+        assert!(file.read_only && !file.dirty);
+        assert_eq!(file.lines.len(), 320_000);
+    }
 
     #[test]
     fn the_open_source_control_follows_commits_and_changes_made_elsewhere() {

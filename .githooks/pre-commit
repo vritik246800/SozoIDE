@@ -8,3 +8,5 @@ if git diff --cached --name-only --diff-filter=ACMR | grep -E '(^Docs/|\.md$)' |
     echo "Only README.md may be committed as Markdown: Docs/, CLAUDE.md and AGENTS.md stay local." >&2
     exit 1
 fi
+# No secrets, personal paths or local files in what this commit adds.
+bash "$(git rev-parse --show-toplevel)/packaging/security-check.sh" --staged

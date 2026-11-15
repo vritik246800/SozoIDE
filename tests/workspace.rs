@@ -24,24 +24,28 @@ fn with_all_panels(home: &Home) -> Sozo {
     sozo.send(key);
     sozo.wait_for("Right terminal");
     sozo.send(b"\x1b[17~");
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    sozo.wait_still();
     sozo
 }
+
+/// The Explorer's title: the name of the project folder (TODO 7.3.4); the path in the header
+/// has a `/` before it.
+const EXPLORER: &str = " project ";
 
 #[cfg(unix)]
 #[test]
 fn the_explorer_moves_to_a_side_of_a_terminal_and_the_editor_takes_its_room() {
     let home = Home::new();
     let sozo = with_all_panels(&home);
-    let (row, column) = sozo.find("Explorer");
+    let (row, column) = sozo.find(EXPLORER);
     assert!(column < 5);
     let right = sozo.find("Right terminal");
     sozo.drag((row, column), (right.0 + 2, right.1 + 8));
-    sozo.wait_until("the Explorer on the right", |_| {
-        sozo.locate("Explorer")
+    sozo.wait_settled("the Explorer on the right", |_| {
+        sozo.locate(EXPLORER)
             .is_some_and(|(_, column)| column > COLUMNS / 2)
     });
-    let moved = sozo.find("Explorer");
+    let moved = sozo.find(EXPLORER);
     let terminal = sozo.find("Right terminal");
     assert!(terminal.0 > moved.0, "above the terminal");
     assert!(terminal.1.abs_diff(moved.1) < 4);
@@ -56,21 +60,23 @@ fn a_panel_dropped_on_the_edge_takes_it_and_one_on_a_centre_swaps() {
     // The bottom terminal over the whole top of the window.
     let bottom = sozo.find("Bottom terminal");
     sozo.drag(bottom, (1, COLUMNS / 2));
-    sozo.wait_until("the terminal on top", |_| {
+    sozo.wait_settled("the terminal on top", |_| {
         sozo.locate("Bottom terminal")
             .is_some_and(|(row, _)| row <= 2)
     });
     let top = sozo.find("Bottom terminal");
     assert!(top.1 < 5, "from the first column: {top:?}");
-    // The right terminal with the Explorer, by the centre of the Explorer.
-    let explorer = sozo.find("Explorer");
+    // The right terminal with the Explorer, by the centre of the Explorer, once the outline of
+    // the panel that moved has glided away (`GLIDE`).
+    sozo.wait_for(EXPLORER);
+    let explorer = sozo.find_still(EXPLORER);
     let right = sozo.find("Right terminal");
     sozo.drag(right, (explorer.0 + 15, explorer.1 + 12));
-    sozo.wait_until("the two swapped", |_| {
+    sozo.wait_settled("the two swapped", |_| {
         sozo.locate("Right terminal")
             .is_some_and(|(_, column)| column < 8)
     });
-    assert!(sozo.find("Explorer").1 > COLUMNS / 2);
+    assert!(sozo.find(EXPLORER).1 > COLUMNS / 2);
     sozo.quit();
 }
 
@@ -80,12 +86,12 @@ fn the_editor_moves_by_the_free_part_of_its_tab_bar() {
     let home = Home::new();
     let sozo = with_all_panels(&home);
     let right = sozo.find("Right terminal");
-    let explorer = sozo.find("Explorer");
+    let explorer = sozo.find(EXPLORER);
     // No tabs yet: the first row of the editor, after the Explorer.
     let from = (explorer.0, explorer.1 + 40);
     sozo.drag(from, (right.0 + 12, right.1 + 8));
     // Swapped with the right terminal: the terminal sits where the editor was.
-    sozo.wait_until("the terminal on the left", |_| {
+    sozo.wait_settled("the terminal on the left", |_| {
         sozo.locate("Right terminal")
             .is_some_and(|(_, column)| column < COLUMNS / 2)
     });
@@ -110,7 +116,7 @@ fn a_corner_moves_a_panel_with_a_preview_and_a_border_resizes_it_after() {
         "not moved before letting go"
     );
     sozo.send(format!("\x1b[<0;{};{}m", right.1 + 8, right.0 + 3));
-    sozo.wait_until("the terminal above the right one", |_| {
+    sozo.wait_settled("the terminal above the right one", |_| {
         sozo.locate("Bottom terminal")
             .is_some_and(|(row, column)| row < right.0 + 3 && column > COLUMNS / 2)
     });
@@ -120,14 +126,14 @@ fn a_corner_moves_a_panel_with_a_preview_and_a_border_resizes_it_after() {
     let under = sozo.find("Right terminal");
     let border = (under.0 - 2, moved.1 + 6);
     sozo.drag(border, (border.0 + 4, border.1));
-    sozo.wait_until("a taller terminal", |_| {
+    sozo.wait_settled("a taller terminal", |_| {
         sozo.locate("Right terminal")
             .is_some_and(|(row, _)| row == under.0 + 3)
     });
     // And its left border makes it wider, for the column it shares.
     let border = (moved.0 + 3, moved.1 - 4);
     sozo.drag(border, (border.0, border.1 - 7));
-    sozo.wait_until("a wider terminal", |_| {
+    sozo.wait_settled("a wider terminal", |_| {
         sozo.locate("Bottom terminal")
             .is_some_and(|(_, column)| column + 6 == moved.1)
     });
@@ -145,7 +151,7 @@ fn a_click_on_a_title_moves_nothing_and_a_divider_resizes_on_its_side() {
     // The divider on the left of the right terminal, ten columns to the left.
     let divider = (right.0 + 5, right.1 - 5);
     sozo.drag(divider, (divider.0, divider.1 - 10));
-    sozo.wait_until("a wider terminal", |_| {
+    sozo.wait_settled("a wider terminal", |_| {
         sozo.locate("Right terminal")
             .is_some_and(|(_, column)| column + 10 == right.1)
     });
@@ -282,7 +288,7 @@ fn models_open_also_with_an_extension_and_a_texture_nobody_knows() {
     sozo.click(sozo.find("exported.glb"));
     sozo.wait_for("turn");
     sozo.click(sozo.find("plain.glb"));
-    sozo.wait_until("the second tab", |screen| {
+    sozo.wait_settled("the second tab", |screen| {
         screen.matches("plain.glb").count() >= 2
     });
     // A file that is no model says so, and the app stays.

@@ -17,6 +17,13 @@ check() {
         echo "$1 reads data files from the build machine" >&2
         exit 1
     fi
+    # Only libraries every system has: nothing from Homebrew or a -dev package (CLAUDE.md §0.1).
+    local extra
+    case $(uname -s) in
+    Darwin) extra=$(otool -L "$1" | tail -n +2 | awk '{ print $1 }' | grep -vE '^(/usr/lib/|/System/Library/)' || true) ;;
+    Linux) extra=$(ldd "$1" | awk '{ print $1 }' | grep -vE '^(linux-vdso\.so|/lib(64)?/ld-linux|lib(c|m|dl|pthread|rt|gcc_s|util)\.so)' || true) ;;
+    esac
+    [[ -z $extra ]] || { echo "$1 links libraries a user may not have:" >&2; echo "$extra" >&2; exit 1; }
     echo "OK: $output ($1)"
 }
 

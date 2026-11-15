@@ -48,15 +48,23 @@ pub enum Control {
     Faster,
     /// The app shows the tab over the whole screen.
     Fullscreen,
+    /// The next subtitles: the `.srt` beside it, each track of the file, then none (`C`).
+    Captions,
+    /// The next sound track of the file (`A`).
+    AudioTrack,
 }
 
 /// What `ffprobe` says of a video: the frame size asked of `ffmpeg`, how long it is and whether
 /// it has sound.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Info {
+    /// `(0, 0)` for sound alone (`.mp3`, `.flac`, `.wav`…).
     size: (u32, u32),
     duration: Duration,
     sound: bool,
+    /// How many sound and subtitle tracks the file has (TODO 5.1.7).
+    audio_tracks: usize,
+    subtitle_tracks: usize,
 }
 
 /// A frame from `ffmpeg`, and its half blocks when the size of the tab was known.
@@ -95,6 +103,12 @@ pub struct Video {
     speed: usize,
     /// Where the mouse drags the progress bar to, from 0 to 1, before it lets go.
     pub scrub: Option<f32>,
+    /// The sound track heard, from 0.
+    pub audio_track: usize,
+    /// The subtitles shown: 0 none, 1 the `.srt` beside it (when there is one), then the
+    /// file's tracks; and their cues.
+    pub captions: usize,
+    cues: Vec<super::captions::Cue>,
 }
 
 impl Video {
@@ -130,7 +144,38 @@ impl Video {
             muted: false,
             speed: NORMAL_SPEED,
             scrub: None,
+            audio_track: 0,
+            captions: 0,
+            cues: Vec::new(),
         }
+    }
+
+    /// Whether it is sound alone, without pictures.
+    pub fn audio_only(&self) -> bool {
+        self.info.is_some_and(|info| info.size == (0, 0))
+    }
+
+    /// The subtitle shown at the position on screen.
+    pub fn caption(&self) -> Option<&str> {
+        super::captions::at(&self.cues, self.position())
+    }
+
+    /// The choices of `C`: none, the `.srt` beside it, each track.
+    fn caption_sources(&self) -> usize {
+        1 + usize::from(super::captions::beside(&self.path).is_some())
+            + self.info.map_or(0, |info| info.subtitle_tracks)
+    }
+
+    /// Shows subtitles `choice` (0 none), reading them.
+    fn choose_captions(&mut self, choice: usize) {
+        self.captions = choice % self.caption_sources();
+        let beside = super::captions::beside(&self.path);
+        self.cues = match (self.captions, &beside) {
+            (0, _) => Vec::new(),
+            (1, Some(path)) => super::captions::read_file(path),
+            (track, Some(_)) => super::captions::read_track(&self.path, track - 2),
+            (track, None) => super::captions::read_track(&self.path, track - 1),
+        };
     }
 
     pub fn speed(&self) -> f32 {
@@ -160,6 +205,12 @@ impl Video {
         };
         (self.ended, self.from, self.shown) = (false, at, 0);
         self.started = Instant::now();
+        // Sound alone: no frames, the clock of `tick` moves it on.
+        if info.size == (0, 0) {
+            self.error = None;
+            self.play_sound();
+            return;
+        }
         let child = Command::new("ffmpeg")
             .args(self.video_args(at, info.size))
             .stdin(Stdio::null())
@@ -220,6 +271,10 @@ impl Video {
         args.push(format!("{:.3}", at.as_secs_f64()));
         args.push("-volume".into());
         args.push(self.volume.to_string());
+        if self.audio_track > 0 {
+            args.push("-ast".into());
+            args.push(format!("a:{}", self.audio_track));
+        }
         if self.speed != NORMAL_SPEED {
             args.push("-af".into());
             args.push(format!("atempo={}", self.speed()));
@@ -252,6 +307,18 @@ impl Video {
     /// Shows the frame that is due, skipping the late ones; while paused, only the first frame
     /// after a seek. True when the picture changed.
     pub fn tick(&mut self, now: Instant) -> bool {
+        if self.audio_only() && !self.paused && !self.ended && self.error.is_none() {
+            // The clock is the frames that would have shown: one second redraws the time.
+            let shown = ((now - self.started).as_secs_f32() * FPS as f32) as u32;
+            let changed = shown / FPS != self.shown / FPS;
+            self.shown = shown;
+            if !self.duration().is_zero() && self.position() >= self.duration() {
+                self.ended = true;
+                stop(&mut self.sound);
+                return true;
+            }
+            return changed;
+        }
         let Some(frames) = &self.frames else {
             return false;
         };
@@ -335,8 +402,24 @@ impl Video {
                 self.seek(self.position());
             }
             Control::Fullscreen => return false,
+            Control::Captions => self.choose_captions(self.captions + 1),
+            Control::AudioTrack => {
+                let tracks = self.info.map_or(0, |info| info.audio_tracks);
+                if tracks < 2 {
+                    return false;
+                }
+                self.audio_track = (self.audio_track + 1) % tracks;
+                self.play_sound();
+            }
         }
         true
+    }
+
+    /// Plays on from `at`, as when a folder opens a tab where it was left (TODO 5.1.7).
+    pub fn resume_at(&mut self, at: Duration) {
+        if !at.is_zero() && at < self.duration() {
+            self.seek(at);
+        }
     }
 
     /// Plays on from `at` (within the video), paused or not as it was.
@@ -396,7 +479,16 @@ impl Video {
         } else {
             format!("Vol {}%", self.volume)
         };
-        format!("{volume}  {}x", self.speed())
+        let audio = match self.info.map_or(0, |info| info.audio_tracks) {
+            0 | 1 => String::new(),
+            tracks => format!("  Sound {}/{tracks} [A]", self.audio_track + 1),
+        };
+        let captions = match (self.caption_sources(), self.captions) {
+            (1, _) => String::new(),
+            (_, 0) => "  Subtitles off [C]".to_owned(),
+            (_, choice) => format!("  Subtitles {choice} [C]"),
+        };
+        format!("{volume}  {}x{audio}{captions}", self.speed())
     }
 
     /// The progress row in `width` cells: the time on screen, the bar's first column and
@@ -462,20 +554,19 @@ pub const MISSING: &str =
 
 /// The video's size, length and sound from `ffprobe`.
 fn probe(path: &Path) -> Result<Info, String> {
-    let output = Command::new("ffprobe")
+    let mut command = Command::new("ffprobe");
+    command
         .args([
             "-v",
             "error",
             "-show_entries",
-            "stream=codec_type,width,height:format=duration",
+            "stream=codec_type,width,height:stream_disposition=attached_pic:format=duration",
             "-of",
             "json",
         ])
-        .arg(path)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|_| MISSING.to_owned())?;
+        .arg(path);
+    let output = crate::process::output(&mut command, Duration::from_secs(10))
+        .ok_or_else(|| MISSING.to_owned())?;
     parse_probe(&String::from_utf8_lossy(&output.stdout))
         .ok_or_else(|| "ffmpeg could not read this video".into())
 }
@@ -483,22 +574,38 @@ fn probe(path: &Path) -> Result<Info, String> {
 fn parse_probe(json: &str) -> Option<Info> {
     let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
     let streams = value["streams"].as_array()?;
-    let video = streams
-        .iter()
-        .find(|stream| stream["codec_type"] == "video")?;
-    let size = (
-        u32::try_from(video["width"].as_u64()?).ok()?,
-        u32::try_from(video["height"].as_u64()?).ok()?,
-    );
+    let count = |kind: &str| {
+        streams
+            .iter()
+            .filter(|stream| stream["codec_type"] == kind)
+            .count()
+    };
+    // A cover picture of a song is a "video" stream of one frame: it is still sound alone.
+    let video = streams.iter().find(|stream| {
+        stream["codec_type"] == "video" && stream["disposition"]["attached_pic"].as_u64() != Some(1)
+    });
+    let size = match video {
+        Some(video) => fit(
+            (
+                u32::try_from(video["width"].as_u64()?).ok()?,
+                u32::try_from(video["height"].as_u64()?).ok()?,
+            ),
+            LARGEST,
+        ),
+        None if count("audio") > 0 => (0, 0),
+        None => return None,
+    };
     let duration = value["format"]["duration"]
         .as_str()
         .and_then(|duration| duration.parse::<f64>().ok())
         .filter(|duration| duration.is_finite() && *duration >= 0.0)
         .map_or(Duration::ZERO, Duration::from_secs_f64);
     Some(Info {
-        size: fit(size, LARGEST),
+        size,
         duration,
-        sound: streams.iter().any(|stream| stream["codec_type"] == "audio"),
+        sound: count("audio") > 0,
+        audio_tracks: count("audio"),
+        subtitle_tracks: count("subtitle"),
     })
 }
 
@@ -672,7 +779,13 @@ mod tests {
             "format": {"duration": "N/A"}}"#;
         let info = parse_probe(silent).unwrap();
         assert!(!info.sound && info.duration.is_zero());
-        assert!(parse_probe(r#"{"streams": [{"codec_type": "audio"}]}"#).is_none());
+        // Sound alone opens too (TODO 5.1.7), as a player without pictures.
+        assert_eq!(
+            parse_probe(r#"{"streams": [{"codec_type": "audio"}]}"#)
+                .unwrap()
+                .size,
+            (0, 0)
+        );
         assert!(parse_probe("").is_none());
     }
 
@@ -801,5 +914,60 @@ mod tests {
         let (shown, _, _, played, _) = video.progress(27);
         assert_eq!((shown.as_str(), played), ("00:37", 7));
         assert_eq!(clock(Duration::from_secs(3725), true), "1:02:05");
+    }
+
+    #[test]
+    fn sound_alone_tracks_subtitles_and_the_place_left_play_as_asked() {
+        // A song with its cover picture: sound alone; a film with two sound and one subtitle track.
+        let song = parse_probe(r#"{"streams": [{"codec_type": "audio"}, {"codec_type": "video", "width": 600, "height": 600, "disposition": {"attached_pic": 1}}], "format": {"duration": "3.0"}}"#).unwrap();
+        assert_eq!((song.size, song.audio_tracks), ((0, 0), 1));
+        assert!(parse_probe(r#"{"streams": [{"codec_type": "data"}], "format": {}}"#).is_none());
+        let film = parse_probe(r#"{"streams": [{"codec_type": "video", "width": 640, "height": 360}, {"codec_type": "audio"}, {"codec_type": "audio"}, {"codec_type": "subtitle"}], "format": {"duration": "60"}}"#).unwrap();
+        assert_eq!((film.audio_tracks, film.subtitle_tracks), (2, 1));
+
+        // Sound alone moves on by the clock and ends at its length, without ffmpeg.
+        let mut audio = Video::new(Path::new("song.mp3"), Some(song));
+        assert!(audio.audio_only());
+        audio.started = Instant::now() - Duration::from_secs(4);
+        audio.tick(Instant::now());
+        assert!(audio.ended && audio.position() == Duration::from_secs(3));
+
+        // A sound track is chosen for ffplay; one track has nothing to choose.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("film.mp4");
+        let mut video = Video::new(&path, Some(film));
+        assert!(video.control(Control::AudioTrack));
+        let args = video.sound_args(Duration::ZERO).unwrap();
+        assert!(
+            args.windows(2).any(|pair| pair == ["-ast", "a:1"]),
+            "{args:?}"
+        );
+        assert!(!audio.control(Control::AudioTrack));
+        assert!(
+            video.status().contains("Sound 2/2 [A]"),
+            "{}",
+            video.status()
+        );
+
+        // Subtitles: off, then the .srt beside the file, shown at their time.
+        std::fs::write(
+            directory.path().join("film.srt"),
+            "1\n00:00:00,000 --> 00:00:05,000\nHi <b>there</b>\n",
+        )
+        .unwrap();
+        assert!(video.status().contains("Subtitles off [C]"));
+        assert!(video.control(Control::Captions));
+        assert_eq!(video.captions, 1);
+        assert_eq!(video.caption(), Some("Hi there"));
+        // Three choices (none, the file, the track): the third would be ffmpeg's, then none again.
+        video.captions = 2;
+        video.choose_captions(3);
+        assert_eq!((video.captions, video.caption()), (0, None));
+
+        // Where it was left: within the video only.
+        let mut clip = sample();
+        clip.paused = true;
+        clip.resume_at(Duration::from_secs(9999));
+        assert_eq!(clip.position(), Duration::ZERO, "past the end is ignored");
     }
 }

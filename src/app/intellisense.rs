@@ -251,6 +251,7 @@ impl App {
 
     /// After a character is typed: ask for suggestions when it calls for them.
     pub(super) fn typed(&mut self, character: char) {
+        self.typed_signature(character);
         if self.completion.is_some() {
             if !is_word(character) {
                 self.completion = None;
@@ -503,6 +504,9 @@ impl App {
     /// Server `name`, now installed, starts again with the open files of its language.
     pub(super) fn start_again(&mut self, name: &str) {
         self.lsp.restart(name);
+        if self.trust != Some(true) {
+            return;
+        }
         for file in &self.open_files {
             if file.is_text()
                 && server_for(&file.path).is_some_and(|server| server.0 == name)
@@ -839,10 +843,21 @@ impl App {
     }
 
     fn open_at(&mut self, path: PathBuf, row: usize, column: usize) {
+        // What a server points to outside the project (a library, a header of the system) is
+        // read, never written.
+        let outside = match (path.canonicalize(), self.root.canonicalize()) {
+            (Ok(path), Ok(root)) => !path.starts_with(root),
+            _ => false,
+        };
         match self.open_file(path) {
             Ok(()) => {
                 if let Some(index) = self.active_tab {
                     let file = &mut self.open_files[index];
+                    if outside && !file.read_only {
+                        file.read_only = true;
+                        self.status =
+                            format!("Opened {} read only: outside the project", file.name);
+                    }
                     file.mark(false);
                     file.move_cursor_to(row, column);
                 }
@@ -992,6 +1007,10 @@ impl App {
         for event in self.lsp.poll() {
             self.lsp_event(event);
         }
+        // What the servers take, while Help shows the Dependencies (TODO 3.2.3).
+        if self.overlay == super::Overlay::Help && self.help_tab == super::HelpTab::Dependencies {
+            self.lsp.measure(now);
+        }
         self.tick_failures();
         self.tick_install();
         self.tick_hover(now);
@@ -1069,6 +1088,7 @@ impl App {
                 places,
             } => self.places_answered(path, version, goal, places),
             Event::Message(message) => self.status = message,
+            other => self.code_event(other),
         }
     }
 }

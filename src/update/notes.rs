@@ -1,6 +1,7 @@
 //! What each version brought, shown after an update (F18): the notes of every version newer
 //! than the one that ran before, newest first. A new release adds its notes at the top; a test
-//! keeps the first one equal to `Cargo.toml`.
+//! keeps the first one equal to `Cargo.toml`. The notes of older versions are never removed:
+//! `old_release_notes_are_never_removed` holds what each version has.
 
 pub struct Notes {
     pub version: &'static str,
@@ -9,6 +10,69 @@ pub struct Notes {
 }
 
 pub const NOTES: &[Notes] = &[
+    Notes {
+        version: "0.9.0",
+        new: &[
+            "Trust the folder: language servers, debugging and the commands of a project run only after you say yes, once for each folder; the editor, Git and search work without it",
+            "Database passwords are kept in the Keychain, the Windows Credential Manager or the Linux keyring (GNOME Keyring, KWallet)",
+            "Very large files open read only and without colours, a huge one asks first, and a binary file says what it is",
+            "The Explorer works as a file explorer: Left and Right fold and unfold, F2 renames, N and Shift+N make a file and a folder, names sort as people read them (file2 before file10), and the file of the active tab is revealed",
+            "Delete in the Explorer sends to the Trash, Shift+Delete deletes for good, and Ctrl+Z undoes the last move, rename or delete",
+            "Mark several entries with Ctrl or Shift and a click, find any name in the project with /, drag a row onto a folder to move it, and copy a path, duplicate or show a file in your file manager from the menu",
+            "The Explorer's title has the project's name and buttons for a new file, a new folder, reading it again and closing every folder; folders show how many files changed inside, ignored files are dim, and a folder holding only a folder is one row",
+            "Smoother motion: folders open row by row, menus line by line, the border of the panel you move to is traced from its corner, a dropped panel glides to its place and Page Down runs to the next page",
+            "A status bar with the branch and its changes, the line and column and the language; a message fades after a while and a click brings it back; the keys of the panel you are in come first",
+            "Redo with Ctrl+Y or Ctrl+Shift+Z, comments with Ctrl+/, Go to line with Ctrl+L, wrap long lines with Alt+Z (Markdown wraps by itself)",
+            "Search with Aa (case), whole words and regular expressions; Ctrl+H replaces one or all, and in the whole folder only after you see the list and press Enter",
+            "Ctrl+O opens a file by a few of its letters, and Ctrl+Shift+O lists every command with its key",
+            "Enter keeps the indentation, brackets and quotes close themselves, Tab and Shift+Tab move the selected lines, Alt+Up/Down move them, Shift+Alt+Down duplicates and Ctrl+Shift+K deletes; double click selects a word, three clicks the line",
+            "Indentation, line ends and encoding come from the file and its .editorconfig and are kept when it is saved (CRLF, UTF-8 with BOM, UTF-16); the status bar shows them and a click changes them",
+            "settings.toml in the settings folder: autosave, tabs, wrapping, reduced motion, updates and telemetry",
+            "A file changed by another program while you have edits not saved asks: keep yours, reload it, or compare",
+            "Rename a symbol with F2 in the editor; Shift+Alt+F formats the file or the selection; Ctrl+. shows the code actions and quick fixes; the signature of a call shows while you type it",
+            "Ctrl+O with @ lists the symbols of the file and with # the symbols of the project; Ctrl+Shift+M lists every problem of the project, errors first, and the status bar counts them",
+            "Edits of a language server that touch more than the file in front of you are listed first and wait for Enter; open files change as one Ctrl+Z each",
+            "Debugging: Shift+F11 steps out, Ctrl+F10 runs to the cursor, F8 pauses, Shift+F9 gives a breakpoint a condition, a count or a message, Ctrl+Shift+W watches an expression and Ctrl+Shift+E evaluates one; the panel shows the variables as a tree, the call stack and the threads, and a click chooses",
+            "[debug] in .sozo.toml sets the program, its arguments, its variables and its folder; the first time, SozoIDE shows them and waits for Enter; breakpoints stay with the folder",
+            "Source Control: stage, unstage or discard one hunk (S, U, D), or only the lines you mark with Space; discard a file with d (a copy is kept first); amend with a, stash with z; commit messages have a title and a body (Alt+Enter) with their 50/72 count",
+            "Branches: new (b), rename (r), delete (Delete; Shift+Delete for one not merged), tags (t) and the stash (apply, drop); a conflict is solved block by block with 1, 2 or 3; Push publishes a branch that is not on the remote yet, and errors say what to do",
+            "Alt+G shows who changed each line beside it and on the status bar, Alt+H the commits that changed the file; the timeline loads more commits with m",
+            "Database: results come a thousand rows at a time (L loads more, # counts them all), with a time limit in settings.toml; Enter edits a cell, Delete deletes a row and + copies one, each shown as its statement with parameters before Enter runs it",
+            "Copy results as CSV, JSON or Markdown with C, J or M (Shift saves a file), see a long cell whole with Space, and run EXPLAIN with Alt+E",
+            "SQL tabs (Alt+T, Alt+1 to 9), the history of each connection with Alt+Up/Down (a query with a password is never kept), and Ctrl+Space completes table and column names",
+            "Each connection says whether it is encrypted, TLS can be required or verified, and a connection without TLS to another machine is warned about; a dropped connection reconnects once",
+            "Terminals: F3 finds in the history, Shift+F3 clears it, Ctrl+click opens a web address or a file:line a compiler printed, a program's title shows on its tab, a right click names a tab, Shift+F6 shows two shells side by side, and the right terminal takes up to three tabs too",
+            "Pictures zoom with +, - and the wheel and move with the arrows or the mouse, the status says their size and format, and SVG files are drawn",
+            "PDFs: Ctrl+P finds on every page, Ctrl+L goes to a page, Ctrl+O with @ lists the table of contents, and a page drawn as a picture zooms",
+            "Videos show subtitles (an .srt beside them or a track of the file, C) and change the sound track (A); MP3, FLAC, WAV and other sound files play in the same player, and a folder remembers where each one was left",
+            "3D models: W for the wireframe, 0 resets the view, P plays their animation, and the title says their triangles and materials",
+            "Markdown: a click ticks a task, follows a link to a file and its heading or a note, pictures are drawn in the document, and Ctrl+O with @ lists its headings",
+            "Layouts: Ctrl+M fills the window with one panel, Alt+0 brings back the layout SozoIDE came with, Alt+L keeps three layouts with a name, Ctrl+Alt+arrows move the focus and Ctrl+Alt+Shift+arrows move the panel",
+            "Alt+F7 runs a named task of .sozo.toml, Alt+F8 the last one again, Alt+F9 the test under the cursor; what a build printed is in Ctrl+Shift+M",
+            "Alt+S opens the file in the other pane too, kept the same as you type, and Alt+D compares it with another file side by side",
+            "Shift+F10 opens the menu of a right click; NO_COLOR or high_contrast = true draw with attributes only; a window under 80×24 gives up panels in order, and under 40×10 says so",
+            "sozo src/main.rs:12:5 opens a file at its line; sozo --diagnose says what a bug report needs, without your paths; sozo --completions and sozo --man; the Linux packages install the completions and the manual page",
+            "Updates keep the version before them until the new one starts, and go back to it when it does not; update_channel = \"preview\" offers the pre-releases; the notice shows what the new version brings",
+            "Help > Dependencies says Update available or Up to date, as your package manager tells it",
+            "T in Help brings the tutorial back, with a step on what is new; About shows the licence, the licences of every crate (L) and where SozoIDE keeps its files",
+            "The Linux .tar.gz is a static binary that runs on any Linux; each release carries manifests for Scoop, winget, the AUR and Homebrew",
+        ],
+        fixed: &[
+            "Updates download into a folder only your user can open, over HTTPS only, and only the sozo binary leaves an archive",
+            "If SozoIDE stops on an error, in any thread, it gives the terminal back and says where; nothing of your files goes in the crash log",
+            "Settings are written whole and only your user can read them; a broken settings file is kept aside instead of stopping SozoIDE",
+            "Pictures, PDFs and language server messages built to take the memory or the keys are stopped at a limit",
+            "SQLite is past a security fix, and cancelling a SQLite query stops it at once",
+            "On Windows, sozo.exe no longer needs the Visual C++ Redistributable",
+            "Long files open at once: their colours come a moment later, and typing stays quick",
+            "The session of a folder keeps the scroll of each tab, the split editor and the open search, and says which files were deleted",
+            "A language server that stops starts again by itself, waiting longer each time (three times at most), and Help > Dependencies says what each one takes in memory and CPU",
+            "Discarding a file in Source Control keeps what you had staged",
+            "Copying a link in the Explorer copies the link, not the file it points to, and names with control characters are refused",
+            "Tables in Markdown stay aligned with emoji joined by a ZWJ",
+            "install-tools.sh reads the package lists first, so it works on a system just installed",
+        ],
+    },
     Notes {
         version: "0.8.3",
         new: &[

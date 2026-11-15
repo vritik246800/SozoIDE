@@ -11,6 +11,8 @@ pub struct Source {
     root: PathBuf,
     diff: (DiffKind, Option<PathBuf>, Option<String>),
     inspected: Option<String>,
+    /// How many commits of the timeline to read: pages of `COMMIT_PAGE`.
+    commits: usize,
 }
 
 /// What a refresh read of the repository (`GitPanel::read`).
@@ -22,8 +24,37 @@ pub struct Snapshot {
     launchpad: LaunchpadSummary,
     inspected: Option<CommitDetails>,
     diff: DiffView,
+    stashes: Vec<(usize, String)>,
+    tags: Vec<String>,
+    hooks: Vec<String>,
     /// What it was read for: a diff or a commit opened since stays (E51).
     from: Source,
+}
+
+/// The hooks Git would run here: the files of `core.hooksPath` or `.git/hooks` that are not
+/// the samples Git puts there.
+fn read_hooks(repo: &Repository) -> Vec<String> {
+    let folder = repo
+        .config()
+        .ok()
+        .and_then(|config| config.get_path("core.hooksPath").ok())
+        .map(|path| match repo.workdir() {
+            Some(work) if path.is_relative() => work.join(path),
+            _ => path,
+        })
+        .unwrap_or_else(|| repo.path().join("hooks"));
+    let mut hooks: Vec<String> = std::fs::read_dir(folder)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.path().is_file())
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter(|name| !name.ends_with(".sample"))
+                .collect()
+        })
+        .unwrap_or_default();
+    hooks.sort();
+    hooks
 }
 
 #[derive(Debug)]
@@ -44,6 +75,17 @@ pub struct GitPanel {
     pub status_message: String,
     pub last_error: Option<String>,
     pub last_output: Option<GitCommandOutput>,
+    /// How many commits the timeline reads (pages of `COMMIT_PAGE`, TODO 4.1.8).
+    pub commit_limit: usize,
+    /// Lines of the diff marked with `Space`: file, hunk and line (TODO 4.1.1).
+    pub diff_marks: std::collections::BTreeSet<(usize, usize, usize)>,
+    /// The stash and the tags, read with the branches (TODO 4.1.4).
+    pub stashes: Vec<(usize, String)>,
+    pub tags: Vec<String>,
+    /// The commits that changed a file, shown in Inspect (TODO 4.1.6).
+    pub file_history: Option<(PathBuf, Vec<super::Blame>)>,
+    /// The hooks of the repository that Git runs: the dialogs name them (4.F.2).
+    pub hooks: Vec<String>,
 }
 
 impl GitPanel {
@@ -64,6 +106,12 @@ impl GitPanel {
             status_message: String::new(),
             last_error: None,
             last_output: None,
+            commit_limit: super::repository::COMMIT_PAGE,
+            diff_marks: Default::default(),
+            stashes: Vec::new(),
+            tags: Vec::new(),
+            file_history: None,
+            hooks: Vec::new(),
         };
         if let Err(error) = panel.refresh() {
             panel.last_error = Some(format!("{error:#}"));
@@ -225,21 +273,28 @@ impl GitPanel {
                 .inspected_commit
                 .as_ref()
                 .map(|details| details.commit.id.clone()),
+            commits: self.commit_limit,
         }
+    }
+
+    /// The next page of the timeline (TODO 4.1.8).
+    pub fn more_commits(&mut self) -> Result<()> {
+        self.commit_limit += super::repository::COMMIT_PAGE;
+        self.refresh()
     }
 
     /// Reads the repository without the panel, so that a refresh that follows changes made
     /// elsewhere never holds what is on screen (F35); none outside a repository.
     pub fn read(source: Source) -> Result<Option<Snapshot>> {
         let from = source.clone();
-        let repo = match Repository::discover(&source.root) {
+        let mut repo = match Repository::discover(&source.root) {
             Ok(repo) => repo,
             Err(error) if error.code() == git2::ErrorCode::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         let repository_root = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
         let status = read_status(&repo).context("Could not read working-tree status.")?;
-        let commits = read_commits(&repo).context("Could not read commits.")?;
+        let commits = read_commits(&repo, source.commits).context("Could not read commits.")?;
         let branches = read_branches(&repo).context("Could not read branches.")?;
         let launchpad = read_launchpad(&repo, commits.first().cloned())
             .context("Could not read launchpad summary.")?;
@@ -254,6 +309,24 @@ impl GitPanel {
             }
             _ => DiffView::default(),
         };
+        let mut tags: Vec<String> = repo
+            .tag_names(None)
+            .map(|names| {
+                names
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        tags.reverse();
+        let hooks = read_hooks(&repo);
+        let mut stashes = Vec::new();
+        let _ = repo.stash_foreach(|index, message, _| {
+            stashes.push((index, message.chars().filter(|c| !c.is_control()).collect()));
+            true
+        });
         Ok(Some(Snapshot {
             repository_root,
             status,
@@ -262,6 +335,9 @@ impl GitPanel {
             launchpad,
             inspected,
             diff,
+            stashes,
+            tags,
+            hooks,
             from,
         }))
     }
@@ -278,6 +354,9 @@ impl GitPanel {
         self.commits = snapshot.commits;
         self.branches = snapshot.branches;
         self.launchpad = snapshot.launchpad;
+        self.stashes = snapshot.stashes;
+        self.hooks = snapshot.hooks;
+        self.tags = snapshot.tags;
         // A diff or a commit opened while it was read is newer than what was read for it.
         let now = self.source();
         if now.inspected == snapshot.from.inspected && snapshot.inspected.is_some() {
@@ -398,12 +477,112 @@ impl GitPanel {
                 self.unstage_change(change.ok_or_else(|| anyhow!("No change selected."))?)?;
             }
             GitAction::StageAll => self.stage_all_inner()?,
+            // A Git that signs commits makes them itself and says why when it cannot.
+            GitAction::Commit(message) if self.signs() => {
+                if message.trim().is_empty() {
+                    bail!("Commit message cannot be empty.");
+                }
+                self.commit_signed(&message)?;
+            }
             GitAction::Commit(message) => self.commit_inner(&message)?,
             GitAction::Fetch => {
                 self.run_git_operation(&["fetch", "--prune"], "Fetch completed.")?
             }
             GitAction::Pull => self.run_git_operation(&["pull", "--ff-only"], "Pull completed.")?,
+            // A branch without upstream is published (set upstream); never with force.
+            GitAction::Push
+                if self
+                    .branches
+                    .iter()
+                    .any(|branch| branch.is_head && branch.upstream.is_none()) =>
+            {
+                self.publish()?
+            }
             GitAction::Push => self.run_git_operation(&["push"], "Push completed.")?,
+            GitAction::Hunk(action) => {
+                let row = self.diff_rows().get(self.selected).copied();
+                let Some((file, hunk)) = row.and_then(|row| Some((row.file(), row.hunk()?))) else {
+                    bail!("Choose a hunk or a line of the diff first.");
+                };
+                let marked: Vec<usize> = self
+                    .diff_marks
+                    .iter()
+                    .filter(|(f, h, _)| (*f, *h) == (file, hunk))
+                    .map(|(_, _, line)| *line)
+                    .collect();
+                let diff = self
+                    .diff
+                    .files
+                    .get(file)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("No such file."))?;
+                let path = diff.path.clone();
+                let kind = self.diff.kind;
+                self.apply_hunk(
+                    &diff,
+                    hunk,
+                    (!marked.is_empty()).then_some(&marked[..]),
+                    action,
+                )?;
+                self.diff_marks.clear();
+                // The diff shows what is left of the file.
+                let left = self
+                    .changes()
+                    .find(|change| {
+                        change.path == path
+                            && matches!(
+                                (kind, change.area),
+                                (DiffKind::Staged, ChangeArea::Staged)
+                                    | (DiffKind::Unstaged, ChangeArea::Unstaged)
+                            )
+                    })
+                    .cloned();
+                if let Some(change) = left {
+                    self.diff_change_entry(&change)?;
+                }
+            }
+            GitAction::DiscardSelected => {
+                let change = self
+                    .selected_change()
+                    .cloned()
+                    .ok_or_else(|| anyhow!("No change selected."))?;
+                if change.area == ChangeArea::Staged {
+                    bail!(
+                        "Unstage the file first: only changes of the working tree are discarded."
+                    );
+                }
+                // Each discard has its own folder: an older copy is never written over.
+                let keep = crate::storage::private_folder("discarded")
+                    .join(chrono::Local::now().format("%Y%m%d-%H%M%S%.3f").to_string());
+                std::fs::create_dir_all(&keep)?;
+                self.discard_file(&change, &keep)?;
+            }
+            GitAction::Amend(message) => self.amend(message.as_deref())?,
+            GitAction::StashPush(message) => self.stash_push(&message)?,
+            GitAction::StashApply(index) => self.stash_apply(index)?,
+            GitAction::StashDrop(index) => self.stash_drop(index)?,
+            GitAction::CreateTag(name) => self.create_tag(&name, "")?,
+            GitAction::CreateBranch(name) => self.create_branch(&name)?,
+            GitAction::RenameBranch(old, new) => self.rename_branch(&old, &new)?,
+            GitAction::DeleteBranch(name, force) => self.delete_branch(&name, force)?,
+            GitAction::Resolve(path, index, resolution) => {
+                let left = self.resolve_conflict(&path, index, resolution)?;
+                self.status_message = match left {
+                    0 => format!("{} resolved and staged", path.display()),
+                    left => format!("{left} conflict(s) left in {}", path.display()),
+                };
+            }
+            GitAction::MoreCommits => {
+                self.more_commits()?;
+                self.status_message = format!("{} commits shown", self.commits.len());
+            }
+            GitAction::FileHistory(path) => {
+                let history = super::GitPanel::file_history(self, &path)?;
+                self.status_message =
+                    format!("{} commit(s) changed {}", history.len(), path.display());
+                self.file_history = Some((path, history));
+                self.change_tab(GitTab::Inspect);
+            }
             GitAction::Rebase(target) => {
                 self.ensure_clean("Rebase")?;
                 if target.trim().is_empty() {
@@ -886,7 +1065,7 @@ mod tests {
         write(directory.path(), "file.txt", "dirty\n");
         assert!(panel.checkout("feature").is_err());
         assert!(panel.rebase("feature").is_err());
-        assert_eq!(repo.head().unwrap().shorthand(), Some("main"));
+        assert_eq!(repo.head().unwrap().shorthand().ok(), Some("main"));
         assert_eq!(
             fs::read_to_string(directory.path().join("file.txt")).unwrap(),
             "dirty\n"
@@ -902,7 +1081,7 @@ mod tests {
             .unwrap();
         let mut panel = GitPanel::new(directory.path());
         panel.checkout("feature").unwrap();
-        assert_eq!(repo.head().unwrap().shorthand(), Some("feature"));
+        assert_eq!(repo.head().unwrap().shorthand().ok(), Some("feature"));
         assert_eq!(panel.launchpad.current_branch.as_deref(), Some("feature"));
         checkout(&repo, "main");
     }
@@ -924,7 +1103,7 @@ mod tests {
 
         let mut panel = GitPanel::new(directory.path());
         panel.rebase("main").unwrap();
-        assert_eq!(repo.head().unwrap().shorthand(), Some("feature"));
+        assert_eq!(repo.head().unwrap().shorthand().ok(), Some("feature"));
         assert_eq!(panel.commits[0].summary, "Feature change");
         assert_eq!(panel.commits[0].parent_ids, [main_id.to_string()]);
         assert!(directory.path().join("main.txt").exists());

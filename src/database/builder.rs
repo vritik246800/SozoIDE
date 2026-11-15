@@ -5,11 +5,10 @@
 use std::collections::HashSet;
 
 use anyhow::{Result, bail};
-use sqlx::AnyPool;
 
 use super::{
     model::{DatabaseValue, Driver},
-    store::run_query,
+    store::{Pool, run_query},
 };
 
 /// Tables and views in one query at most: more is rarely meant and slow to draw.
@@ -63,7 +62,7 @@ impl Catalog {
 
 /// Reads the tables and views of the database the pool is on, their columns in order, the
 /// primary key columns and the foreign keys.
-pub async fn load_catalog(pool: &AnyPool, driver: Driver) -> Result<Catalog> {
+pub async fn load_catalog(pool: &Pool, driver: Driver) -> Result<Catalog> {
     let mut catalog = Catalog::default();
     match driver {
         Driver::SQLite => {
@@ -200,7 +199,7 @@ pub async fn load_catalog(pool: &AnyPool, driver: Driver) -> Result<Catalog> {
 }
 
 /// Each row of `query` as text; names that a driver returns as bytes are read as UTF-8.
-async fn rows(pool: &AnyPool, query: &str) -> Result<Vec<Vec<String>>> {
+async fn rows(pool: &Pool, query: &str) -> Result<Vec<Vec<String>>> {
     let result = run_query(pool, query).await?;
     Ok(result
         .rows
@@ -415,7 +414,7 @@ impl Design {
 }
 
 /// `name` as an identifier of `driver`, quoted only when it has to be.
-fn identifier(name: &str, driver: Driver) -> String {
+pub(super) fn identifier(name: &str, driver: Driver) -> String {
     let plain = name
         .chars()
         .next()

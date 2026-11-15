@@ -1,0 +1,44 @@
+---
+// The pages beside the landing page (TODO 6.4.4): the same themes, policy and fonts, a header
+// back to it, and their content.
+import '@fontsource-variable/martian-mono/wdth.css';
+import '../styles/site.css';
+import { csp, themeCss } from '../data/content';
+
+interface Props {
+  title: string;
+  description: string;
+}
+const { title, description } = Astro.props;
+const base = import.meta.env.BASE_URL;
+const asset = (path: string) => `${base.replace(/\/$/, '')}/${path}`;
+const canonical = new URL(Astro.url.pathname, Astro.site).toString();
+---
+
+<html lang="en" data-theme="campbell">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title} — SozoIDE</title>
+    <meta name="description" content={description} />
+    <meta http-equiv="Content-Security-Policy" content={csp} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" type="image/png" href={asset('favicon.png')} />
+    <style is:inline set:html={themeCss}></style>
+    <script is:inline src={asset('early.js')}></script>
+  </head>
+  <body>
+    <header class="top">
+      <a class="brand" href={base}>SozoIDE</a>
+      <nav aria-label="Main">
+        <a href={`${base.replace(/\/$/, '')}/install/`}>Install</a>
+        <a href={`${base.replace(/\/$/, '')}/notes/`}>What's new</a>
+        <a href={`${base.replace(/\/$/, '')}/shortcuts/`}>Keys</a>
+      </nav>
+    </header>
+    <main class="page">
+      <h1>{title}</h1>
+      <slot />
+    </main>
+  </body>
+</html>

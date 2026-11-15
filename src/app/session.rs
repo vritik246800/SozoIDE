@@ -4,7 +4,6 @@
 
 use std::{
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -30,6 +29,30 @@ pub(super) struct Session {
     tiles: Option<Tile>,
     #[serde(default)]
     other_lengths: Option<[u16; 3]>,
+    /// Whether the user trusts this folder to run its code (F45); none until it is asked.
+    #[serde(default)]
+    trusted: Option<bool>,
+    /// The editor split, by the direction and the tab of the other pane (TODO 2.2.5).
+    #[serde(default)]
+    split: Option<(super::SplitDirection, PathBuf)>,
+    /// The text of the search of the file, when it was open.
+    #[serde(default)]
+    search: Option<String>,
+    /// The breakpoints with what each waits for (TODO 3.2.2).
+    #[serde(default)]
+    breakpoints: Vec<SavedBreakpoint>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+struct SavedBreakpoint {
+    path: PathBuf,
+    row: usize,
+    #[serde(default)]
+    condition: Option<String>,
+    #[serde(default)]
+    hits: Option<String>,
+    #[serde(default)]
+    log: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -37,6 +60,12 @@ struct Tab {
     path: PathBuf,
     row: usize,
     column: usize,
+    /// The first row on screen (TODO 2.2.5).
+    #[serde(default)]
+    scroll: u16,
+    /// Where a video or a song was left, in seconds (TODO 5.1.7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    position: Option<f64>,
 }
 
 /// Where the sessions are kept. Debug builds (tests, `cargo run`) neither read nor write them,
@@ -49,12 +78,10 @@ pub(super) fn sessions_path() -> Option<PathBuf> {
         .map(|directories| directories.config_dir().join("sessions.toml"))
 }
 
-/// Every folder's session, by its full path; none when the file is missing or unreadable.
+/// Every folder's session, by its full path; none when the file is missing, and a file that
+/// cannot be read is kept aside (`storage`).
 fn load(path: &Path) -> BTreeMap<String, Session> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| toml::from_str(&contents).ok())
-        .unwrap_or_default()
+    crate::storage::read(path)
 }
 
 fn key(root: &Path) -> String {
@@ -90,6 +117,13 @@ impl App {
                     path: file.path.clone(),
                     row: file.cursor_row,
                     column: file.cursor_column,
+                    scroll: file.scroll,
+                    position: file
+                        .media
+                        .as_ref()
+                        .and_then(|media| media.video())
+                        .map(|video| video.position().as_secs_f64())
+                        .filter(|seconds| *seconds > 0.0),
                 })
                 .collect(),
             tiles: Some(self.tiles.clone()),
@@ -98,6 +132,39 @@ impl App {
                 self.right_terminal_height,
                 self.bottom_terminal_width,
             ]),
+            trusted: self.trust,
+            split: self.split.and_then(|split| {
+                let other = self.open_files.get(split.other)?;
+                Some((split.direction, other.path.clone()))
+            }),
+            search: self
+                .search
+                .as_ref()
+                .filter(|search| search.scope == crate::editor::SearchScope::CurrentFile)
+                .filter(|search| search.title.is_none() && !search.query.is_empty())
+                .map(|search| search.query.clone()),
+            // In the order of the files: the session compares equal when nothing changed.
+            breakpoints: self
+                .breakpoints
+                .iter()
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .flat_map(|(path, rows)| rows.iter().map(move |row| (path, *row)))
+                .map(|(path, row)| {
+                    let options = self
+                        .breakpoint_options
+                        .get(&(path.clone(), row))
+                        .cloned()
+                        .unwrap_or_default();
+                    SavedBreakpoint {
+                        path: path.clone(),
+                        row,
+                        condition: options.condition,
+                        hits: options.hits,
+                        log: options.log,
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -113,10 +180,9 @@ impl App {
         }
         let mut sessions = load(&path);
         sessions.insert(key(&self.root), session.clone());
-        let written = path.parent().map_or(Ok(()), fs::create_dir_all).is_ok()
-            && toml::to_string(&sessions)
-                .ok()
-                .is_some_and(|text| fs::write(&path, text).is_ok());
+        let written = toml::to_string(&sessions)
+            .ok()
+            .is_some_and(|text| crate::storage::write(&path, &text).is_ok());
         if written {
             self.saved_session = Some(session);
         }
@@ -132,22 +198,45 @@ impl App {
         else {
             return Ok(());
         };
+        // Before any tab opens: a language server starts with the first file of its language.
+        if session.trusted.is_some() {
+            self.trust = session.trusted;
+        }
         self.entries.clear();
         Self::collect_entries(&self.root, 0, &session.expanded, &mut self.entries)?;
         self.folders = self.folder_times();
+        let mut gone = Vec::new();
         for tab in &session.tabs {
-            if !tab.path.is_file() || self.open_file(tab.path.clone()).is_err() {
+            if !tab.path.is_file() {
+                gone.push(
+                    tab.path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                continue;
+            }
+            if self.open_file(tab.path.clone()).is_err() {
                 continue;
             }
             let Some(file) = self.open_files.last_mut() else {
                 continue;
             };
             file.move_cursor_to(tab.row, tab.column);
+            file.scroll = tab.scroll;
+            file.follow_cursor = false;
             // A video waits for Space instead of playing as the folder opens.
             if let Some(media) = file.media.as_mut()
                 && media.video().is_some()
             {
                 media.control(crate::media::Control::Play);
+                if let Some(seconds) = tab
+                    .position
+                    .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+                {
+                    media.resume_at(std::time::Duration::from_secs_f64(seconds.min(1e7)));
+                }
             }
         }
         if let Some(index) = session
@@ -175,7 +264,46 @@ impl App {
             self.right_terminal_height = right.max(3);
             self.bottom_terminal_width = bottom.max(10);
         }
-        self.status = "Ready".into();
+        if let Some((direction, other)) = session.split
+            && let Some(other) = self.open_files.iter().position(|file| file.path == other)
+        {
+            self.split = Some(super::Split { direction, other });
+        }
+        for saved in session.breakpoints {
+            if !saved.path.is_file() {
+                continue;
+            }
+            self.breakpoints
+                .entry(saved.path.clone())
+                .or_default()
+                .insert(saved.row);
+            let options = crate::debug::Breakpoint {
+                condition: saved.condition,
+                hits: saved.hits,
+                log: saved.log,
+            };
+            if options != crate::debug::Breakpoint::default() {
+                self.breakpoint_options
+                    .insert((saved.path, saved.row), options);
+            }
+        }
+        if let Some(query) = session.search {
+            self.open_search(crate::editor::SearchScope::CurrentFile);
+            let active = self.active_tab.and_then(|index| self.open_files.get(index));
+            if let Some(search) = &mut self.search {
+                search.push_str(&query, &self.root, active);
+            }
+        }
+        // Tabs whose files are gone say so instead of going without a word (TODO 2.2.5).
+        self.status = match gone.as_slice() {
+            [] => "Ready".into(),
+            [one] => format!("{one} was deleted since the last time: its tab is not open"),
+            many => format!(
+                "{} files were deleted since the last time: {}",
+                many.len(),
+                many.join(", ")
+            ),
+        };
         self.saved_session = Some(self.session());
         Ok(())
     }
@@ -183,7 +311,50 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+
+    #[test]
+    fn a_session_keeps_the_scroll_the_split_and_the_search_and_says_what_was_deleted() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let long = "line\n".repeat(300);
+        for name in ["a.txt", "b.txt", "gone.txt"] {
+            fs::write(project.join(name), &long).unwrap();
+        }
+        let sessions = directory.path().join("sessions.toml");
+        let mut app = App::new(project.clone()).unwrap();
+        app.sessions = Some(sessions.clone());
+        for name in ["a.txt", "b.txt", "gone.txt"] {
+            app.open_file(project.join(name)).unwrap();
+        }
+        app.open_files[0].scroll = 120;
+        app.split = Some(super::super::Split {
+            direction: super::super::SplitDirection::Columns,
+            other: 1,
+        });
+        app.select_tab(0);
+        app.open_search(crate::editor::SearchScope::CurrentFile);
+        app.search.as_mut().unwrap().query = "line".into();
+        app.save_session();
+        fs::remove_file(project.join("gone.txt")).unwrap();
+
+        let mut again = App::new(project.clone()).unwrap();
+        again.sessions = Some(sessions);
+        again.restore_session().unwrap();
+        assert_eq!(again.open_files.len(), 2);
+        assert_eq!(again.open_files[0].scroll, 120);
+        let split = again.split.unwrap();
+        assert_eq!(again.open_files[split.other].name, "b.txt");
+        assert_eq!(again.search.as_ref().unwrap().query, "line");
+        assert!(
+            again.status.contains("gone.txt was deleted"),
+            "{}",
+            again.status
+        );
+    }
 
     #[test]
     fn a_session_from_before_the_layout_still_opens() {

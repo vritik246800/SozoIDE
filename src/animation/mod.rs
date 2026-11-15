@@ -28,6 +28,18 @@ pub const SPLASH_EXIT: Timing = timing(260, 260, linear);
 /// The flower of the About dialog grows from its centre (`DESIGN.md` §1.3).
 pub const BLOOM: Timing = timing(1400, 1400, ease_out_cubic);
 pub const PROGRESS: Timing = timing(160, 160, ease_out_cubic);
+/// Menus, suggestions and small boxes open line by line from where they hang.
+pub const MENU: Timing = timing(90, 60, ease_out_cubic);
+/// Rows that enter or leave a list: a folder that opens or closes, results that arrive.
+pub const ROWS: Timing = timing(120, 90, ease_out_cubic);
+/// A panel that goes from where it was to where it is now: dropped, maximised, split.
+pub const GLIDE: Timing = timing(160, 120, ease_in_out_cubic);
+/// A page or a jump of scroll, in steps of rows; the wheel and the arrows stay immediate.
+pub const SCROLL: Timing = timing(110, 110, ease_out_cubic);
+/// The border of the panel that takes the focus is traced from its top left corner.
+pub const FOCUS: Timing = timing(140, 140, ease_out_cubic);
+/// A status message comes in from the left and fades on its way out.
+pub const NOTICE: Timing = timing(160, 400, ease_out_cubic);
 pub const SPINNER_FRAME: Duration = Duration::from_millis(80);
 pub const SWEEP_CYCLE: Duration = Duration::from_millis(1200);
 
@@ -119,11 +131,107 @@ impl Tween {
     }
 }
 
+/// A rectangle of cells, as the screen has them: the engine knows no drawing library.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Area {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+/// A rectangle that goes from where it was to where it is asked to be (`GLIDE`); asked again
+/// half way, it goes on from where it is, never from a jump.
+#[derive(Clone, Copy, Debug)]
+pub struct Glide {
+    from: Area,
+    to: Area,
+    progress: Tween,
+}
+
+impl Glide {
+    pub fn new(now: Instant, area: Area) -> Self {
+        Self {
+            from: area,
+            to: area,
+            progress: Tween::new(now, 1.0, GLIDE),
+        }
+    }
+
+    pub fn set_target(&mut self, area: Area, now: Instant) {
+        if area == self.to {
+            return;
+        }
+        self.from = self.value(now);
+        self.to = area;
+        self.progress.restart(now, GLIDE);
+    }
+
+    pub fn value(&self, now: Instant) -> Area {
+        let t = self.progress.value(now);
+        let mix = |from: u16, to: u16| {
+            (f32::from(from) + (f32::from(to) - f32::from(from)) * t).round() as u16
+        };
+        Area {
+            x: mix(self.from.x, self.to.x),
+            y: mix(self.from.y, self.to.y),
+            width: mix(self.from.width, self.to.width),
+            height: mix(self.from.height, self.to.height),
+        }
+    }
+
+    pub fn is_finished(&self, now: Instant) -> bool {
+        self.progress.is_finished(now)
+    }
+}
+
+/// A scroll offset that runs to a new row in steps (`SCROLL`) instead of jumping there.
+#[derive(Clone, Copy, Debug)]
+pub struct Scroll {
+    from: f32,
+    to: f32,
+    progress: Tween,
+}
+
+impl Scroll {
+    pub fn new(now: Instant, row: usize) -> Self {
+        Self {
+            from: row as f32,
+            to: row as f32,
+            progress: Tween::new(now, 1.0, SCROLL),
+        }
+    }
+
+    /// Runs to `row`; `animate` false (the wheel, the arrows) puts it there at once.
+    pub fn set_target(&mut self, row: usize, now: Instant, animate: bool) {
+        let row = row as f32;
+        if row == self.to {
+            return;
+        }
+        self.from = if animate { self.exact(now) } else { row };
+        self.to = row;
+        self.progress.restart(now, SCROLL);
+    }
+
+    fn exact(&self, now: Instant) -> f32 {
+        self.from + (self.to - self.from) * self.progress.value(now)
+    }
+
+    pub fn value(&self, now: Instant) -> usize {
+        self.exact(now).round().max(0.0) as usize
+    }
+
+    pub fn target(&self) -> usize {
+        self.to as usize
+    }
+}
+
 /// `SOZO_REDUCED_MOTION` turns every transition into a cut; spinners and bars keep moving
 /// because they show state (`UX.md` §1.3).
 fn motion(duration: Duration) -> Duration {
     static REDUCED: OnceLock<bool> = OnceLock::new();
-    if *REDUCED.get_or_init(|| std::env::var_os("SOZO_REDUCED_MOTION").is_some()) {
+    // `SOZO_REDUCED_MOTION` or `reduced_motion = true` in `settings.toml` (F42).
+    if *REDUCED.get_or_init(|| crate::settings::get().reduced_motion) {
         Duration::ZERO
     } else {
         duration
@@ -263,6 +371,15 @@ fn linear(progress: f32) -> f32 {
     progress
 }
 
+/// Slow at both ends: something that moves from one place to another (`GLIDE`).
+fn ease_in_out_cubic(progress: f32) -> f32 {
+    if progress < 0.5 {
+        4.0 * progress.powi(3)
+    } else {
+        1.0 - (-2.0 * progress + 2.0).powi(3) / 2.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +495,72 @@ mod tests {
             })
             .collect::<String>();
         assert_eq!(frames, "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠋");
+    }
+
+    #[test]
+    fn new_tokens_open_fast_close_faster_and_glide_eases_both_ends() {
+        for token in [MENU, ROWS, GLIDE, NOTICE] {
+            assert!(token.open <= Duration::from_millis(160), "{token:?}");
+        }
+        assert!(MENU.close < MENU.open && ROWS.close < ROWS.open && GLIDE.close < GLIDE.open);
+        // NOTICE fades slowly on purpose: the message is read while it goes.
+        assert!(NOTICE.close > NOTICE.open);
+        assert_eq!(ease_in_out_cubic(0.0), 0.0);
+        assert_eq!(ease_in_out_cubic(1.0), 1.0);
+        assert!((ease_in_out_cubic(0.5) - 0.5).abs() < 1e-6);
+        assert!(ease_in_out_cubic(0.1) < 0.1 && ease_in_out_cubic(0.9) > 0.9);
+    }
+
+    #[test]
+    fn a_glide_runs_to_its_place_and_turns_from_where_it_is() {
+        let start = Instant::now();
+        let a = Area {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 4,
+        };
+        let b = Area {
+            x: 40,
+            y: 10,
+            width: 30,
+            height: 8,
+        };
+        let mut glide = Glide::new(start, a);
+        assert_eq!(glide.value(start), a);
+        glide.set_target(b, start);
+        assert_eq!(glide.value(start), a);
+        let half = glide.value(start + GLIDE.open / 2);
+        assert_eq!(
+            half,
+            Area {
+                x: 20,
+                y: 5,
+                width: 20,
+                height: 6
+            }
+        );
+        // Asked back half way: it starts from where it is, not from `b`.
+        glide.set_target(a, start + GLIDE.open / 2);
+        assert_eq!(glide.value(start + GLIDE.open / 2), half);
+        assert_eq!(glide.value(start + GLIDE.open * 2), a);
+        assert!(glide.is_finished(start + GLIDE.open * 2));
+        glide.set_target(a, start + GLIDE.open * 3);
+        assert!(glide.is_finished(start + GLIDE.open * 3));
+    }
+
+    #[test]
+    fn a_page_of_scroll_runs_in_steps_and_the_wheel_is_immediate() {
+        let start = Instant::now();
+        let mut scroll = Scroll::new(start, 0);
+        scroll.set_target(30, start, true);
+        assert_eq!(scroll.value(start), 0);
+        let step = scroll.value(start + SCROLL.open / 3);
+        assert!(step > 0 && step < 30, "{step}");
+        assert_eq!(scroll.value(start + SCROLL.open), 30);
+        scroll.set_target(33, start + SCROLL.open, false);
+        assert_eq!(scroll.value(start + SCROLL.open), 33);
+        assert_eq!(scroll.target(), 33);
     }
 
     #[test]

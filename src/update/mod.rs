@@ -23,23 +23,24 @@ use sha2::{Digest, Sha256};
 pub mod deps;
 mod install;
 mod notes;
+mod staging;
 
 use install::Package;
-pub use install::install_and_restart;
+pub use install::{confirm_started, install_and_restart};
 pub use notes::{NOTES, Notes};
 
 use crate::branding::REPOSITORY;
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
-/// Release builds check at startup; debug builds (tests, `cargo run`) and
-/// `SOZO_NO_UPDATE_CHECK=1` never touch the network.
+/// Release builds check at startup; debug builds (tests, `cargo run`),
+/// `SOZO_NO_UPDATE_CHECK=1` and `check_updates = false` (F42) never touch the network.
 pub fn enabled() -> bool {
-    !cfg!(debug_assertions) && !cfg!(test) && env::var_os("SOZO_NO_UPDATE_CHECK").is_none()
+    !cfg!(debug_assertions) && !cfg!(test) && crate::settings::get().check_updates
 }
 
 /// Release builds count a new installation or update once (F20); `SOZO_NO_TELEMETRY=1` opts out.
 fn counts() -> bool {
-    !cfg!(debug_assertions) && !cfg!(test) && env::var_os("SOZO_NO_TELEMETRY").is_none()
+    !cfg!(debug_assertions) && !cfg!(test) && crate::settings::get().telemetry
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +54,8 @@ pub enum UpdateState {
 
 enum Message {
     Latest(String),
+    /// What the new version brings, from its release's `NOTES.txt` (TODO 6.1.2).
+    Notes(Vec<String>),
     /// The latest version could not be read: only said after a check from About.
     Unreachable,
     Progress(u64, Option<u64>),
@@ -75,15 +78,11 @@ struct Settings {
 
 impl Settings {
     fn load(path: &Path) -> Self {
-        fs::read_to_string(path)
-            .ok()
-            .and_then(|contents| toml::from_str(&contents).ok())
-            .unwrap_or_default()
+        crate::storage::read(path)
     }
 
     fn save(&self, path: &Path) -> Option<()> {
-        path.parent().map_or(Ok(()), fs::create_dir_all).ok()?;
-        fs::write(path, toml::to_string(self).ok()?).ok()
+        crate::storage::write(path, &toml::to_string(self).ok()?).ok()
     }
 }
 
@@ -116,6 +115,8 @@ pub struct Updater {
     manual: bool,
     /// What the last check from About found, for its dialog.
     pub checked: Option<String>,
+    /// The notes of the version offered, shown before `Enter` (TODO 6.1.2).
+    pub notes: Vec<String>,
 }
 
 impl Updater {
@@ -130,12 +131,15 @@ impl Updater {
             cancel: Arc::new(AtomicBool::new(false)),
             manual: false,
             checked: None,
+            notes: Vec::new(),
         };
         if check {
             let sender = updater.channel();
             thread::spawn(move || {
                 if let Ok(latest) = latest_version() {
+                    let notes = release_notes(&latest);
                     let _ = sender.send(Message::Latest(latest));
+                    let _ = sender.send(Message::Notes(notes));
                 }
             });
         }
@@ -160,6 +164,7 @@ impl Updater {
         for message in messages {
             match message {
                 Message::Latest(latest) => self.offer(latest),
+                Message::Notes(notes) => self.notes = notes,
                 Message::Unreachable => {
                     self.manual = false;
                     self.checked = Some("Could not check for updates".to_string());
@@ -180,6 +185,10 @@ impl Updater {
     fn offer(&mut self, latest: String) {
         let manual = std::mem::take(&mut self.manual);
         let skipped = !manual && self.skipped().as_deref() == Some(latest.as_str());
+        // Only the preview channel takes a pre-release (TODO 6.1.2).
+        if latest.contains('-') && !preview_channel() {
+            return;
+        }
         if is_newer(&latest, CURRENT) && !skipped {
             self.version = latest;
             self.state = UpdateState::Available;
@@ -205,8 +214,15 @@ impl Updater {
             return;
         }
         let sender = self.channel();
-        thread::spawn(move || {
-            let _ = sender.send(latest_version().map_or(Message::Unreachable, Message::Latest));
+        thread::spawn(move || match latest_version() {
+            Ok(latest) => {
+                let notes = release_notes(&latest);
+                let _ = sender.send(Message::Latest(latest));
+                let _ = sender.send(Message::Notes(notes));
+            }
+            Err(_) => {
+                let _ = sender.send(Message::Unreachable);
+            }
         });
     }
 
@@ -219,9 +235,16 @@ impl Updater {
             }
         };
         let name = asset_name(env::consts::OS, env::consts::ARCH, package.extension());
-        let url = package_url(&name);
-        let sums = package_url(SUMS);
-        let file = env::temp_dir().join(&name);
+        let url = release_url(&self.version, &name);
+        let sums = release_url(&self.version, SUMS);
+        // A folder of this update alone, closed to other users (R1).
+        let file = match staging::base().and_then(|base| staging::private_dir(&base)) {
+            Ok(directory) => directory.join(&name),
+            Err(error) => {
+                self.state = UpdateState::Failed(format!("{error:#}"));
+                return;
+            }
+        };
         self.cancel = Arc::new(AtomicBool::new(false));
         let cancel = self.cancel.clone();
         let sender = self.channel();
@@ -238,7 +261,7 @@ impl Updater {
             let message = match verified {
                 Ok(()) => Message::Downloaded(file),
                 Err(error) => {
-                    let _ = fs::remove_file(&file);
+                    staging::discard(&file);
                     Message::Failed(format!("{error:#}"))
                 }
             };
@@ -383,6 +406,15 @@ fn package_url(name: &str) -> String {
     format!("{REPOSITORY}/releases/latest/download/{name}")
 }
 
+/// The file `name` of release `version`: a pre-release is never `latest`.
+fn release_url(version: &str, name: &str) -> String {
+    if version.contains('-') {
+        format!("{REPOSITORY}/releases/download/v{version}/{name}")
+    } else {
+        package_url(name)
+    }
+}
+
 /// GitHub counts every download of a release file, so fetching the small
 /// `SozoIDE-<os>-<arch>.<kind>.txt` of this version counts one installation (`installed`) or
 /// update (`updated`). Nothing else is sent.
@@ -403,7 +435,67 @@ fn counter_url(kind: &str, os: &str, arch: &str) -> String {
     )
 }
 
+/// Which releases are offered: `update_channel = "preview"` in the settings takes the
+/// pre-releases too (TODO 6.1.2, F42).
+fn preview_channel() -> bool {
+    crate::settings::get().update_channel == "preview"
+}
+
+/// The newest release of the repository's feed (`releases.atom`, on the same host): with the
+/// pre-releases, which `releases/latest` leaves out.
+fn latest_of_feed(feed: &str) -> Option<String> {
+    feed.split("/releases/tag/v").skip(1).find_map(|rest| {
+        let tag: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+            .collect();
+        version_numbers(base_version(&tag)).is_some().then_some(tag)
+    })
+}
+
+/// `0.9.1-preview.2` → `0.9.1`.
+fn base_version(version: &str) -> &str {
+    version.split('-').next().unwrap_or(version)
+}
+
+/// The notes of `version` from its release (`NOTES.txt`, written by `release.yml` from
+/// `notes.rs`): at most 40 lines of 200 characters, without control characters; none when the
+/// release has no such file.
+fn release_notes(version: &str) -> Vec<String> {
+    if cfg!(test) {
+        return Vec::new();
+    }
+    let url = format!("{REPOSITORY}/releases/download/v{version}/NOTES.txt");
+    curl(&["-fsSL", "--max-time", "10", "--max-filesize", "65536", &url])
+        .map(|text| clean_notes(&text))
+        .unwrap_or_default()
+}
+
+fn clean_notes(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| {
+            line.chars()
+                .filter(|c| !c.is_control())
+                .take(200)
+                .collect::<String>()
+        })
+        .filter(|line| !line.trim().is_empty())
+        .take(40)
+        .collect()
+}
+
 fn latest_version() -> Result<String> {
+    if preview_channel() {
+        let feed = curl(&[
+            "-fsSL",
+            "--max-time",
+            "10",
+            "--max-filesize",
+            "1048576",
+            &format!("{REPOSITORY}/releases.atom"),
+        ])?;
+        return latest_of_feed(&feed).context("No release found");
+    }
     let headers = curl(&[
         "-sSI",
         "--max-time",
@@ -432,7 +524,12 @@ fn version_numbers(version: &str) -> Option<(u64, u64, u64)> {
 }
 
 fn is_newer(latest: &str, current: &str) -> bool {
-    match (version_numbers(latest), version_numbers(current)) {
+    // A pre-release comes before its release: 0.9.1-preview.2 < 0.9.1, but > 0.9.0.
+    let key = |version: &str| {
+        version_numbers(base_version(version))
+            .map(|numbers| (numbers, !version.contains('-'), version.to_owned()))
+    };
+    match (key(latest), key(current)) {
         (Some(latest), Some(current)) => latest > current,
         _ => false,
     }
@@ -453,12 +550,11 @@ fn download(url: &str, file: &Path, cancel: &AtomicBool, sender: &Sender<Message
     let total = curl(&["-sSIL", "--max-time", "30", url])
         .ok()
         .and_then(|headers| content_length(&headers));
-    let _ = fs::remove_file(file);
-    let mut child = Command::new("curl")
+    staging::free(file)?;
+    let mut child = curl_command()
         .args(["-fsSL", "--max-time", "900", "-o"])
         .arg(file)
         .arg(url)
-        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -486,10 +582,19 @@ fn download(url: &str, file: &Path, cancel: &AtomicBool, sender: &Sender<Message
     }
 }
 
+/// Every request goes through here: HTTPS only, also after a redirect, and never an old TLS
+/// (R3). A release served over anything else is not read.
+const HTTPS_ONLY: [&str; 5] = ["--proto", "=https", "--proto-redir", "=https", "--tlsv1.2"];
+
+fn curl_command() -> Command {
+    let mut command = Command::new("curl");
+    command.args(HTTPS_ONLY).stdin(Stdio::null());
+    command
+}
+
 fn curl(args: &[&str]) -> Result<String> {
-    let output = Command::new("curl")
+    let output = curl_command()
         .args(args)
-        .stdin(Stdio::null())
         .output()
         .context("Could not run curl")?;
     if !output.status.success() {
@@ -603,6 +708,36 @@ mod tests {
     }
 
     #[test]
+    fn old_release_notes_are_never_removed() {
+        // Each release adds its row at the top; no row or count ever goes down.
+        let released = [
+            ("0.9.0", 43, 13),
+            ("0.8.3", 2, 2),
+            ("0.8.2", 6, 4),
+            ("0.8.1", 1, 1),
+            ("0.8.0", 6, 4),
+            ("0.7.9", 8, 1),
+            ("0.7.3", 6, 2),
+            ("0.7.2", 2, 2),
+            ("0.7.1", 6, 0),
+            ("0.7.0", 9, 2),
+            ("0.6.0", 2, 0),
+            ("0.5.0", 8, 2),
+            ("0.4.0", 10, 2),
+            ("0.3.3", 1, 0),
+            ("0.3.2", 1, 0),
+            ("0.3.1", 1, 0),
+            ("0.3.0", 6, 1),
+            ("0.2.0", 7, 3),
+        ];
+        let notes: Vec<_> = NOTES
+            .iter()
+            .map(|notes| (notes.version, notes.new.len(), notes.fixed.len()))
+            .collect();
+        assert_eq!(notes, released);
+    }
+
+    #[test]
     fn release_notes_belong_to_this_version() {
         assert_eq!(NOTES[0].version, CURRENT);
         assert!(!NOTES[0].new.is_empty());
@@ -625,8 +760,8 @@ mod tests {
         assert_eq!(
             versions("0.3.1"),
             [
-                CURRENT, "0.8.2", "0.8.1", "0.8.0", "0.7.9", "0.7.3", "0.7.2", "0.7.1", "0.7.0",
-                "0.6.0", "0.5.0", "0.4.0", "0.3.3", "0.3.2"
+                CURRENT, "0.8.3", "0.8.2", "0.8.1", "0.8.0", "0.7.9", "0.7.3", "0.7.2", "0.7.1",
+                "0.7.0", "0.6.0", "0.5.0", "0.4.0", "0.3.3", "0.3.2"
             ]
         );
         assert_eq!(versions("0.1.4").len(), NOTES.len());
@@ -640,7 +775,16 @@ mod tests {
         assert!(!is_newer("0.1.2", "0.1.2"));
         assert!(!is_newer("0.1.1", "0.1.2"));
         assert!(!is_newer("0.1", "0.0.1"));
-        assert!(!is_newer("0.2.0-beta", "0.1.0"));
+        // A pre-release is newer than the release before it, but only the preview channel
+        // offers it (`offer`).
+        assert!(is_newer("0.2.0-beta", "0.1.0"));
+        let mut updater = Updater::new(false);
+        updater.offer("99.0.0-preview.1".into());
+        assert_eq!(
+            updater.state,
+            UpdateState::Idle,
+            "the stable channel offers no pre-release"
+        );
     }
 
     #[test]
@@ -782,6 +926,28 @@ mod tests {
     }
 
     #[test]
+    fn every_request_is_https_only_and_a_download_never_writes_over_a_file() {
+        let command = curl_command();
+        let arguments: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            arguments,
+            ["--proto", "=https", "--proto-redir", "=https", "--tlsv1.2"]
+        );
+        // curl itself refuses the protocol, before it connects anywhere.
+        let error = curl(&["-fsS", "--max-time", "5", "http://127.0.0.1:9/none"]).unwrap_err();
+        assert!(error.to_string().contains("rotocol"), "{error}");
+
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("package");
+        fs::write(&file, "theirs").unwrap();
+        let (sender, _receiver) = mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        let error = download("https://127.0.0.1:9/none", &file, &cancel, &sender).unwrap_err();
+        assert!(error.to_string().contains("already exists"), "{error}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "theirs");
+    }
+
+    #[test]
     fn cancelling_stops_the_download_and_removes_the_partial_file() {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("partial");
@@ -790,5 +956,33 @@ mod tests {
         let error = download("http://127.0.0.1:9/none", &file, &cancel, &sender).unwrap_err();
         assert_eq!(error.to_string(), "Download cancelled");
         assert!(!file.exists());
+    }
+
+    #[test]
+    fn pre_releases_come_from_the_feed_and_notes_are_cleaned() {
+        let feed = r#"<feed><entry><link href="https://github.com/o/r/releases/tag/v0.9.1-preview.2"/></entry><entry><link href="https://github.com/o/r/releases/tag/v0.9.0"/></entry></feed>"#;
+        assert_eq!(latest_of_feed(feed).as_deref(), Some("0.9.1-preview.2"));
+        assert_eq!(latest_of_feed("<feed></feed>"), None);
+        assert_eq!(
+            latest_of_feed(r#"/releases/tag/v1.2"/>"#),
+            None,
+            "not a version"
+        );
+        // A pre-release comes after the release before it and before its own.
+        assert!(is_newer("0.9.1-preview.2", "0.9.0"));
+        assert!(!is_newer("0.9.1-preview.2", "0.9.1"));
+        assert!(is_newer("0.9.1", "0.9.1-preview.2"));
+        assert!(is_newer("0.9.1-preview.3", "0.9.1-preview.2"));
+        assert_eq!(
+            release_url("0.9.1-preview.2", "x.dmg"),
+            format!("{REPOSITORY}/releases/download/v0.9.1-preview.2/x.dmg")
+        );
+        assert_eq!(
+            release_url("0.9.1", "x.dmg"),
+            format!("{REPOSITORY}/releases/latest/download/x.dmg")
+        );
+        let notes = clean_notes("Faster\n\n\u{1b}[31mred\u{7}\n".repeat(30).as_str());
+        assert_eq!(notes.len(), 40);
+        assert!(notes.iter().all(|note| !note.chars().any(char::is_control)));
     }
 }

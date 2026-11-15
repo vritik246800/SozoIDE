@@ -33,11 +33,16 @@ struct Cell {
 }
 
 impl Cell {
+    /// The width of the cell's text as a whole: an emoji joined by a ZWJ, or with a skin
+    /// tone, is one picture, not the sum of its parts (TODO 5.3.3).
     fn width(&self) -> usize {
-        self.glyphs
-            .iter()
-            .map(|glyph| display_width(&glyph.character.to_string()))
-            .sum()
+        display_width(
+            &self
+                .glyphs
+                .iter()
+                .map(|glyph| glyph.character)
+                .collect::<String>(),
+        )
     }
 }
 
@@ -225,6 +230,10 @@ pub struct Row {
     pub source: usize,
     pub filler: bool,
     diagram: Option<(usize, usize)>,
+    /// A row of the picture of a `![…](…)` line: which picture and which of its rows.
+    image: Option<(usize, usize)>,
+    /// Which row of a wrapped line this is, from 0 (TODO 2.1.8).
+    part: usize,
 }
 
 impl Row {
@@ -233,7 +242,23 @@ impl Row {
             source,
             filler: false,
             diagram: None,
+            image: None,
+            part: 0,
         }
+    }
+
+    /// A diagram or a picture: never wrapped.
+    pub fn is_diagram(&self) -> bool {
+        self.diagram.is_some() || self.image.is_some()
+    }
+
+    /// The same source line, as its row `part` when it wraps.
+    pub fn part(self, part: usize) -> Self {
+        Self { part, ..self }
+    }
+
+    pub fn part_index(&self) -> usize {
+        self.part
     }
 }
 
@@ -241,6 +266,54 @@ pub struct MarkdownDocument {
     tables: Vec<MarkdownTable>,
     fences: Vec<Fence>,
     code: Vec<bool>,
+    /// The pictures of the lines that are only `![alt](file)`: the line and its half blocks.
+    images: Vec<(usize, Vec<Line<'static>>)>,
+}
+
+/// How wide a picture in a document is drawn, in cells, and how tall at most.
+const IMAGE_WIDTH: u16 = 40;
+const IMAGE_ROWS: u16 = 20;
+
+/// The file of a line that is only `![alt](file)`; none for an address or anything else.
+pub fn image_target(line: &str) -> Option<&str> {
+    let line = line.trim();
+    let rest = line.strip_prefix("![")?;
+    let (_, rest) = rest.split_once("](")?;
+    let target = rest.strip_suffix(')')?.split_whitespace().next()?;
+    (!target.contains("://") && !target.starts_with("data:")).then_some(target)
+}
+
+/// The picture of `target` beside the document in `folder`, inside `root`, as half blocks;
+/// kept by path and time, so that typing does not read it again.
+fn image_lines(folder: &Path, root: &Path, target: &str) -> Option<Vec<Line<'static>>> {
+    use std::sync::Mutex;
+    type Kept =
+        std::collections::HashMap<std::path::PathBuf, (std::time::SystemTime, Vec<Line<'static>>)>;
+    static KEPT: Mutex<Option<Kept>> = Mutex::new(None);
+    let root = root.canonicalize().ok()?;
+    let path = folder.join(target).canonicalize().ok()?;
+    if !path.starts_with(&root) || crate::media::kind(&path) != Some(crate::media::Kind::Picture) {
+        return None;
+    }
+    let modified = std::fs::metadata(&path)
+        .and_then(|file| file.modified())
+        .ok()?;
+    let mut kept = KEPT.lock().ok()?;
+    let kept = kept.get_or_insert_with(Default::default);
+    if let Some((time, lines)) = kept.get(&path)
+        && *time == modified
+    {
+        return Some(lines.clone());
+    }
+    let picture = crate::media::small_picture(&path, 320)?;
+    let rows = ((u32::from(IMAGE_WIDTH) * picture.height()) / picture.width().max(1) / 2)
+        .clamp(1, u32::from(IMAGE_ROWS)) as u16;
+    let lines = crate::media::half_blocks(&picture, IMAGE_WIDTH, rows);
+    if kept.len() >= 32 {
+        kept.clear();
+    }
+    kept.insert(path, (modified, lines.clone()));
+    Some(lines)
 }
 
 impl MarkdownDocument {
@@ -291,7 +364,21 @@ impl MarkdownDocument {
             tables,
             fences,
             code: regions.code,
+            images: Vec::new(),
         }
+    }
+
+    /// The same, with the pictures of its `![…](…)` lines read from beside the document in
+    /// `folder` (files inside `root` only).
+    pub fn parse_in(lines: &[String], folder: &Path, root: &Path) -> Self {
+        let mut document = Self::parse(lines);
+        document.images = lines
+            .iter()
+            .enumerate()
+            .filter(|(row, _)| !document.code.get(*row).copied().unwrap_or(true))
+            .filter_map(|(row, line)| Some((row, image_lines(folder, root, image_target(line)?)?)))
+            .collect();
+        document
     }
 
     /// The rows on screen for a file of `count` lines.
@@ -305,6 +392,17 @@ impl MarkdownDocument {
             .peekable();
         let mut source = 0;
         while source < count {
+            if let Some(index) = self.images.iter().position(|(row, _)| *row == source) {
+                rows.extend((0..self.images[index].1.len()).map(|line| Row {
+                    source,
+                    filler: line > 0,
+                    diagram: None,
+                    image: Some((index, line)),
+                    part: 0,
+                }));
+                source += 1;
+                continue;
+            }
             let Some((index, fence)) = diagrams.next_if(|(_, fence)| fence.start == source) else {
                 rows.push(Row::plain(source));
                 source += 1;
@@ -315,6 +413,8 @@ impl MarkdownDocument {
                 source: fence.start + line.min(lines - 1),
                 filler: line >= lines,
                 diagram: Some((index, line)),
+                image: None,
+                part: 0,
             }));
             source = fence.end;
         }
@@ -333,6 +433,18 @@ impl MarkdownDocument {
         highlighted: &[Span<'static>],
     ) -> Option<Vec<Span<'static>>> {
         let source = row.source;
+        // A picture's rows; on its line the cursor shows the source, the rest stay empty.
+        if let Some((index, line)) = row.image {
+            if raw.contains(&source) {
+                return row.filler.then(Vec::new);
+            }
+            return Some(
+                self.images
+                    .get(index)
+                    .and_then(|(_, lines)| lines.get(line))
+                    .map_or_else(Vec::new, |line| line.spans.clone()),
+            );
+        }
         if let Some(fence) = self.fence(source) {
             let editing = raw.iter().any(|row| fence.contains(*row));
             return match (row.diagram, editing) {
@@ -424,7 +536,8 @@ impl MarkdownDocument {
                 .sum::<usize>()
                 + 1
         });
-        fences.chain(tables).max().unwrap_or(0)
+        let images = self.images.iter().map(|_| usize::from(IMAGE_WIDTH));
+        fences.chain(tables).chain(images).max().unwrap_or(0)
     }
 
     fn fence(&self, row: usize) -> Option<&Fence> {
@@ -638,9 +751,40 @@ fn inline_glyphs(line: &str, highlighted: &[Span<'static>], blocks: bool) -> Opt
             }
         }
     }
+    // A task of a list: `- [ ]` and `- [x]` become a box, empty or ticked (TODO 5.1.9).
+    if blocks && let Some((open, done)) = task_box(&characters) {
+        changed = true;
+        replaced[open] = if done { '☑' } else { '☐' };
+        styles[open] = Style::default().fg(if done { Color::Green } else { Color::Yellow });
+        hidden[open + 1..open + 3].fill(true);
+        protected[..open + 3].fill(true);
+        if done {
+            for style in &mut styles[open + 3..] {
+                *style = style.add_modifier(Modifier::CROSSED_OUT | Modifier::DIM);
+            }
+        }
+    }
     // Code spans keep every character as written.
     for (start, end) in pairs(&characters, &protected, &['`'], false) {
         protected[start..=end].fill(true);
+    }
+    // `[text](target)` shows its text, underlined; `[^note]` its label, raised.
+    for link in links(&characters, &protected) {
+        changed = true;
+        protected[link.start..link.end].fill(true);
+        hidden[link.start] = true;
+        hidden[link.close..link.end].fill(true);
+        for style in &mut styles[link.start + 1..link.close] {
+            *style = style.fg(Color::Blue).add_modifier(Modifier::UNDERLINED);
+        }
+    }
+    for (start, end) in footnotes(&characters, &protected) {
+        changed = true;
+        protected[start..end].fill(true);
+        hidden[start + 1] = true;
+        for style in &mut styles[start..end] {
+            *style = style.fg(Color::Cyan);
+        }
     }
     // `[[target|text]]` shows its text, or its target, and nothing else (F40).
     for link in wiki_links(&characters, &protected) {
@@ -711,6 +855,173 @@ fn inline_glyphs(line: &str, highlighted: &[Span<'static>], blocks: bool) -> Opt
     Some(glyphs)
 }
 
+/// Where the box of a task starts (`[`) and whether it is ticked: `- [ ] `, `* [x] `, `1. [X] `.
+fn task_box(characters: &[char]) -> Option<(usize, bool)> {
+    let indent = characters.iter().take_while(|c| c.is_whitespace()).count();
+    let rest = &characters[indent..];
+    let marker = match rest {
+        ['-' | '*' | '+', ' ', ..] => 2,
+        _ => {
+            let digits = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+            match rest.get(digits..digits + 2) {
+                Some(['.' | ')', ' ']) if digits > 0 => digits + 2,
+                _ => return None,
+            }
+        }
+    };
+    let open = indent + marker;
+    match characters.get(open..open + 4)? {
+        ['[', mark @ (' ' | 'x' | 'X'), ']', ' '] => Some((open, *mark != ' ')),
+        _ => None,
+    }
+}
+
+/// The line with the task box at character `column` ticked or not, when there is one there.
+pub fn toggle_task(line: &str, column: usize) -> Option<String> {
+    let characters: Vec<char> = line.chars().collect();
+    let (open, done) = task_box(&characters)?;
+    if !(open..open + 3).contains(&column) {
+        return None;
+    }
+    let mut changed = characters;
+    changed[open + 1] = if done { ' ' } else { 'x' };
+    Some(changed.into_iter().collect())
+}
+
+/// A `[text](target)` by character (not an image `![…]`, not `[[…]]`): `[`, `]` and one past `)`.
+struct Link {
+    start: usize,
+    close: usize,
+    end: usize,
+}
+
+fn links(characters: &[char], protected: &[bool]) -> Vec<Link> {
+    let mut found = Vec::new();
+    let mut index = 0;
+    while index < characters.len() {
+        let start = index;
+        index += 1;
+        if characters[start] != '['
+            || protected[start]
+            || characters.get(start + 1) == Some(&'[')
+            || characters.get(start + 1) == Some(&'^')
+            || (start > 0 && matches!(characters[start - 1], '!' | '['))
+        {
+            continue;
+        }
+        let Some(close) = characters[start..]
+            .iter()
+            .position(|c| *c == ']')
+            .map(|at| start + at)
+        else {
+            break;
+        };
+        if characters.get(close + 1) != Some(&'(') || close == start + 1 {
+            continue;
+        }
+        let Some(end) = characters[close..]
+            .iter()
+            .position(|c| *c == ')')
+            .map(|at| close + at + 1)
+        else {
+            break;
+        };
+        if characters[close + 2..end - 1]
+            .iter()
+            .any(|c| c.is_whitespace())
+            || end - close <= 3
+        {
+            continue;
+        }
+        found.push(Link { start, close, end });
+        index = end;
+    }
+    found
+}
+
+/// Each `[^label]` that is not its definition (`[^label]:` at the start): start, one past end.
+fn footnotes(characters: &[char], protected: &[bool]) -> Vec<(usize, usize)> {
+    let mut found = Vec::new();
+    let mut index = 0;
+    while index + 2 < characters.len() {
+        if characters[index..index + 2] == ['[', '^']
+            && !protected[index]
+            && let Some(length) = characters[index + 2..].iter().position(|c| *c == ']')
+            && length > 0
+        {
+            let end = index + 2 + length + 1;
+            let definition = index == 0 && characters.get(end) == Some(&':');
+            if !definition {
+                found.push((index, end));
+            }
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    found
+}
+
+/// Where a click at character `column` of `line` points: the target of a `[text](target)`
+/// (with its `#heading`), or the label of a `[^note]`.
+pub enum Pointer {
+    Target(String),
+    Note(String),
+}
+
+pub fn pointer_at(line: &str, column: usize) -> Option<Pointer> {
+    let characters: Vec<char> = line.chars().collect();
+    let none = vec![false; characters.len()];
+    if let Some(link) = links(&characters, &none)
+        .into_iter()
+        .find(|link| (link.start..link.end).contains(&column))
+    {
+        return Some(Pointer::Target(
+            characters[link.close + 2..link.end - 1].iter().collect(),
+        ));
+    }
+    footnotes(&characters, &none)
+        .into_iter()
+        .find(|(start, end)| (*start..*end).contains(&column))
+        .map(|(start, end)| Pointer::Note(characters[start + 2..end - 1].iter().collect()))
+}
+
+/// The row of `heading` (its text, or its GitHub anchor such as `getting-started`) in `lines`.
+pub fn heading_row(lines: &[String], heading: &str) -> Option<usize> {
+    let anchor = |text: &str| -> String {
+        text.trim()
+            .to_lowercase()
+            .chars()
+            .filter_map(|c| match c {
+                ' ' | '-' => Some('-'),
+                c if c.is_alphanumeric() || c == '_' => Some(c),
+                _ => None,
+            })
+            .collect()
+    };
+    let wanted = anchor(heading);
+    headings(lines)
+        .into_iter()
+        .find(|(_, text, _)| anchor(text) == wanted)
+        .map(|(_, _, row)| row)
+}
+
+/// The headings of a document for its table of contents: level, text and row.
+pub fn headings(lines: &[String]) -> Vec<(usize, String, usize)> {
+    let regions = scan_fences(lines);
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(row, _)| !regions.code[*row])
+        .filter_map(|(row, line)| {
+            let level = line.chars().take_while(|c| *c == '#').count();
+            let text = line.get(level..)?;
+            ((1..=6).contains(&level) && text.starts_with(' '))
+                .then(|| (level, text.trim().to_owned(), row))
+        })
+        .collect()
+}
+
 /// A `[[target|text]]` by character: where it starts, where its target and its text start,
 /// where `]]` starts and where it ends.
 struct WikiLink {
@@ -756,6 +1067,24 @@ fn wiki_links(characters: &[char], protected: &[bool]) -> Vec<WikiLink> {
         });
     }
     links
+}
+
+/// The `#heading` of the `[[ ]]` at character `column` of `line`, if it has one.
+pub fn wiki_heading_at(line: &str, column: usize) -> Option<String> {
+    let characters = line.chars().collect::<Vec<_>>();
+    let link = wiki_links(&characters, &vec![false; characters.len()])
+        .into_iter()
+        .find(|link| (link.start..link.end).contains(&column))?;
+    let end = if link.text > link.target {
+        link.text - 1
+    } else {
+        link.close
+    };
+    let target: String = characters[link.target..end].iter().collect();
+    target
+        .split_once('#')
+        .map(|(_, heading)| heading.trim().to_owned())
+        .filter(|heading| !heading.is_empty())
 }
 
 /// The target of the `[[ ]]` at character `column` of `line`, without `|text` or `#heading`.
@@ -1459,5 +1788,119 @@ mod tests {
         assert!(style_of("new").add_modifier.contains(Modifier::ITALIC));
         // "Ana" starts at visual column 2 and at source column 4, after "| **".
         assert_eq!(document.source_column(2, &[9], 2, &lines[2]), Some(4));
+    }
+
+    #[test]
+    fn tasks_links_notes_headings_and_pictures_of_a_document() {
+        // Tasks: a box, ticked or not, that a click on it changes.
+        assert_eq!(
+            task_box(&"- [ ] buy".chars().collect::<Vec<_>>()),
+            Some((2, false))
+        );
+        assert_eq!(
+            task_box(&"  12. [X] done".chars().collect::<Vec<_>>()),
+            Some((6, true))
+        );
+        assert_eq!(task_box(&"-[ ] no".chars().collect::<Vec<_>>()), None);
+        assert_eq!(task_box(&"- [y] no".chars().collect::<Vec<_>>()), None);
+        assert_eq!(toggle_task("- [ ] buy", 3).as_deref(), Some("- [x] buy"));
+        assert_eq!(toggle_task("- [x] buy", 2).as_deref(), Some("- [ ] buy"));
+        assert_eq!(toggle_task("- [ ] buy", 7), None, "only the box ticks");
+        let drawn = |line: &str| {
+            render_inline(line, &[])
+                .unwrap()
+                .iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        };
+        assert_eq!(drawn("- [ ] buy milk"), "- ☐ buy milk");
+        assert_eq!(drawn("- [x] done"), "- ☑ done");
+        // Links show their text; notes their label; images and wiki links are not links.
+        assert_eq!(
+            drawn("see [the guide](docs/guide.md#setup) now"),
+            "see the guide now"
+        );
+        assert_eq!(drawn("a fact[^1]."), "a fact[1].");
+        assert!(
+            matches!(pointer_at("see [the guide](docs/guide.md#setup)", 6), Some(Pointer::Target(target)) if target == "docs/guide.md#setup")
+        );
+        assert!(
+            matches!(pointer_at("a fact[^src] b", 8), Some(Pointer::Note(label)) if label == "src")
+        );
+        assert!(pointer_at("![logo](a.png)", 3).is_none());
+        assert!(
+            pointer_at("[^1]: the note", 1).is_none(),
+            "a definition points nowhere"
+        );
+        assert!(
+            pointer_at("[a](b c)", 1).is_none(),
+            "a space is not an address"
+        );
+        // Headings: by text or by anchor, never inside code.
+        let lines: Vec<String> = [
+            "# Title",
+            "```",
+            "# not a heading",
+            "```",
+            "## Getting Started!",
+            "text",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(heading_row(&lines, "getting-started"), Some(4));
+        assert_eq!(heading_row(&lines, "Getting Started!"), Some(4));
+        assert_eq!(heading_row(&lines, "not a heading"), None);
+        assert_eq!(
+            headings(&lines),
+            [
+                (1, "Title".to_owned(), 0),
+                (2, "Getting Started!".to_owned(), 4)
+            ]
+        );
+        assert_eq!(
+            wiki_heading_at("[[notes#todo|later]]", 3).as_deref(),
+            Some("todo")
+        );
+        // Pictures: a line that is only an image of a file beside it, never above its folder.
+        assert_eq!(
+            image_target("![logo](assets/logo.png)"),
+            Some("assets/logo.png")
+        );
+        assert_eq!(image_target("![x](https://e.com/a.png)"), None);
+        assert_eq!(image_target("text ![x](a.png)"), None);
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("docs");
+        std::fs::create_dir(&folder).unwrap();
+        image::RgbaImage::from_pixel(40, 20, image::Rgba([0, 200, 0, 255]))
+            .save(folder.join("dot.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255]))
+            .save(directory.path().join("outside.png"))
+            .unwrap();
+        let lines: Vec<String> = ["# Doc", "![dot](dot.png)", "![out](../outside.png)", "end"]
+            .map(String::from)
+            .to_vec();
+        let document = MarkdownDocument::parse_in(&lines, &folder, &folder);
+        let rows = document.rows(lines.len());
+        let pictures = rows.iter().filter(|row| row.image.is_some()).count();
+        assert_eq!(
+            pictures, 10,
+            "40 cells wide, 20 pixels tall in half blocks: 10 rows; the one outside is text"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.image.is_none() || row.source == 1)
+        );
+        let first = rows.iter().find(|row| row.image.is_some()).unwrap();
+        assert!(
+            !document
+                .render(*first, &[], 80, &lines[1], &[])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            document.render(*first, &[1], 80, &lines[1], &[]).is_none(),
+            "the cursor shows its source"
+        );
     }
 }

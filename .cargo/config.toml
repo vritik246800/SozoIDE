@@ -1,0 +1,4 @@
+# The C runtime inside the Windows binary: without it `sozo.exe` needs VCRUNTIME140.dll, which a
+# clean Windows does not have (CLAUDE.md §0.1, packaging/test-install.ps1).
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

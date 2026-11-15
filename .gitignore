@@ -10,6 +10,7 @@ AGENTS.md
 # Landing page (Astro) and the local Vercel link (project and team ids)
 site/node_modules/
 site/dist/
+site/.chrome-check/
 site/.astro/
 .vercel/
 
@@ -41,3 +42,6 @@ desktop.ini
 
 # Local commit, push and tag helper
 /git.sh
+
+# Binaries the Go debugger (dlv) leaves where it debugged.
+__debug_bin*

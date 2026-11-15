@@ -1,0 +1,42 @@
+---
+// How to install on each system, check the download and open SozoIDE (TODO 6.4.4).
+import Page from '../../layouts/Page.astro';
+
+const repo = 'https://github.com/vritik246800/SozoIDE';
+const download = (file: string) => `${repo}/releases/latest/download/SozoIDE-${file}`;
+const systems = [
+  { name: 'macOS (Apple silicon)', files: ['macos-arm64.dmg'],
+    steps: ['Open the .dmg and drag SozoIDE to Applications.', 'Open the app once. macOS says it cannot check it: open System Settings, Privacy & Security, and choose Open Anyway.', 'The app offers to install the sozo command: choose Install.'] },
+  { name: 'Windows', files: ['windows-x86_64.msi', 'windows-arm64.msi'],
+    steps: ['Open the .msi and follow the setup: it installs for your user only, without administrator rights.', 'If SmartScreen appears, choose More info, then Run anyway.', 'Open a new terminal: sozo is on the PATH.'] },
+  { name: 'Debian, Ubuntu', files: ['linux-x86_64.deb', 'linux-arm64.deb'],
+    steps: ['Open it in your software installer, or run sudo apt install ./SozoIDE-linux-*.deb'] },
+  { name: 'Fedora, openSUSE', files: ['linux-x86_64.rpm', 'linux-arm64.rpm'],
+    steps: ['Open it in your software installer, or run sudo dnf install ./SozoIDE-linux-*.rpm'] },
+  { name: 'Any Linux', files: ['linux-x86_64.tar.gz', 'linux-arm64.tar.gz'],
+    steps: ['Extract sozo into a folder on your PATH, such as ~/.local/bin.'] },
+];
+---
+
+<Page title="Install SozoIDE" description="How to install SozoIDE on macOS, Windows and Linux, and how to check the file you downloaded.">
+  <p>The installers are free and not signed: SozoIDE costs nothing, and signing certificates do. Each release has a <code>SHA256SUMS.txt</code> with the checksum of every file, so you can check yours.</p>
+  {systems.map((system) => (
+    <section>
+      <h2>{system.name}</h2>
+      <p>{system.files.map((file, index) => (<>{index > 0 && ' or '}<a href={download(file)}><code>SozoIDE-{file}</code></a></>))}</p>
+      <ol>{system.steps.map((step) => <li>{step}</li>)}</ol>
+    </section>
+  ))}
+  <section>
+    <h2>Check the download</h2>
+    <p>Download <a href={`${repo}/releases/latest/download/SHA256SUMS.txt`}><code>SHA256SUMS.txt</code></a> next to the file, then:</p>
+    <ul>
+      <li>macOS and Linux: <code>shasum -a 256 -c SHA256SUMS.txt --ignore-missing</code></li>
+      <li>Windows (PowerShell): <code>Get-FileHash SozoIDE-windows-x86_64.msi</code>, and compare it with its line.</li>
+    </ul>
+  </section>
+  <section>
+    <h2>Then</h2>
+    <p>Open a terminal in any folder and run <code>sozo .</code> — SozoIDE offers the tools that make it better (Git, curl, FFmpeg, tmux) and tells you when a newer version is out.</p>
+  </section>
+</Page>
