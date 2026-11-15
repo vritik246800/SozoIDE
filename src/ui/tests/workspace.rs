@@ -396,7 +396,8 @@ fn terminal_tabs_sit_in_the_border_and_answer_to_the_mouse() {
     app.show_bottom_terminal = true;
     app.show_right_terminal = true;
     settle(&mut app);
-    let mut terminal = Terminal::new(TestBackend::new(150, 40)).unwrap();
+    // Wide enough for every tab with a shell's title ("1 Administrator:" on Windows, E85).
+    let mut terminal = Terminal::new(TestBackend::new(260, 40)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let (bottom, right) = (app.regions.bottom_terminal, app.regions.right_terminal);
     let top = |terminal: &Terminal<TestBackend>, area: Rect| {

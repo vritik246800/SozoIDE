@@ -49,8 +49,22 @@ fn drag_panel(app: &mut App, from: (u16, u16), to: (u16, u16)) {
 }
 
 /// The program in the terminal of `panel` reads what is written to it, in a file.
+/// Writes as a program would, once the shell's screen has come to rest: ConPTY repaints the
+/// whole screen when the shell starts and after a resize, over what the test wrote (E85).
 fn program_in(app: &mut App, panel: Focus, output: &[u8]) {
     let terminal = app.terminals(panel).current_mut();
+    let screen = || terminal.parser.read().unwrap().screen().contents();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let (mut before, mut still) = (screen(), 0);
+    while still < 3 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let now = screen();
+        if now == before && !now.trim().is_empty() {
+            still += 1;
+        } else {
+            (before, still) = (now, 0);
+        }
+    }
     terminal.parser.write().unwrap().process(output);
 }
 

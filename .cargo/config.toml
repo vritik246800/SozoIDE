@@ -2,3 +2,8 @@
 # clean Windows does not have (CLAUDE.md §0.1, packaging/test-install.ps1).
 [target.'cfg(all(windows, target_env = "msvc"))']
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# zlib (of libgit2) built into the binary on every system: from the system it made the DEB and
+# RPM need libz.so.1, which packaging/test-install.sh refuses (CLAUDE.md §0.1, ERRORS.md E85).
+[env]
+LIBZ_SYS_STATIC = "1"
