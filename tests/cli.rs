@@ -57,7 +57,8 @@ fn rejects_a_missing_directory() {
 }
 
 /// A folder of fake commands for `packaging/install-tools.sh`: this is a Linux with `apt-get`
-/// as root, and `apt-get` writes what it was asked and "installs" the tools.
+/// as root, and `apt-get` writes what it was asked and "installs" the tools (`update` alone
+/// has nothing to shift: dash, the `sh` of Ubuntu, stops there, E85).
 #[cfg(unix)]
 fn fake_system(directory: &std::path::Path, present: &[&str]) {
     use std::os::unix::fs::PermissionsExt;
@@ -73,7 +74,7 @@ fn fake_system(directory: &std::path::Path, present: &[&str]) {
     write(
         "apt-get",
         &format!(
-            "echo \"$@\" >> '{}'\nshift 2\nfor t in \"$@\"; do printf '#!/bin/sh\\n' > \"{bin}/$t\"; /bin/chmod +x \"{bin}/$t\"; done",
+            "echo \"$@\" >> '{}'\n[ \"$1\" = install ] || exit 0\nshift 2\nfor t in \"$@\"; do printf '#!/bin/sh\\n' > \"{bin}/$t\"; /bin/chmod +x \"{bin}/$t\"; done",
             log.display()
         ),
     );

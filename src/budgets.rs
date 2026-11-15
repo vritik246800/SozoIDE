@@ -1,5 +1,6 @@
-//! Only with `--features budgets`, run alone (other tests at the same time would be measured
-//! too): the CI step after the tests and `./git.sh verify` do it.
+//! The big test only with `--features budgets`, run alone (other tests at the same time would be
+//! measured too): the CI step after the tests and `./git.sh verify` do it. `within` scales the
+//! budgets of the other tests that time something by how busy the machine is (E85).
 //!
 //! The times a person feels (TODO 6.1.4, F44): the first frame, a key until its frame, opening a
 //! file of 20 000 lines and searching 10 000 files. Each budget is the time measured here on
@@ -8,20 +9,23 @@
 
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "budgets")]
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+#[cfg(feature = "budgets")]
 use crate::app::App;
 
 /// The fixed work (sorting 300 000 numbers) and the times measured with it, in a debug build,
 /// alone on the machine.
 const CALIBRATION: Duration = Duration::from_millis(CALIBRATION_MS);
 /// Calibration, first frame, key to frame, 20 000 lines open, 10 000 files searched (ms).
+#[cfg(feature = "budgets")]
 const BUDGETS: (u64, u64, u64, u64, u64) = (CALIBRATION_MS, 35, 4, 46, 70);
 const CALIBRATION_MS: u64 = 190;
 
 /// How much slower this machine is right now (other tests run at the same time) than the one
 /// that measured the budgets, at least 1: asked again before each measure.
-fn slower() -> f64 {
+pub(crate) fn slower() -> f64 {
     let mut numbers: Vec<u64> = (0..300_000u64)
         .map(|n| n.wrapping_mul(6_364_136_223_846_793_005).rotate_left(17))
         .collect();
@@ -31,6 +35,7 @@ fn slower() -> f64 {
     (started.elapsed().as_secs_f64() / CALIBRATION.as_secs_f64()).max(1.0)
 }
 
+#[cfg(feature = "budgets")]
 fn within(name: &str, took: Duration, budget_ms: u64, factor: f64) {
     let _ = BUDGETS.0;
     // 20 % more, and 25 ms for the noise of every test running at once.
@@ -47,6 +52,13 @@ fn within(name: &str, took: Duration, budget_ms: u64, factor: f64) {
     );
 }
 
+/// `budget`, made longer by how much slower this machine is right now: a test that times
+/// something among all the others asks it just before (E85).
+pub(crate) fn scaled(budget: Duration) -> Duration {
+    budget.mul_f64(slower())
+}
+
+#[cfg(feature = "budgets")]
 #[test]
 fn what_a_person_feels_stays_within_its_budget() {
     let directory = tempfile::tempdir().unwrap();

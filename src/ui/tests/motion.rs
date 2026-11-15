@@ -272,11 +272,11 @@ fn a_frame_half_way_through_a_transition_stays_within_its_budget() {
     ));
     app.status = "Opened src".into();
     app.focus = Focus::Editor;
-    let budget = if cfg!(debug_assertions) {
+    let budget = crate::budgets::scaled(if cfg!(debug_assertions) {
         Duration::from_millis(40)
     } else {
         Duration::from_millis(4)
-    };
+    });
     let mut slowest = Duration::ZERO;
     for step in 0..10 {
         let now = start + ROWS.open * step / 20;

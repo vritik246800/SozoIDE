@@ -1143,14 +1143,11 @@ mod tests {
         );
         panel.execute_query().await.unwrap();
         panel.set_query("SELECT * FROM big");
+        // The budget: the first page of a million rows in well under a second.
+        let budget = crate::budgets::scaled(Duration::from_secs(2));
         let started = Instant::now();
         let first = panel.execute_query().await.unwrap();
-        // The budget: the first page of a million rows in well under a second.
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "{:?}",
-            started.elapsed()
-        );
+        assert!(started.elapsed() < budget, "{:?}", started.elapsed());
         assert_eq!((first.rows.len(), first.more), (PAGE, true));
         assert!(panel.status.as_deref().unwrap().contains("L loads more"));
         let more = panel

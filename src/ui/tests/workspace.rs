@@ -402,14 +402,20 @@ fn terminal_tabs_sit_in_the_border_and_answer_to_the_mouse() {
     let top = |terminal: &Terminal<TestBackend>, area: Rect| {
         cut(terminal.backend().buffer(), area.y, area)
     };
+    // A tab may carry its shell's title after its number ("1 Administrator:" on Windows, E85):
+    // the layout is read around it.
     let border = top(&terminal, bottom);
     assert!(
-        border.contains("Bottom terminal [") && border.ends_with(" 1 ─ + ─ | ─╮"),
+        border.contains("Bottom terminal [")
+            && border.contains(" 1")
+            && border.ends_with(" ─ + ─ | ─╮"),
         "{border}"
     );
     let border = top(&terminal, right);
     assert!(
-        border.contains("Right terminal") && border.ends_with(" 1 x ─ 2 x ─ + ─ | ─╮"),
+        border.contains("Right terminal")
+            && border.matches(" x ─").count() == 2
+            && border.ends_with(" x ─ + ─ | ─╮"),
         "{border}"
     );
     assert_eq!(app.regions.terminal_tabs.len(), 3);
@@ -434,7 +440,10 @@ fn terminal_tabs_sit_in_the_border_and_answer_to_the_mouse() {
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     }
     let border = top(&terminal, bottom);
-    assert!(border.ends_with(" 1 x ─ 2 x ─ 3 x ─ | ─╮"), "{border}");
+    assert!(
+        border.matches(" x ─").count() == 3 && border.ends_with(" x ─ | ─╮"),
+        "{border}"
+    );
     assert!(
         !app.regions
             .terminal_add

@@ -944,23 +944,18 @@ mod tests {
         let path = directory.path().join("long.rs");
         std::fs::write(&path, text).unwrap();
         let debug = if cfg!(debug_assertions) { 10 } else { 1 };
+        let budget = |ms: u64| crate::budgets::scaled(Duration::from_millis(ms * debug));
+        let open = budget(100);
         let started = Instant::now();
         let mut file = OpenFile::load(path, &mut Picker::halfblocks()).unwrap();
-        assert!(
-            started.elapsed() < Duration::from_millis(100 * debug),
-            "{:?} to open",
-            started.elapsed()
-        );
+        assert!(started.elapsed() < open, "{:?} to open", started.elapsed());
         assert!(file.colouring(), "the colours come from a thread");
         // A key while the colours are on their way, and once they arrive.
+        let key = budget(16);
         let started = Instant::now();
         file.move_cursor_to(10_000, 0);
         file.insert('x');
-        assert!(
-            started.elapsed() < Duration::from_millis(16 * debug),
-            "{:?} for a key",
-            started.elapsed()
-        );
+        assert!(started.elapsed() < key, "{:?} for a key", started.elapsed());
         let deadline = Instant::now() + Duration::from_secs(60);
         while file.colouring() {
             assert!(Instant::now() < deadline, "the colours never came");
@@ -971,12 +966,9 @@ mod tests {
             file.highlighted[10_000].len() > 1,
             "coloured once they arrive"
         );
+        let key = budget(16);
         let started = Instant::now();
         file.insert('y');
-        assert!(
-            started.elapsed() < Duration::from_millis(16 * debug),
-            "{:?} for a key",
-            started.elapsed()
-        );
+        assert!(started.elapsed() < key, "{:?} for a key", started.elapsed());
     }
 }

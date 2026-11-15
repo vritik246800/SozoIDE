@@ -1,7 +1,7 @@
 mod animation;
 mod app;
 mod branding;
-#[cfg(all(test, feature = "budgets"))]
+#[cfg(test)]
 mod budgets;
 mod cli;
 mod database;

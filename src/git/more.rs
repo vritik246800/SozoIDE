@@ -509,6 +509,8 @@ mod tests {
             );
         };
         git(&["init", "-q", "-b", "main"]);
+        // The files as written, also where Git for Windows turns `\n` into `\r\n` (E85).
+        git(&["config", "core.autocrlf", "false"]);
         git(&["config", "user.name", "Test"]);
         git(&["config", "user.email", "test@example.com"]);
         git(&["config", "commit.gpgsign", "false"]);
@@ -771,11 +773,13 @@ mod tests {
             .args(["reset", "-q", "--hard"])
             .status()
             .unwrap();
-        let budget = if cfg!(debug_assertions) { 2_000 } else { 200 };
+        let budget = crate::budgets::scaled(std::time::Duration::from_millis(
+            if cfg!(debug_assertions) { 2_000 } else { 200 },
+        ));
         let started = std::time::Instant::now();
         panel.refresh().unwrap();
         let took = started.elapsed();
-        assert!(took.as_millis() < budget, "{took:?}");
+        assert!(took < budget, "{took:?}");
         assert_eq!(panel.commits.len(), 1000);
         panel.more_commits().unwrap();
         assert_eq!(panel.commits.len(), 2000);
