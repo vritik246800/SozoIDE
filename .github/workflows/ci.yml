@@ -104,7 +104,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clangd gdb
-          npm install --global pyright typescript typescript-language-server
+          npm install --global pyright typescript@6 typescript-language-server
           go install golang.org/x/tools/gopls@latest
           go install github.com/go-delve/delve/cmd/dlv@latest
           python -m pip install debugpy

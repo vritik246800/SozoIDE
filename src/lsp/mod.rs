@@ -480,6 +480,9 @@ impl Lsp {
         };
         // Before `initialize` is answered the request waits; the server then answers it or
         // returns an error.
+        if client.ready && client.capabilities.is_null() {
+            return Err(format!("{name} did not start"));
+        }
         if client.ready && !provides(&client.capabilities, provider.0) {
             return Err(format!("{name} does not give {}", provider.1));
         }
@@ -658,6 +661,11 @@ fn handle(
                 return;
             };
             if pending == Pending::Initialize {
+                // A server that refuses to start says why, instead of every request saying
+                // it does not answer that (E84).
+                if let Some(error) = message["error"]["message"].as_str() {
+                    events.push(Event::Message(format!("{name} did not start: {error}")));
+                }
                 client.capabilities = message["result"]["capabilities"].clone();
                 client.initialized();
             } else if let Some(event) = answered(pending, &message, root) {
@@ -1241,6 +1249,39 @@ mod tests {
             [Event::Message(
                 "clangd stopped; it stopped 3 times and is left off".into()
             )]
+        );
+    }
+
+    #[test]
+    fn a_server_that_refuses_to_start_says_why_instead_of_lacking_each_request() {
+        let folder = tempfile::tempdir().unwrap();
+        let command = ["git", "hash-object", "--stdin"].map(str::to_owned);
+        let mut client = Client::start(&command, folder.path()).unwrap();
+        let id = *client.pending.keys().next().unwrap();
+        let refused = json!({"id": id, "error": {"code": -32603, "message": "No TypeScript"}});
+        let mut events = Vec::new();
+        handle(
+            "typescript-language-server",
+            Path::new("/"),
+            &mut client,
+            refused,
+            &mut HashMap::new(),
+            &mut events,
+        );
+        assert_eq!(
+            events,
+            [Event::Message(
+                "typescript-language-server did not start: No TypeScript".into()
+            )]
+        );
+        client.kill();
+        let mut lsp = Lsp::new(folder.path().to_path_buf(), true);
+        let path = folder.path().join("main.ts");
+        lsp.documents.insert(path.clone(), 1);
+        lsp.clients.insert("typescript-language-server", client);
+        assert_eq!(
+            lsp.places(Goal::Definition, &path, 1, 0, 0, "x"),
+            Err("typescript-language-server did not start".into())
         );
     }
 

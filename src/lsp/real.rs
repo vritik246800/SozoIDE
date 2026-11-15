@@ -58,7 +58,8 @@ fn project(
     Some((directory, lsp, path, text))
 }
 
-/// The definition of the symbol at `row`, `column` of `main`, from the real server.
+/// The definition of the symbol at `row`, `column` of `main`, from the real server: in another
+/// file, since a server still loading the project answers with the import (E84).
 fn definition(
     files: &[(&str, &str)],
     main: &str,
@@ -72,7 +73,7 @@ fn definition(
         |lsp| {
             let _ = lsp.places(Goal::Definition, &path, 1, row, column, &line);
         },
-        |event| matches!(event, Event::Places { places, .. } if !places.is_empty()),
+        |event| matches!(event, Event::Places { places, .. } if places.first().is_some_and(|place| place.path != path)),
     )
     .expect("the server never answered with a place");
     let Event::Places { places, .. } = event else {

@@ -30,6 +30,7 @@ fn with_all_panels(home: &Home) -> Sozo {
 
 /// The Explorer's title: the name of the project folder (TODO 7.3.4); the path in the header
 /// has a `/` before it.
+#[cfg(unix)]
 const EXPLORER: &str = " project ";
 
 #[cfg(unix)]

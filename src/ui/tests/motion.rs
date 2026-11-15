@@ -312,15 +312,15 @@ fn the_status_bar_has_segments_and_the_header_keeps_the_folder_name() {
         branch.y,
     );
     assert!(app.show_git && app.focus == Focus::Git);
-    // On a narrow window the path is cut in the middle and the folder's name stays.
-    let name = directory
+    // On a narrow window the path is cut in the middle and the folder's name stays: a long
+    // path on every system (Linux's temporary folder alone fits, E84).
+    let deep = directory
         .path()
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
+        .join("a-folder-with-a-long-name/and-another-long-one/orbit");
+    std::fs::create_dir_all(&deep).unwrap();
+    let mut app = App::new(deep).unwrap();
     let mut narrow = Terminal::new(TestBackend::new(60, 20)).unwrap();
     draw_at(&mut app, &mut narrow, start);
     let header = row(narrow.backend().buffer(), 0);
-    assert!(header.contains(&name) && header.contains('…'), "{header}");
+    assert!(header.contains("orbit") && header.contains('…'), "{header}");
 }

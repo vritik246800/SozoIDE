@@ -758,7 +758,7 @@ pub fn language_plan(
                 "install",
                 "--global",
                 "typescript-language-server",
-                "typescript",
+                "typescript@6",
             ])
         }),
     );
@@ -862,7 +862,7 @@ mod tests {
             [
                 "rust-analyzer: brew install rust-analyzer",
                 "pyright-langserver: npm install --global pyright",
-                "typescript-language-server: npm install --global typescript-language-server typescript",
+                "typescript-language-server: npm install --global typescript-language-server typescript@6",
                 "jdtls: brew install jdtls",
                 "bash-language-server: npm install --global bash-language-server",
                 "yaml-language-server: npm install --global yaml-language-server",
