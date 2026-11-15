@@ -138,9 +138,15 @@ jobs:
           bash packaging/install-tools.sh --check git curl ffmpeg tmux
       - if: matrix.name == 'windows'
         shell: cmd
+        run: call packaging\install-tools.cmd --yes
+      # winget puts the new tools on the user's PATH, which this job's PATH does not see:
+      # read it again from the registry, as a new terminal would.
+      - if: matrix.name == 'windows'
+        shell: pwsh
         run: |
-          call packaging\install-tools.cmd --yes
-          call packaging\install-tools.cmd --check
+          $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+          cmd /c packaging\install-tools.cmd --check
+          exit $LASTEXITCODE
 
   # The times a person feels, measured with nothing else running (TODO 6.1.4).
   budgets:

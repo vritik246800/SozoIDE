@@ -10,4 +10,7 @@ cd "$ROOT"
 if [[ ! -x "$TOOLS/bin/cargo-llvm-cov" ]]; then
     cargo install cargo-llvm-cov --version 0.9.1 --locked --root "$TOOLS"
 fi
-"$TOOLS/bin/cargo-llvm-cov" llvm-cov --bin sozo --summary-only --fail-under-lines "$MINIMUM"
+# The tests of time budgets run in the Test jobs: instrumented, on a small runner, their times
+# say nothing (E83).
+"$TOOLS/bin/cargo-llvm-cov" llvm-cov --bin sozo --summary-only --fail-under-lines "$MINIMUM" \
+    -- --skip within_its_budget --skip a_million_rows

@@ -88,7 +88,7 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
 }
 
 fn utf16(bytes: &[u8], from: fn([u8; 2]) -> u16) -> String {
-    let units = bytes.chunks_exact(2).map(|pair| from([pair[0], pair[1]]));
+    let units = bytes.as_chunks::<2>().0.iter().map(|pair| from(*pair));
     char::decode_utf16(units)
         .map(|unit| unit.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect()

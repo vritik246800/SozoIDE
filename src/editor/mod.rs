@@ -498,14 +498,20 @@ impl OpenFile {
     pub fn selected_text(&self) -> Option<String> {
         let ((start_row, start_column), (end_row, end_column)) = self.selection()?;
         let mut text = String::new();
-        for row in start_row..=end_row {
+        for (row, line) in self
+            .lines
+            .iter()
+            .enumerate()
+            .take(end_row + 1)
+            .skip(start_row)
+        {
             let from = if row == start_row { start_column } else { 0 };
             let to = if row == end_row {
                 end_column
             } else {
                 usize::MAX
             };
-            text.extend(self.lines[row].chars().take(to).skip(from));
+            text.extend(line.chars().take(to).skip(from));
             if row < end_row {
                 text.push('\n');
             }

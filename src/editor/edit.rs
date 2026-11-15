@@ -349,9 +349,9 @@ impl OpenFile {
         let unit = self.indent.unit();
         let added = unit.chars().count();
         self.edit(|file| {
-            for row in first..=last {
-                if !file.lines[row].is_empty() {
-                    file.lines[row].insert_str(0, &unit);
+            for line in file.lines.iter_mut().take(last + 1).skip(first) {
+                if !line.is_empty() {
+                    line.insert_str(0, &unit);
                 }
             }
             if let Some(anchor) = &mut file.anchor {
