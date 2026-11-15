@@ -57,7 +57,7 @@ tui-term = "0.3.4"
 # Columns of characters on screen, for wrapped lines (already in the tree by ratatui).
 unicode-width = "0.2"
 two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
-vt100 = "0.16.2"
+vt100 = "0.18.1"
 wait-timeout = "0.2"
 
 [features]
