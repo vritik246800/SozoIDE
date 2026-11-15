@@ -86,7 +86,7 @@ impl vt100::Callbacks for Replies {
     }
 
     fn set_window_title(&mut self, _: &mut Screen, title: &[u8]) {
-        let title = find::clean(title, 80);
+        let title = find::shell_title(&find::clean(title, 80));
         self.title = (!title.trim().is_empty()).then_some(title);
     }
 

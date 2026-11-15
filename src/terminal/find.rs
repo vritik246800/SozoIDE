@@ -27,6 +27,17 @@ pub(super) fn clean(bytes: &[u8], limit: usize) -> String {
         .collect()
 }
 
+/// What a tab shows of a title: Windows names the window after the shell's program
+/// (`Administrator: C:\Windows\system32\cmd.exe`), which says only `cmd` (E85).
+pub(super) fn shell_title(title: &str) -> String {
+    let title = title.strip_prefix("Administrator: ").unwrap_or(title);
+    if !title.to_ascii_lowercase().ends_with(".exe") {
+        return title.to_owned();
+    }
+    let program = title.rsplit(['\\', '/']).next().unwrap_or(title);
+    program[..program.len() - 4].to_owned()
+}
+
 /// An address the browser may open: `http` or `https`, nothing else (no `javascript:`,
 /// `file:`, `data:`), without spaces or control characters.
 pub fn web_address(text: &str) -> Option<String> {
@@ -243,6 +254,21 @@ pub(super) fn clear(parser: &mut Parser<Replies>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shell_named_by_its_program_shows_only_the_program() {
+        for (title, shown) in [
+            ("Administrator: C:\\Windows\\system32\\cmd.exe", "cmd"),
+            ("C:\\Program Files\\PowerShell\\7\\pwsh.EXE", "pwsh"),
+            ("/usr/bin/tool.exe", "tool"),
+            ("vim notes.md", "vim notes.md"),
+            ("Administrator: npm run dev", "npm run dev"),
+            (".exe", ""),
+            ("", ""),
+        ] {
+            assert_eq!(shell_title(title), shown, "{title:?}");
+        }
+    }
 
     #[test]
     fn links_are_web_addresses_or_files_of_the_project_and_nothing_else() {

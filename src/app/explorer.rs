@@ -1028,23 +1028,22 @@ mod tests {
         assert_eq!(app.entries[10_000].more, 10_000);
 
         // Nothing changed: asking costs the time of one question to the disk per folder.
+        let budget = crate::budgets::scaled(Duration::from_millis(5));
         let started = Instant::now();
         for _ in 0..100 {
             app.watch_disk();
         }
         let each = started.elapsed() / 100;
-        assert!(each < Duration::from_millis(5), "{each:?} for a watch");
+        assert!(each < budget, "{each:?} for a watch");
         assert!(app.entries_reader.is_none());
 
         // Another program adds a file: the watch comes back at once and a thread reads.
         fs::write(root.join("added.txt"), "").unwrap();
+        let budget = crate::budgets::scaled(Duration::from_millis(20));
         let started = Instant::now();
         app.watch_disk();
         let took = started.elapsed();
-        assert!(
-            took < Duration::from_millis(20),
-            "{took:?} to start reading"
-        );
+        assert!(took < budget, "{took:?} to start reading");
         assert!(app.entries_reader.is_some());
         let deadline = Instant::now() + Duration::from_secs(20);
         while app.entries_reader.is_some() {
