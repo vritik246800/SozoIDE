@@ -70,7 +70,10 @@ if (!chrome) {
   console.error('No Chrome found: set CHROME to its path');
   process.exit(1);
 }
-const browser = spawn(chrome, ['--headless=new', '--remote-debugging-port=0', '--no-first-run', '--no-default-browser-check', `--user-data-dir=${resolve(dist, '../.chrome-check')}`, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+// The runners of GitHub (Ubuntu 26) refuse the user namespaces of Chrome's sandbox; there it
+// opens only this site, served from this machine (ERRORS.md E86).
+const sandbox = process.env.CI && process.platform === 'linux' ? ['--no-sandbox'] : [];
+const browser = spawn(chrome, ['--headless=new', ...sandbox, '--remote-debugging-port=0', '--no-first-run', '--no-default-browser-check', `--user-data-dir=${resolve(dist, '../.chrome-check')}`, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
 const endpoint = await new Promise((done, failed) => {
   let text = '';
   browser.stderr.on('data', (chunk) => {
@@ -78,7 +81,8 @@ const endpoint = await new Promise((done, failed) => {
     const found = text.match(/ws:\/\/[^\s]+/);
     if (found) done(found[0]);
   });
-  setTimeout(() => failed(new Error('Chrome did not start')), 20000);
+  browser.on('exit', (code) => failed(new Error(`Chrome stopped (${code}):\n${text.slice(-2000)}`)));
+  setTimeout(() => failed(new Error(`Chrome did not start:\n${text.slice(-2000)}`)), 20000);
 });
 const version = await (await fetch(endpoint.replace('ws://', 'http://').replace(/\/devtools\/browser\/.*/, '/json/version'))).json();
 const socket = new WebSocket(version.webSocketDebuggerUrl);
