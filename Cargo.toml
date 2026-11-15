@@ -50,7 +50,7 @@ tokio-postgres-rustls = { version = "0.14.0", default-features = false, features
 webpki-roots = "1"
 syntect = { version = "5.3", default-features = false, features = ["parsing", "dump-load", "default-syntaxes", "regex-fancy"] }
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "sync"] }
-toml = "0.9"
+toml = "1.2"
 # Delete in the Explorer goes to the system's Trash, Recycle Bin or freedesktop trash (Q95).
 trash = { version = "5.3", default-features = false, features = ["coinit_apartmentthreaded", "freedesktop"] }
 tui-term = "0.3.4"
