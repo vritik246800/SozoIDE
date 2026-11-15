@@ -19,7 +19,7 @@ crossterm = "0.29"
 devicons = "0.6.13"
 directories = "6.0"
 gltf = "1.4"
-hayro = "0.9.0"
+hayro = "0.8.0"
 pdf-extract = "0.12.1"
 glam = "0.34"
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
@@ -39,7 +39,7 @@ rayon = "1.12"
 ratatui-image = { version = "10.0", default-features = false, features = ["crossterm"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.11.1"
+sha2 = "0.10.9"
 # Each database by its own driver, behind `database::store::Pool` (Q98): SQLite by rusqlite with
 # its bundled SQLite, PostgreSQL by tokio-postgres, MySQL by mysql_async; TLS by rustls with ring.
 mysql_async = { version = "0.37.1", default-features = false, features = ["minimal-rust", "rustls-tls", "ring"] }
@@ -57,7 +57,7 @@ tui-term = "0.3.4"
 # Columns of characters on screen, for wrapped lines (already in the tree by ratatui).
 unicode-width = "0.2"
 two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
-vt100 = "0.18.1"
+vt100 = "0.16.2"
 wait-timeout = "0.2"
 
 [features]
